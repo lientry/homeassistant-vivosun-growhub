@@ -5,12 +5,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import CONF_EMAIL, CONF_PASSWORD, DOMAIN, PLATFORMS
 from .coordinator import VivosunCoordinator
 from .exceptions import VivosunGrowhubError
 from .models import RuntimeData
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping

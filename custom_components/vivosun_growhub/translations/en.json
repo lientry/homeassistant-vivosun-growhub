@@ -1,6 +1,5 @@
 {
   "config": {
-    "title": "Vivosun GrowHub",
     "step": {
       "user": {
         "title": "Connect Vivosun account",
@@ -17,7 +16,6 @@
     }
   },
   "options": {
-    "title": "Vivosun GrowHub",
     "step": {
       "init": {
         "title": "Integration options",
