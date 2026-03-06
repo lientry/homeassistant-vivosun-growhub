@@ -1,0 +1,38 @@
+{
+  "config": {
+    "title": "Vivosun GrowHub",
+    "step": {
+      "user": {
+        "title": "Connect Vivosun account",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid authentication",
+      "cannot_connect": "Cannot connect",
+      "unknown": "Unexpected error"
+    }
+  },
+  "options": {
+    "title": "Vivosun GrowHub",
+    "step": {
+      "init": {
+        "title": "Integration options",
+        "data": {
+          "temp_unit": "Temperature unit"
+        }
+      }
+    }
+  },
+  "selector": {
+    "temp_unit": {
+      "options": {
+        "celsius": "Celsius",
+        "fahrenheit": "Fahrenheit"
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "entity": {
+    "fan": {
+      "circulation_fan": {
+        "default": "mdi:fan"
+      },
+      "duct_fan": {
+        "default": "mdi:fan-chevron-down"
+      }
+    },
+    "light": {
+      "grow_light": {
+        "default": "mdi:lightbulb"
+      }
+    },
+    "binary_sensor": {
+      "connected": {
+        "default": "mdi:wifi"
+      }
+    },
+    "sensor": {
+      "inside_vpd": {
+        "default": "mdi:gauge"
+      },
+      "outside_vpd": {
+        "default": "mdi:gauge"
+      }
+    }
+  },
+  "services": {
+    "set_duct_fan_auto_threshold": "mdi:tune-variant"
+  }
+}

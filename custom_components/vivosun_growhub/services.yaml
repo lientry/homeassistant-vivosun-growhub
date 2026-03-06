@@ -1,0 +1,23 @@
+set_duct_fan_auto_threshold:
+  name: Set Duct Fan Auto Threshold
+  description: Set or clear a duct fan auto-threshold field.
+  target:
+    entity:
+      integration: vivosun_growhub
+      domain: fan
+  fields:
+    field:
+      name: Field
+      description: Auto-threshold field key to modify (for example tMin, tMax, hMin, hMax, vpdMin, vpdMax).
+      required: true
+      example: "tMin"
+      selector:
+        text:
+    value:
+      name: Value
+      description: Integer value for the threshold field. Set to null or omit to clear the field.
+      required: false
+      example: 350
+      selector:
+        number:
+          step: 1

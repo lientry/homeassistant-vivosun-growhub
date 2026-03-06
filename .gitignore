@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Recon data and local debug artifacts (may contain secrets/device details)
+docs/recon/
+docs/e2e_fixes/
+scripts/recon/

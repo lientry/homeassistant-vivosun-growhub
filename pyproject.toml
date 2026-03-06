@@ -1,0 +1,67 @@
+[project]
+name = "homeassistant-vivosun-growhub"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["scripts/recon"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "RUF",    # ruff-specific
+    "ANN",    # flake8-annotations
+    "ASYNC",  # flake8-async
+    "LOG",    # flake8-logging
+    "G",      # flake8-logging-format
+    "T20",    # flake8-print (no print statements)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["custom_components.vivosun_growhub"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+exclude = ["scripts/recon"]
+
+[[tool.mypy.overrides]]
+module = ["websockets.*", "aiohttp.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["homeassistant", "homeassistant.*", "voluptuous"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = [
+    "custom_components.vivosun_growhub.api",
+    "custom_components.vivosun_growhub.aws_auth",
+    "custom_components.vivosun_growhub.mqtt_client",
+    "custom_components.vivosun_growhub.shadow",
+    "custom_components.vivosun_growhub.coordinator",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
