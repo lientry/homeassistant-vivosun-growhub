@@ -37,6 +37,17 @@ What this integration is not:
 - It does not offer local/offline control
 - It currently targets one GrowHub device per config entry
 
+## Compatibility
+
+Verified working:
+
+- GrowHub `E42A`
+
+Likely compatible but not yet confirmed:
+
+- GrowHub `E42`
+- GrowHub `E42A+`
+
 ## Quick Start
 
 ### Manual install
