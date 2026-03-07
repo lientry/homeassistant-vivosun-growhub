@@ -43,6 +43,15 @@ Verified working:
 
 - GrowHub `E42A`
 
+Supported Home Assistant version:
+
+- `2026.3.0` or newer
+
+Notes:
+
+- The integration has been tested against current Home Assistant releases, not older 2024-era builds
+- Older Home Assistant versions may partially work, but they are not a supported target for this repository
+
 Likely compatible but not yet confirmed:
 
 - GrowHub `E42`
