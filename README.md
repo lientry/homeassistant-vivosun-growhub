@@ -198,7 +198,7 @@ Use `Download diagnostics` on the integration device page. Sensitive fields are 
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT.
 
 ## Trademark note
 

@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release archive
+        uses: thedoctor0/zip-release@0.7.6
+        with:
+          type: zip
+          directory: custom_components/vivosun_growhub
+          filename: vivosun_growhub.zip
+          exclusions: "*.git* .editorconfig *.vscode* *.github*"
+
+      - name: Upload release archive
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: custom_components/vivosun_growhub/vivosun_growhub.zip
+          asset_name: vivosun_growhub.zip
+          tag: ${{ github.ref }}
+          overwrite: true
