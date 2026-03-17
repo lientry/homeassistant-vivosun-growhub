@@ -47,6 +47,21 @@ class DeviceInfo:
     name: str
     online: bool
     scene_id: int
+    device_type: str = "unknown"
+
+
+def infer_device_type(name: str, client_id: str = "") -> str:
+    """Infer device type from name and client_id keywords."""
+    combined = f"{name} {client_id}".lower()
+    if "growhub" in combined or "controller" in combined:
+        return "controller"
+    if "aerostream" in combined or "humidifier" in combined:
+        return "humidifier"
+    if "aeroflux" in combined or "heater" in combined:
+        return "heater"
+    if "growcam" in combined or "camera" in combined:
+        return "camera"
+    return "unknown"
 
 
 @dataclass(slots=True, frozen=True)

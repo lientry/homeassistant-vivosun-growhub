@@ -1,4 +1,4 @@
-"""Unit tests for WP-6 VivosunCoordinator lifecycle orchestration."""
+"""Unit tests for VivosunCoordinator lifecycle orchestration."""
 
 from __future__ import annotations
 
@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, ClassVar
 import pytest
 
 from custom_components.vivosun_growhub.aws_auth import AWS_CREDENTIAL_REFRESH_SKEW, AwsCredentials
-from custom_components.vivosun_growhub.const import TOPIC_CHANNEL_APP, TOPIC_SHADOW_GET, TOPIC_SHADOW_GET_ACCEPTED
+from custom_components.vivosun_growhub.const import (
+    TOPIC_CHANNEL_APP,
+    TOPIC_SHADOW_GET_ACCEPTED,
+    TOPIC_SHADOW_UPDATE,
+)
 from custom_components.vivosun_growhub.coordinator import VivosunCoordinator
 from custom_components.vivosun_growhub.exceptions import VivosunAuthError, VivosunResponseError
 from custom_components.vivosun_growhub.models import AuthTokens, AwsIdentity, DeviceInfo
@@ -128,7 +132,7 @@ class _MqttStub:
         self.client_id = client_id
         self._callbacks: list[object] = []
         self.published: list[tuple[str, bytes, int, bool]] = []
-        self.shadow_updates: list[tuple[bytes, int, bool]] = []
+        self.subscribed_topics: list[tuple[str, int]] = []
         self.connected = False
         self.connect_calls = 0
         self.disconnect_calls = 0
@@ -159,8 +163,8 @@ class _MqttStub:
     async def publish(self, topic: str, payload: bytes, qos: int = 0, retain: bool = False) -> None:
         self.published.append((topic, payload, qos, retain))
 
-    async def publish_shadow_update(self, payload: bytes, qos: int = 0, retain: bool = False) -> None:
-        self.shadow_updates.append((payload, qos, retain))
+    async def subscribe(self, topics: list[tuple[str, int]]) -> None:
+        self.subscribed_topics.extend(topics)
 
     async def emit(self, topic: str, payload: bytes, qos: int = 0) -> None:
         for callback in self._callbacks:
@@ -223,7 +227,8 @@ async def test_coordinator_bootstrap_order_and_initial_shadow_get(
     coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
     await coordinator.async_start()
 
-    assert api.calls == ["login", "get_devices", "get_aws_identity", "get_point_log"]
+    # 2 devices → 2 point_log calls
+    assert api.calls == ["login", "get_devices", "get_aws_identity", "get_point_log", "get_point_log"]
     assert aws_auth.calls[:2] == ["get_credentials_for_identity", "sigv4_sign_mqtt_url"]
     assert coordinator.device.device_id == "device-1"
     assert coordinator.device.scene_id == 66078
@@ -233,7 +238,9 @@ async def test_coordinator_bootstrap_order_and_initial_shadow_get(
     assert isinstance(mqtt.client_id, str)
     assert mqtt.client_id.startswith("ha-vivosun-")
     assert mqtt.client_id != mqtt.thing
-    assert mqtt.published == [(TOPIC_SHADOW_GET.format(thing="thing-1"), b"{}", 0, False)]
+    # Initial shadow get for both devices
+    shadow_get_publishes = [p for p in mqtt.published if "/shadow/get" in p[0] and not p[0].endswith("/accepted")]
+    assert len(shadow_get_publishes) == 2
 
     await coordinator.async_shutdown()
 
@@ -252,6 +259,7 @@ async def test_coordinator_mqtt_callbacks_update_shadow_and_sensor_state(
     await coordinator.async_start()
 
     mqtt = _MqttStub.instances[0]
+    device_id = coordinator.device.device_id
     shadow_payload = {
         "state": {
             "reported": {
@@ -268,17 +276,19 @@ async def test_coordinator_mqtt_callbacks_update_shadow_and_sensor_state(
         TOPIC_CHANNEL_APP.format(topic_prefix=coordinator.device.topic_prefix),
         b'{"inTemp":2300,"outTemp":1900}',
     )
-    coordinator._sensor_state.update({"inHumi": 5500})
+    coordinator._sensor_states.setdefault(device_id, {}).update({"inHumi": 5500})
 
-    shadow = coordinator.data["shadow"]
+    shadows = coordinator.data["shadows"]
     sensors = coordinator.data["sensors"]
-    assert isinstance(shadow, dict)
-    assert isinstance(sensors, dict)
-    assert shadow["light"]["level"] == 42
-    assert shadow["connection"]["connected"] is True
-    assert sensors["inTemp"] == 2300
-    assert sensors["outTemp"] == 1900
-    assert sensors["inHumi"] == 5500
+    device_shadow = shadows[device_id]
+    device_sensors = sensors[device_id]
+    assert isinstance(device_shadow, dict)
+    assert isinstance(device_sensors, dict)
+    assert device_shadow["light"]["level"] == 42
+    assert device_shadow["connection"]["connected"] is True
+    assert device_sensors["inTemp"] == 2300
+    assert device_sensors["outTemp"] == 1900
+    assert device_sensors["inHumi"] == 5500
 
     await coordinator.async_shutdown()
 
@@ -369,15 +379,18 @@ async def test_coordinator_publish_shadow_update_encodes_payload_variants(
     coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
     await coordinator.async_start()
     mqtt = _MqttStub.instances[0]
+    initial_count = len(mqtt.published)
 
     await coordinator.async_publish_shadow_update({"state": {"desired": {"light": {"manu": {"lv": 60}}}}})
     await coordinator.async_publish_shadow_update('{"state":{"desired":{"light":{"manu":{"lv":10}}}}}')
     await coordinator.async_publish_shadow_update(b'{"state":{"desired":{"light":{"manu":{"lv":5}}}}}')
 
-    assert mqtt.shadow_updates == [
-        (b'{"state":{"desired":{"light":{"manu":{"lv":60}}}}}', 0, False),
-        (b'{"state":{"desired":{"light":{"manu":{"lv":10}}}}}', 0, False),
-        (b'{"state":{"desired":{"light":{"manu":{"lv":5}}}}}', 0, False),
+    shadow_update_topic = TOPIC_SHADOW_UPDATE.format(thing=coordinator.device.client_id)
+    update_publishes = mqtt.published[initial_count:]
+    assert update_publishes == [
+        (shadow_update_topic, b'{"state":{"desired":{"light":{"manu":{"lv":60}}}}}', 0, False),
+        (shadow_update_topic, b'{"state":{"desired":{"light":{"manu":{"lv":10}}}}}', 0, False),
+        (shadow_update_topic, b'{"state":{"desired":{"light":{"manu":{"lv":5}}}}}', 0, False),
     ]
 
     await coordinator.async_shutdown()
@@ -458,5 +471,5 @@ async def test_coordinator_start_idempotent_and_select_device_requires_entries(
     empty_aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
     _patch_coordinator_deps(monkeypatch, empty_api, empty_aws_auth)
     empty_coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
-    with pytest.raises(VivosunResponseError, match="No GrowHub devices found"):
+    with pytest.raises(VivosunResponseError, match="No devices found"):
         await empty_coordinator.async_start()

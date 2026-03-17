@@ -18,18 +18,35 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 
+_DEV_ID = "dev-1"
+
+
 class _StubCoordinator:
     def __init__(self) -> None:
-        self.data: dict[str, object] = {"sensors": {"inTemp": 2500}}
-        self.device = DeviceInfo(
-            device_id="dev-1",
+        self._device = DeviceInfo(
+            device_id=_DEV_ID,
             client_id="vivosun-VSCTLE42A-acc-dev-1",
             topic_prefix="prefix",
             name="GrowHub",
             online=True,
             scene_id=66078,
+            device_type="controller",
         )
+        self.data: dict[str, object] = {"sensors": {_DEV_ID: {"inTemp": 2500}}}
         self.is_mqtt_connected = True
+
+    @property
+    def device(self) -> DeviceInfo:
+        return self._device
+
+    @property
+    def devices(self) -> list[DeviceInfo]:
+        return [self._device]
+
+    def get_device(self, device_id: str) -> DeviceInfo | None:
+        if device_id == self._device.device_id:
+            return self._device
+        return None
 
 
 async def test_options_flow_updates_temp_unit_and_sensor_unit(
@@ -93,7 +110,6 @@ async def test_options_flow_same_values_do_not_trigger_reload(
 
 async def test_options_flow_entry_accessor_falls_back_to_base_config_entry() -> None:
     entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
-    flow = VivosunGrowhubOptionsFlow()
-    flow.config_entry = entry  # type: ignore[attr-defined]
+    flow = VivosunGrowhubOptionsFlow(config_entry=entry)
 
     assert flow._entry() is entry

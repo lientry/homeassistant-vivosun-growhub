@@ -27,7 +27,11 @@ from custom_components.vivosun_growhub.const import (
     SENSOR_KEY_OUTSIDE_HUMI,
     SENSOR_KEY_OUTSIDE_TEMP,
     SENSOR_KEY_OUTSIDE_VPD,
+    SENSOR_KEY_PROBE_HUMI,
+    SENSOR_KEY_PROBE_TEMP,
+    SENSOR_KEY_PROBE_VPD,
     SENSOR_KEY_RSSI,
+    SENSOR_KEY_WATER_LEVEL,
     SENSOR_UNAVAILABLE_SENTINEL,
     SHADOW_NAME,
     TOPIC_CHANNEL_APP,
@@ -79,8 +83,12 @@ async def test_constants_match_wp1_spec() -> None:
         SENSOR_KEY_OUTSIDE_VPD,
         SENSOR_KEY_CORE_TEMP,
         SENSOR_KEY_RSSI,
+        SENSOR_KEY_PROBE_TEMP,
+        SENSOR_KEY_PROBE_HUMI,
+        SENSOR_KEY_PROBE_VPD,
+        SENSOR_KEY_WATER_LEVEL,
     )
-    assert len(SENSOR_CHANNEL_KEYS) == 8
+    assert len(SENSOR_CHANNEL_KEYS) == 12
     assert SENSOR_UNAVAILABLE_SENTINEL == -6666
 
     assert MODE_MANUAL == 0
@@ -89,7 +97,10 @@ async def test_constants_match_wp1_spec() -> None:
     assert MODE_PLAN == 2
 
     assert DESIRED_LEVEL_PATH_NOTE == "desired.<key>.manu.lv"
-    assert PLATFORMS == [Platform.LIGHT, Platform.FAN, Platform.SENSOR, Platform.BINARY_SENSOR]
+    assert PLATFORMS == [
+        Platform.LIGHT, Platform.FAN, Platform.SENSOR,
+        Platform.BINARY_SENSOR, Platform.HUMIDIFIER, Platform.CLIMATE,
+    ]
 
 
 async def test_async_setup_entry_and_unload_lifecycle(hass: HomeAssistant, monkeypatch: MonkeyPatch) -> None:

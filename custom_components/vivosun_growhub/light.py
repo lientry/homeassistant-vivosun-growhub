@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar, cast
 
 from homeassistant.components.light import ColorMode, LightEntity
@@ -10,10 +9,12 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, LIGHT_MIN_BRIGHTNESS
 from .coordinator import VivosunCoordinator
-from .entity_helpers import build_device_info, is_entity_available
+from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .shadow import build_light_level_payload, build_light_spectrum_payload
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.device_registry import DeviceInfo
@@ -35,7 +36,11 @@ async def async_setup_entry(
     coordinator = _runtime(hass, entry).coordinator
     if coordinator is None:
         return
-    async_add_entities([VivosunLightEntity(coordinator)])
+
+    controllers = [d for d in coordinator.devices if d.device_type == "controller"]
+    if not controllers:
+        return
+    async_add_entities([VivosunLightEntity(coordinator, controllers[0].device_id)])
 
 
 class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  # type: ignore[misc]
@@ -46,10 +51,11 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
     _attr_supported_color_modes: ClassVar[set[ColorMode]] = {ColorMode.BRIGHTNESS}
     _attr_color_mode = ColorMode.BRIGHTNESS
 
-    def __init__(self, coordinator: VivosunCoordinator) -> None:
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
         """Initialize the light entity."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"vivosun_growhub_{coordinator.device.device_id}_light"
+        self._device_id = device_id
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_light"
 
     @property
     def is_on(self) -> bool:
@@ -68,12 +74,12 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
     @property
     def available(self) -> bool:
         """Return entity availability."""
-        return is_entity_available(self.coordinator)
+        return is_entity_available(self.coordinator, self._device_id)
 
     @property
     def device_info(self) -> DeviceInfo:
         """Return shared device info for this entity."""
-        return build_device_info(self.coordinator)
+        return build_device_info(self.coordinator, self._device_id)
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
@@ -98,33 +104,29 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
         brightness = kwargs.get("brightness")
         if isinstance(brightness, int):
             level = round(brightness * 100 / 255)
-            await self.coordinator.async_publish_shadow_update(build_light_level_payload(level))
+            await self.coordinator.async_publish_shadow_update(
+                build_light_level_payload(level), device_id=self._device_id
+            )
         elif self._light_level() in (None, 0):
-            await self.coordinator.async_publish_shadow_update(build_light_level_payload(LIGHT_MIN_BRIGHTNESS))
+            await self.coordinator.async_publish_shadow_update(
+                build_light_level_payload(LIGHT_MIN_BRIGHTNESS), device_id=self._device_id
+            )
 
         spectrum = kwargs.get("spectrum")
         if isinstance(spectrum, int):
-            await self.coordinator.async_publish_shadow_update(build_light_spectrum_payload(spectrum))
+            await self.coordinator.async_publish_shadow_update(
+                build_light_spectrum_payload(spectrum), device_id=self._device_id
+            )
 
     async def async_turn_off(self, **kwargs: object) -> None:
         """Turn off the light."""
         _ = kwargs
-        await self.coordinator.async_publish_shadow_update(build_light_level_payload(0))
+        await self.coordinator.async_publish_shadow_update(
+            build_light_level_payload(0), device_id=self._device_id
+        )
 
     def _light_state(self) -> Mapping[str, object]:
-        data = self.coordinator.data
-        if not isinstance(data, Mapping):
-            return {}
-
-        shadow = data.get("shadow")
-        if not isinstance(shadow, Mapping):
-            return {}
-
-        light = shadow.get("light")
-        if not isinstance(light, Mapping):
-            return {}
-
-        return cast("Mapping[str, object]", light)
+        return shadow_slice(self.coordinator, self._device_id, "light")
 
     def _light_level(self) -> int | None:
         level = self._light_state().get("level")

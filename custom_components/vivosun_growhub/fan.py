@@ -13,7 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
-from .entity_helpers import build_device_info, is_entity_available
+from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .shadow import (
     build_cfan_level_payload,
     build_cfan_night_mode_payload,
@@ -57,10 +57,15 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
+    controllers = [d for d in coordinator.devices if d.device_type == "controller"]
+    if not controllers:
+        return
+    device_id = controllers[0].device_id
+
     async_add_entities(
         [
-            VivosunCirculationFanEntity(coordinator),
-            VivosunDuctFanEntity(coordinator),
+            VivosunCirculationFanEntity(coordinator, device_id),
+            VivosunDuctFanEntity(coordinator, device_id),
         ]
     )
 
@@ -82,10 +87,15 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
     _attr_speed_count = 10
     _enable_turn_on_off_backwards_compatibility = FanEntityFeature(0) == _EXPLICIT_TURN_FEATURES
 
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
+        """Initialize the fan base entity."""
+        super().__init__(coordinator)
+        self._device_id = device_id
+
     @property
     def available(self) -> bool:
         """Return entity availability."""
-        return is_entity_available(self.coordinator)
+        return is_entity_available(self.coordinator, self._device_id)
 
     @property
     def is_on(self) -> bool:
@@ -96,7 +106,7 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
     @property
     def device_info(self) -> DeviceInfo:
         """Return shared device info for this entity."""
-        return build_device_info(self.coordinator)
+        return build_device_info(self.coordinator, self._device_id)
 
     async def async_turn_on(
         self,
@@ -184,10 +194,10 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
     )
     _attr_preset_modes = _CIRCULATION_PRESETS
 
-    def __init__(self, coordinator: VivosunCoordinator) -> None:
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
         """Initialize the circulation fan entity."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"vivosun_growhub_{coordinator.device.device_id}_cfan"
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_cfan"
 
     @property
     def percentage(self) -> int | None:
@@ -215,28 +225,37 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
     async def async_set_percentage(self, percentage: int) -> None:
         """Set circulation fan speed percentage."""
         await self.coordinator.async_publish_shadow_update(
-            build_cfan_level_payload(cfan_percentage_to_shadow(percentage))
+            build_cfan_level_payload(cfan_percentage_to_shadow(percentage)),
+            device_id=self._device_id,
         )
 
     async def async_oscillate(self, oscillating: bool) -> None:
         """Set circulation fan oscillation."""
-        await self.coordinator.async_publish_shadow_update(build_cfan_oscillate_payload(oscillating))
+        await self.coordinator.async_publish_shadow_update(
+            build_cfan_oscillate_payload(oscillating), device_id=self._device_id
+        )
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set circulation fan preset mode."""
         if preset_mode == "natural_wind":
-            await self.coordinator.async_publish_shadow_update(build_cfan_level_payload(200))
+            await self.coordinator.async_publish_shadow_update(
+                build_cfan_level_payload(200), device_id=self._device_id
+            )
             return
         if preset_mode == "night":
-            await self.coordinator.async_publish_shadow_update(build_cfan_night_mode_payload(True))
+            await self.coordinator.async_publish_shadow_update(
+                build_cfan_night_mode_payload(True), device_id=self._device_id
+            )
             return
         if preset_mode == "normal":
-            await self.coordinator.async_publish_shadow_update(build_cfan_night_mode_payload(False))
+            await self.coordinator.async_publish_shadow_update(
+                build_cfan_night_mode_payload(False), device_id=self._device_id
+            )
             return
         raise ValueError(f"Unsupported circulation fan preset: {preset_mode}")
 
     def _cfan_state(self) -> Mapping[str, object]:
-        return _shadow_slice(self.coordinator, "cFan")
+        return shadow_slice(self.coordinator, self._device_id, "cFan")
 
 
 class VivosunDuctFanEntity(_VivosunFanBase):
@@ -250,10 +269,10 @@ class VivosunDuctFanEntity(_VivosunFanBase):
     )
     _attr_preset_modes = _DUCT_PRESETS
 
-    def __init__(self, coordinator: VivosunCoordinator) -> None:
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
         """Initialize the duct fan entity."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"vivosun_growhub_{coordinator.device.device_id}_dfan"
+        super().__init__(coordinator, device_id)
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_dfan"
 
     @property
     def percentage(self) -> int | None:
@@ -295,47 +314,38 @@ class VivosunDuctFanEntity(_VivosunFanBase):
     async def async_set_percentage(self, percentage: int) -> None:
         """Set duct fan speed percentage."""
         await self.coordinator.async_publish_shadow_update(
-            build_dfan_level_payload(dfan_percentage_to_shadow(percentage))
+            build_dfan_level_payload(dfan_percentage_to_shadow(percentage)),
+            device_id=self._device_id,
         )
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set duct fan preset mode."""
         if preset_mode == "auto":
-            await self.coordinator.async_publish_shadow_update(build_dfan_auto_mode_payload(True))
+            await self.coordinator.async_publish_shadow_update(
+                build_dfan_auto_mode_payload(True), device_id=self._device_id
+            )
             return
         if preset_mode == "manual":
-            await self.coordinator.async_publish_shadow_update(build_dfan_auto_mode_payload(False))
+            await self.coordinator.async_publish_shadow_update(
+                build_dfan_auto_mode_payload(False), device_id=self._device_id
+            )
             return
         raise ValueError(f"Unsupported duct fan preset: {preset_mode}")
 
     async def async_set_auto_threshold(self, field: str, value: int | None = None) -> None:
         """Set a duct fan auto-threshold field."""
-        await self.coordinator.async_publish_shadow_update(build_dfan_auto_threshold_payload(field, value))
+        await self.coordinator.async_publish_shadow_update(
+            build_dfan_auto_threshold_payload(field, value), device_id=self._device_id
+        )
 
     def _dfan_state(self) -> Mapping[str, object]:
-        return _shadow_slice(self.coordinator, "dFan")
+        return shadow_slice(self.coordinator, self._device_id, "dFan")
 
     def _dfan_auto_state(self) -> Mapping[str, object]:
         auto = self._dfan_state().get("auto")
         if isinstance(auto, Mapping):
             return cast("Mapping[str, object]", auto)
         return {}
-
-
-def _shadow_slice(coordinator: VivosunCoordinator, key: str) -> Mapping[str, object]:
-    data = coordinator.data
-    if not isinstance(data, Mapping):
-        return {}
-
-    shadow = data.get("shadow")
-    if not isinstance(shadow, Mapping):
-        return {}
-
-    value = shadow.get(key)
-    if not isinstance(value, Mapping):
-        return {}
-
-    return cast("Mapping[str, object]", value)
 
 
 def _as_int(value: object) -> int | None:

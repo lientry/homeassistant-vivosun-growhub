@@ -2,7 +2,7 @@
 
 # Home Assistant Vivosun GrowHub
 
-Unofficial Home Assistant integration for Vivosun GrowHub lighting, fan control, and climate telemetry.
+Unofficial Home Assistant integration for Vivosun GrowHub lighting, fan, humidifier, heater, and climate telemetry.
 
 ![Status](https://img.shields.io/badge/Status-Working-green)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Custom%20Integration-blue)
@@ -20,7 +20,7 @@ Unofficial Home Assistant integration for Vivosun GrowHub lighting, fan control,
 
 ## Why This Integration?
 
-This integration connects a Vivosun GrowHub account to Home Assistant and exposes the device as native `light`, `fan`, `sensor`, and `binary_sensor` entities.
+This integration connects a Vivosun account to Home Assistant and exposes supported devices as native `light`, `fan`, `sensor`, `binary_sensor`, `humidifier`, and `climate` entities.
 
 What is working:
 
@@ -28,6 +28,8 @@ What is working:
 - Grow light control with correct minimum brightness handling
 - Circulation fan control with 10-step mapping and `natural_wind` preset
 - Duct fan control with 10-step mapping and auto-threshold service
+- AeroStream humidifier control with manual/auto modes and water level telemetry
+- AeroFlux heater control with target temperature and manual/auto modes
 - Climate telemetry polling for inside/outside temperature, humidity, and VPD
 - Redacted diagnostics export
 
@@ -35,13 +37,16 @@ What this integration is not:
 
 - It is not an official Vivosun integration
 - It does not offer local/offline control
-- It currently targets one GrowHub device per config entry
+- It still has some controller-specific assumptions while the repo transitions toward full multi-device support
 
 ## Compatibility
 
 Verified working:
 
 - GrowHub `E42A`
+- AeroStream `H19`
+- AeroFlux `W70`
+- VGrow Smart Grow Box
 
 Supported Home Assistant version:
 
@@ -77,7 +82,7 @@ Likely compatible but not yet confirmed:
 ### Requirements
 
 - Home Assistant with support for custom integrations
-- A Vivosun account with at least one GrowHub device
+- A Vivosun account with at least one supported device
 - Outbound internet access from Home Assistant to the Vivosun API and AWS IoT endpoints
 
 ### Configuration
@@ -111,6 +116,18 @@ Fan behavior is device-accurate rather than linear:
 - Plain `turn_on` defaults to the lowest safe level, not maximum speed
 - The circulation fan also exposes `natural_wind` as a preset mode
 
+### Humidifier
+
+- `humidifier.aerostream_<device>_humidifier`
+- Supports `manual` and `auto` modes
+- Exposes current probe humidity and target humidity
+
+### Climate
+
+- `climate.aeroflux_<device>_heater`
+- Supports `off` and `heat`
+- Exposes current probe temperature and target temperature
+
 ### Sensors
 
 Enabled by default:
@@ -121,6 +138,10 @@ Enabled by default:
 - Outside Temperature
 - Outside Humidity
 - Outside VPD
+- Probe Temperature
+- Probe Humidity
+- Probe VPD
+- Water Level
 
 Disabled by default:
 
@@ -129,7 +150,7 @@ Disabled by default:
 
 ### Binary sensor
 
-- `binary_sensor.growhub_<device>_connected`
+- One per supported device, for example `binary_sensor.growhub_<device>_connected`
 
 ### Entity service
 
@@ -142,7 +163,7 @@ Fields:
 
 ## Runtime Model
 
-This integration is hybrid.
+This integration is hybrid and multi-device aware.
 
 ### MQTT shadow path
 
@@ -170,7 +191,7 @@ Climate telemetry is fetched from:
 
 - `POST /iot/data/getPointLog`
 
-The coordinator polls recent samples and uses the newest point-log row as the current climate snapshot.
+The coordinator polls recent samples for each discovered device and uses the newest point-log row as that device's current sensor snapshot.
 
 For implementation details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -181,7 +202,7 @@ For implementation details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Check:
 
 - Home Assistant can reach the Vivosun API and AWS IoT websocket endpoint
-- the account has at least one GrowHub device
+- the account has at least one supported Vivosun device
 - the device appears online in the Vivosun app
 
 ### Controls work oddly

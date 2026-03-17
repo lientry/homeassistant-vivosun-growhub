@@ -26,7 +26,11 @@ def _tokens(*, user_id: str = "user-1") -> AuthTokens:
 
 
 async def test_config_flow_user_success_creates_entry(hass: object, enable_custom_integrations: None) -> None:
-    with patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login:
+    with (
+        patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login,
+        patch("custom_components.vivosun_growhub.async_setup_entry", return_value=True),
+        patch("custom_components.vivosun_growhub.async_setup", return_value=True),
+    ):
         login.return_value = _tokens(user_id="account-123")
 
         init_result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
@@ -38,9 +42,10 @@ async def test_config_flow_user_success_creates_entry(hass: object, enable_custo
             user_input={"email": "user@example.com", "password": "secret"},
         )
 
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "user@example.com"
-    assert result["data"] == {"email": "user@example.com", "password": "secret"}
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert result["title"] == "user@example.com"
+        assert result["data"] == {"email": "user@example.com", "password": "secret"}
+        await hass.async_block_till_done()
 
 
 async def test_config_flow_user_invalid_auth_maps_error(hass: object, enable_custom_integrations: None) -> None:
@@ -111,7 +116,11 @@ async def test_config_flow_duplicate_user_id_aborts(hass: object, enable_custom_
     )
     existing.add_to_hass(hass)
 
-    with patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login:
+    with (
+        patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login,
+        patch("custom_components.vivosun_growhub.async_setup_entry", return_value=True),
+        patch("custom_components.vivosun_growhub.async_setup", return_value=True),
+    ):
         login.return_value = _tokens(user_id="account-123")
         init_result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
         result = await hass.config_entries.flow.async_configure(

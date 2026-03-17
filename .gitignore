@@ -14,3 +14,6 @@ build/
 docs/recon/
 docs/e2e_fixes/
 scripts/recon/
+
+# HA dev environment (Docker, config, runtime state)
+.dev/

@@ -261,6 +261,10 @@ async def test_get_point_log_returns_latest_sensor_snapshot() -> None:
         "outTemp": 1985,
         "outHumi": 5449,
         "outVpd": 105,
+        "pTemp": None,
+        "pHumi": None,
+        "pVpd": None,
+        "waterLv": None,
         "coreTemp": 3839,
         "rssi": -35,
     }

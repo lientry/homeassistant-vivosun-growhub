@@ -14,22 +14,31 @@ This split exists because control and reported device state are available throug
 
 1. `POST /user/login`
 2. `GET /iot/device/getTotalList`
-3. `POST /iot/user/awsIdentity`
-4. Cognito credential exchange
-5. MQTT websocket connect
-6. Shadow `get`
-7. Initial point-log refresh
+3. select all supported MQTT-capable devices
+4. `POST /iot/user/awsIdentity`
+5. Cognito credential exchange
+6. MQTT websocket connect
+7. initial shadow `get` for each device
+8. initial point-log refresh for each device
 
 The coordinator owns this sequence in [coordinator.py](../custom_components/vivosun_growhub/coordinator.py).
 
 ## Device selection
 
-The integration currently selects one GrowHub device per config entry.
+The coordinator now keeps all supported MQTT-capable devices discovered for the account.
 
-Selection is deterministic:
+Selection rules:
 
-- devices are sorted by `(device_id, client_id, topic_prefix)`
-- the first device is chosen
+- devices without `client_id` are filtered out
+- camera devices are filtered out
+- remaining devices are sorted by `(device_id, client_id, topic_prefix)`
+- the first controller is still treated as the primary controller for controller-specific platforms such as `light` and `fan`
+
+Supported device typing is currently inferred heuristically from device name and client ID:
+
+- GrowHub / controller
+- AeroStream / humidifier
+- AeroFlux / heater
 
 ## MQTT path
 
@@ -38,6 +47,8 @@ Selection is deterministic:
 - light state and control
 - circulation fan state and control
 - duct fan state and control
+- humidifier state and control
+- heater state and control
 - connection state
 
 ### Topics
@@ -76,9 +87,28 @@ Only reported, accepted, and documents payloads are merged into the visible stat
 
 ### Polling model
 
-- a recent window is requested
-- the newest row from `iotDataLogList` becomes the current sensor snapshot
+- a recent window is requested per discovered device
+- the newest row from `iotDataLogList` becomes that device's current sensor snapshot
 - the coordinator refresh interval is 90 seconds
+
+## Coordinator snapshot
+
+The coordinator publishes a per-device snapshot shaped like:
+
+- `devices`
+- `shadows`
+- `sensors`
+- `mqtt_connected`
+
+`shadows` and `sensors` are keyed by `device_id`.
+
+## Platform model
+
+- `light.py` and `fan.py` currently target the primary controller device.
+- `binary_sensor.py` creates one connectivity entity per discovered device.
+- `sensor.py` creates entities based on device type.
+- `humidifier.py` binds to humidifier shadow state plus probe telemetry.
+- `climate.py` binds to heater shadow state plus probe telemetry.
 
 ## Device-specific mappings
 

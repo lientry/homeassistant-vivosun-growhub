@@ -22,11 +22,15 @@ from .const import (
     SENSOR_KEY_OUTSIDE_HUMI,
     SENSOR_KEY_OUTSIDE_TEMP,
     SENSOR_KEY_OUTSIDE_VPD,
+    SENSOR_KEY_PROBE_HUMI,
+    SENSOR_KEY_PROBE_TEMP,
+    SENSOR_KEY_PROBE_VPD,
     SENSOR_KEY_RSSI,
+    SENSOR_KEY_WATER_LEVEL,
     SENSOR_UNAVAILABLE_SENTINEL,
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
-from .models import AuthTokens, AwsIdentity, DeviceInfo
+from .models import AuthTokens, AwsIdentity, DeviceInfo, infer_device_type
 from .redaction import redact_identifier, sanitize_mapping_for_debug
 
 if TYPE_CHECKING:
@@ -68,24 +72,29 @@ class VivosunApiClient:
         return tokens
 
     async def get_devices(self, tokens: AuthTokens) -> list[DeviceInfo]:
-        """Fetch account devices from getTotalList."""
+        """Fetch account devices from getTotalList (all categories)."""
         _LOGGER.info("Fetching Vivosun devices")
         data = await self._request_json("GET", API_DEVICE_LIST_PATH, headers=self._auth_headers(tokens))
         device_group = self._expect_mapping(data, "deviceGroup")
-        grow_devices = self._expect_sequence(device_group, "GROW")
 
         devices: list[DeviceInfo] = []
-        for index, item in enumerate(grow_devices):
-            device = self._expect_mapping_item(item, f"deviceGroup.GROW[{index}]")
-            device_info = DeviceInfo(
-                device_id=self._expect_str(device, "deviceId"),
-                client_id=self._expect_str(device, "clientId"),
-                topic_prefix=self._expect_str(device, "topicPrefix"),
-                name=self._expect_str(device, "name"),
-                online=self._optional_int(device, "onlineStatus", default=0) == 1,
-                scene_id=self._expect_scene_id(device),
-            )
-            devices.append(device_info)
+        for category_key, category_devices in device_group.items():
+            if not isinstance(category_devices, list):
+                continue
+            for index, item in enumerate(category_devices):
+                device = self._expect_mapping_item(item, f"deviceGroup.{category_key}[{index}]")
+                name = self._expect_str(device, "name")
+                client_id = self._expect_str(device, "clientId")
+                device_info = DeviceInfo(
+                    device_id=self._expect_str(device, "deviceId"),
+                    client_id=client_id,
+                    topic_prefix=self._expect_str(device, "topicPrefix"),
+                    name=name,
+                    online=self._optional_int(device, "onlineStatus", default=0) == 1,
+                    scene_id=self._expect_scene_id(device),
+                    device_type=infer_device_type(name, client_id),
+                )
+                devices.append(device_info)
 
         _LOGGER.debug("Fetched %d devices", len(devices))
         return devices
@@ -159,6 +168,10 @@ class VivosunApiClient:
             SENSOR_KEY_OUTSIDE_TEMP,
             SENSOR_KEY_OUTSIDE_HUMI,
             SENSOR_KEY_OUTSIDE_VPD,
+            SENSOR_KEY_PROBE_TEMP,
+            SENSOR_KEY_PROBE_HUMI,
+            SENSOR_KEY_PROBE_VPD,
+            SENSOR_KEY_WATER_LEVEL,
             SENSOR_KEY_CORE_TEMP,
             SENSOR_KEY_RSSI,
         ):

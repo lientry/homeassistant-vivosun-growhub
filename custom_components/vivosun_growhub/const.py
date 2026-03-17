@@ -30,6 +30,8 @@ TOPIC_CHANNEL_APP = "{topic_prefix}/channel/app"
 SHADOW_KEY_LIGHT = "light"
 SHADOW_KEY_CIRCULATOR_FAN = "cFan"
 SHADOW_KEY_DUCT_FAN = "dFan"
+SHADOW_KEY_HUMIDIFIER = "hmdf"
+SHADOW_KEY_HEATER = "heat"
 SHADOW_KEY_CONNECTED = "connected"
 SHADOW_KEY_MODE = "mode"
 SHADOW_KEY_MANU = "manu"
@@ -47,6 +49,10 @@ SENSOR_KEY_OUTSIDE_HUMI = "outHumi"
 SENSOR_KEY_OUTSIDE_VPD = "outVpd"
 SENSOR_KEY_CORE_TEMP = "coreTemp"
 SENSOR_KEY_RSSI = "rssi"
+SENSOR_KEY_PROBE_TEMP = "pTemp"
+SENSOR_KEY_PROBE_HUMI = "pHumi"
+SENSOR_KEY_PROBE_VPD = "pVpd"
+SENSOR_KEY_WATER_LEVEL = "waterLv"
 
 SENSOR_CHANNEL_KEYS = (
     SENSOR_KEY_INSIDE_TEMP,
@@ -57,10 +63,15 @@ SENSOR_CHANNEL_KEYS = (
     SENSOR_KEY_OUTSIDE_VPD,
     SENSOR_KEY_CORE_TEMP,
     SENSOR_KEY_RSSI,
+    SENSOR_KEY_PROBE_TEMP,
+    SENSOR_KEY_PROBE_HUMI,
+    SENSOR_KEY_PROBE_VPD,
+    SENSOR_KEY_WATER_LEVEL,
 )
 
 SENSOR_UNAVAILABLE_SENTINEL = -6666
 TEMP_SCALE_FACTOR = 100
+WATER_LEVEL_SCALE_FACTOR = 1000
 LIGHT_MIN_BRIGHTNESS = 25
 
 CFAN_LEVEL_MAP: tuple[int, ...] = (0, 44, 51, 60, 64, 70, 75, 80, 85, 90, 100)
@@ -78,4 +89,11 @@ SHADOW_ROOT_REPORTED = "reported"
 # Write-path guardrail: direct control payloads should use desired.<key>.manu.lv.
 DESIRED_LEVEL_PATH_NOTE = "desired.<key>.manu.lv"
 
-PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.FAN, Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.LIGHT,
+    Platform.FAN,
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.HUMIDIFIER,
+    Platform.CLIMATE,
+]
