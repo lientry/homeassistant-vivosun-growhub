@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, cast
+from urllib.parse import quote
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 
@@ -70,6 +71,11 @@ class VivosunGrowCamEntity(Camera):  # type: ignore[misc]
         self._attr_model = device.name
 
     @property
+    def available(self) -> bool:
+        """Return True only when camera credentials and IP are present."""
+        return bool(self._camera_ip and self._device.camera_username and self._device.camera_password)
+
+    @property
     def use_stream_for_stills(self) -> bool:
         """Use the stream as the still-image source."""
         return True
@@ -92,4 +98,4 @@ class VivosunGrowCamEntity(Camera):  # type: ignore[misc]
         password = self._device.camera_password
         if not username or not password:
             return None
-        return f"rtsp://{username}:{password}@{self._camera_ip}:554/"
+        return f"rtsp://{quote(username, safe='')}:{quote(password, safe='')}@{self._camera_ip}:554/"

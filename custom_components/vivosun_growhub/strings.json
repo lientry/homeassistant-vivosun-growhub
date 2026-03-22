@@ -31,6 +31,9 @@
           "camera_ip": "Camera IP"
         }
       }
+    },
+    "error": {
+      "invalid_ip": "Invalid IP address"
     }
   },
   "selector": {

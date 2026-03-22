@@ -65,7 +65,7 @@ async def async_get_config_entry_diagnostics(
     except RuntimeError:
         device = None
     snapshot = coordinator.data if isinstance(coordinator.data, dict) else {}
-    shadow = snapshot.get("shadow")
+    shadow = None
     sensors = snapshot.get("sensors")
     if device is not None:
         shadows = snapshot.get("shadows")
