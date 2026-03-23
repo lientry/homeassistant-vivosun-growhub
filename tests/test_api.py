@@ -107,7 +107,7 @@ async def test_login_auth_failure_message_raises_auth_error() -> None:
 
 
 async def test_get_devices_maps_grow_group_to_device_info() -> None:
-    """get_devices() should parse deviceGroup.GROW and map onlineStatus to bool."""
+    """get_devices() should parse supported entries and infer device type."""
     payload = {
         "code": 0,
         "success": True,
@@ -117,7 +117,7 @@ async def test_get_devices_maps_grow_group_to_device_info() -> None:
                 "GROW": [
                     {
                         "deviceId": "device-1",
-                        "clientId": "vivosun-device-1",
+                        "clientId": "vivosun-VSCTLE42A-account-device-1",
                         "topicPrefix": "vivosun/topic/1",
                         "name": "GrowHub A",
                         "onlineStatus": 1,
@@ -125,9 +125,9 @@ async def test_get_devices_maps_grow_group_to_device_info() -> None:
                     },
                     {
                         "deviceId": "device-2",
-                        "clientId": "vivosun-device-2",
+                        "clientId": "vivosun-VSHUMH19-account-device-2",
                         "topicPrefix": "vivosun/topic/2",
-                        "name": "GrowHub B",
+                        "name": "AeroStream H19",
                         "onlineStatus": 0,
                         "scene": {"sceneId": 1002},
                     },
@@ -145,9 +145,11 @@ async def test_get_devices_maps_grow_group_to_device_info() -> None:
     assert devices[0].device_id == "device-1"
     assert devices[0].online is True
     assert devices[0].scene_id == 1001
+    assert devices[0].device_type == "controller"
     assert devices[1].device_id == "device-2"
     assert devices[1].online is False
     assert devices[1].scene_id == 1002
+    assert devices[1].device_type == "humidifier"
 
     headers = cast("dict[str, str]", mock_session.calls[0]["kwargs"]["headers"])
     assert headers["login-token"] == "login-token-value"
@@ -165,7 +167,7 @@ async def test_get_devices_coerces_string_online_status() -> None:
                 "GROW": [
                     {
                         "deviceId": "device-1",
-                        "clientId": "vivosun-device-1",
+                        "clientId": "vivosun-VSCTLE42A-account-device-1",
                         "topicPrefix": "vivosun/topic/1",
                         "name": "GrowHub A",
                         "onlineStatus": "1",
@@ -195,7 +197,7 @@ async def test_get_devices_handles_missing_online_status() -> None:
                 "GROW": [
                     {
                         "deviceId": "device-1",
-                        "clientId": "vivosun-device-1",
+                        "clientId": "vivosun-VSCTLE42A-account-device-1",
                         "topicPrefix": "vivosun/topic/1",
                         "name": "GrowHub A",
                         "scene": {"sceneId": 1001},
@@ -211,6 +213,74 @@ async def test_get_devices_handles_missing_online_status() -> None:
 
     assert len(devices) == 1
     assert devices[0].online is False
+
+
+async def test_get_devices_skips_non_iot_entries_without_required_mqtt_fields() -> None:
+    payload = {
+        "code": 0,
+        "success": True,
+        "message": "success",
+        "data": {
+            "deviceGroup": {
+                "GROW": [
+                    {
+                        "deviceId": "device-1",
+                        "clientId": "vivosun-VSCTLE42A-account-device-1",
+                        "topicPrefix": "vivosun/topic/1",
+                        "name": "Custom Tent Name",
+                        "scene": {"sceneId": 1001},
+                    }
+                ],
+                "DHMDF": [
+                    {
+                        "deviceId": "dumb-1",
+                        "name": "Dehumidifier",
+                    }
+                ],
+            }
+        },
+    }
+    session = cast("aiohttp.ClientSession", _MockSession(responses=[_MockResponse(status=200, payload=payload)]))
+    client = VivosunApiClient(session)
+
+    devices = await client.get_devices(_valid_tokens())
+
+    assert len(devices) == 1
+    assert devices[0].device_id == "device-1"
+    assert devices[0].device_type == "controller"
+
+
+async def test_get_devices_extracts_camera_lan_credentials() -> None:
+    """get_devices() should parse camera LAN credentials from setting.jf."""
+    payload = {
+        "code": 0,
+        "success": True,
+        "message": "success",
+        "data": {
+            "deviceGroup": {
+                "GROW": [
+                    {
+                        "deviceId": "camera-1",
+                        "clientId": "",
+                        "topicPrefix": "",
+                        "name": "GrowCam C4",
+                        "onlineStatus": 1,
+                        "scene": {"sceneId": 1001},
+                        "setting": {"jf": {"devUser": "abjd", "devPass": "4kt5em"}},
+                    },
+                ]
+            }
+        },
+    }
+    session = cast("aiohttp.ClientSession", _MockSession(responses=[_MockResponse(status=200, payload=payload)]))
+    client = VivosunApiClient(session)
+
+    devices = await client.get_devices(_valid_tokens())
+
+    assert len(devices) == 1
+    assert devices[0].device_type == "camera"
+    assert devices[0].camera_username == "abjd"
+    assert devices[0].camera_password == "4kt5em"
 
 
 async def test_get_point_log_returns_latest_sensor_snapshot() -> None:
@@ -261,6 +331,10 @@ async def test_get_point_log_returns_latest_sensor_snapshot() -> None:
         "outTemp": 1985,
         "outHumi": 5449,
         "outVpd": 105,
+        "pTemp": None,
+        "pHumi": None,
+        "pVpd": None,
+        "waterLv": None,
         "coreTemp": 3839,
         "rssi": -35,
     }

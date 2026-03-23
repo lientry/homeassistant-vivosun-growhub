@@ -24,11 +24,15 @@ class _CoordinatorStub:
             name="GrowHub A",
             online=True,
             scene_id=66078,
+            device_type="controller",
         )
         self.data: dict[str, object] = {
             "mqtt_connected": True,
-            "shadow": {"light": {"level": 42}, "connection": {"connected": True}},
-            "sensors": {"inTemp": 2500, "inHumi": 5123},
+            "devices": {self.device.device_id: self.device},
+            "shadows": {
+                self.device.device_id: {"light": {"level": 42}, "connection": {"connected": True}}
+            },
+            "sensors": {self.device.device_id: {"inTemp": 2500, "inHumi": 5123}},
         }
         self.is_mqtt_connected = True
         self.last_update_success_time = datetime(2026, 3, 5, 12, 0, tzinfo=UTC)

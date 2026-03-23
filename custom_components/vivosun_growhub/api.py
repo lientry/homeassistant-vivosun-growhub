@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -22,15 +23,19 @@ from .const import (
     SENSOR_KEY_OUTSIDE_HUMI,
     SENSOR_KEY_OUTSIDE_TEMP,
     SENSOR_KEY_OUTSIDE_VPD,
+    SENSOR_KEY_PROBE_HUMI,
+    SENSOR_KEY_PROBE_TEMP,
+    SENSOR_KEY_PROBE_VPD,
     SENSOR_KEY_RSSI,
+    SENSOR_KEY_WATER_LEVEL,
     SENSOR_UNAVAILABLE_SENTINEL,
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
-from .models import AuthTokens, AwsIdentity, DeviceInfo
+from .models import AuthTokens, AwsIdentity, DeviceInfo, infer_device_type
 from .redaction import redact_identifier, sanitize_mapping_for_debug
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
 _LOGGER = logging.getLogger(__name__)
 _AUTH_MESSAGE_MARKERS = ("auth", "credential", "forbidden", "invalid", "login", "password", "token", "unauthorized")
@@ -68,27 +73,88 @@ class VivosunApiClient:
         return tokens
 
     async def get_devices(self, tokens: AuthTokens) -> list[DeviceInfo]:
-        """Fetch account devices from getTotalList."""
+        """Fetch account devices from getTotalList (all categories)."""
         _LOGGER.info("Fetching Vivosun devices")
         data = await self._request_json("GET", API_DEVICE_LIST_PATH, headers=self._auth_headers(tokens))
         device_group = self._expect_mapping(data, "deviceGroup")
-        grow_devices = self._expect_sequence(device_group, "GROW")
 
         devices: list[DeviceInfo] = []
-        for index, item in enumerate(grow_devices):
-            device = self._expect_mapping_item(item, f"deviceGroup.GROW[{index}]")
-            device_info = DeviceInfo(
-                device_id=self._expect_str(device, "deviceId"),
-                client_id=self._expect_str(device, "clientId"),
-                topic_prefix=self._expect_str(device, "topicPrefix"),
-                name=self._expect_str(device, "name"),
-                online=self._optional_int(device, "onlineStatus", default=0) == 1,
-                scene_id=self._expect_scene_id(device),
-            )
-            devices.append(device_info)
+        for category_key, category_devices in device_group.items():
+            if not isinstance(category_devices, list):
+                continue
+            for index, item in enumerate(category_devices):
+                device = self._expect_mapping_item(item, f"deviceGroup.{category_key}[{index}]")
+                device_info = self._parse_device_entry(device, category_key=category_key, index=index)
+                if device_info is None:
+                    continue
+                devices.append(device_info)
 
         _LOGGER.debug("Fetched %d devices", len(devices))
         return devices
+
+    def _parse_device_entry(
+        self,
+        device: Mapping[str, object],
+        *,
+        category_key: str,
+        index: int,
+    ) -> DeviceInfo | None:
+        """Parse a device entry, skipping unsupported/non-IoT categories safely."""
+        name = self._optional_str(device, "name")
+        if name is None:
+            self._log_skipped_device(device, category_key=category_key, index=index)
+            return None
+
+        device_id = self._optional_str(device, "deviceId")
+        scene_id = self._optional_scene_id(device)
+        if device_id is None or scene_id is None:
+            self._log_skipped_device(device, category_key=category_key, index=index)
+            return None
+
+        client_id = self._optional_str(device, "clientId")
+        topic_prefix = self._optional_str(device, "topicPrefix")
+        device_type = infer_device_type(name, client_id or "")
+        camera_username, camera_password = self._extract_camera_credentials(device)
+
+        if device_type != "camera" and (client_id is None or topic_prefix is None):
+            self._log_skipped_device(device, category_key=category_key, index=index)
+            return None
+
+        return DeviceInfo(
+            device_id=device_id,
+            client_id=client_id or "",
+            topic_prefix=topic_prefix or "",
+            name=name,
+            online=self._optional_int(device, "onlineStatus", default=0) == 1,
+            scene_id=scene_id,
+            device_type=device_type,
+            camera_username=camera_username,
+            camera_password=camera_password,
+        )
+
+    def _extract_camera_credentials(self, device: Mapping[str, object]) -> tuple[str | None, str | None]:
+        """Extract camera LAN credentials from setting.jf when present."""
+        setting = device.get("setting")
+        if not isinstance(setting, Mapping):
+            return None, None
+        jf = setting.get("jf")
+        if not isinstance(jf, Mapping):
+            return None, None
+        username = jf.get("devUser")
+        password = jf.get("devPass")
+        return (
+            username if isinstance(username, str) and username else None,
+            password if isinstance(password, str) and password else None,
+        )
+
+    def _log_skipped_device(self, device: Mapping[str, object], *, category_key: str, index: int) -> None:
+        """Log a skipped device entry without crashing account bootstrap."""
+        _LOGGER.debug(
+            "Skipping deviceGroup.%s[%d] because required fields are missing: %s",
+            category_key,
+            index,
+            sanitize_mapping_for_debug(dict(device)),
+        )
 
     async def get_aws_identity(self, tokens: AuthTokens, aws_identity_id: str = "") -> AwsIdentity:
         """Fetch AWS identity payload used for Cognito exchange in later phases."""
@@ -159,6 +225,10 @@ class VivosunApiClient:
             SENSOR_KEY_OUTSIDE_TEMP,
             SENSOR_KEY_OUTSIDE_HUMI,
             SENSOR_KEY_OUTSIDE_VPD,
+            SENSOR_KEY_PROBE_TEMP,
+            SENSOR_KEY_PROBE_HUMI,
+            SENSOR_KEY_PROBE_VPD,
+            SENSOR_KEY_WATER_LEVEL,
             SENSOR_KEY_CORE_TEMP,
             SENSOR_KEY_RSSI,
         ):
@@ -252,6 +322,12 @@ class VivosunApiClient:
             raise VivosunResponseError(f"Expected string at '{key}'")
         return value
 
+    def _optional_str(self, payload: Mapping[str, object], key: str) -> str | None:
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+        return None
+
     def _expect_int(self, payload: Mapping[str, object], key: str) -> int:
         value = payload.get(key)
         if isinstance(value, bool) or not isinstance(value, int):
@@ -285,6 +361,17 @@ class VivosunApiClient:
         if not isinstance(scene, dict):
             raise VivosunResponseError("Expected object at 'scene'")
         return self._expect_int(scene, "sceneId")
+
+    def _optional_scene_id(self, payload: Mapping[str, object]) -> int | None:
+        scene = payload.get("scene")
+        if not isinstance(scene, dict):
+            return None
+        scene_id = scene.get("sceneId")
+        if isinstance(scene_id, bool):
+            return None
+        if isinstance(scene_id, int):
+            return scene_id
+        return None
 
     def _optional_sensor_int(self, payload: Mapping[str, object], key: str) -> int | None:
         value = self._optional_int(payload, key, default=SENSOR_UNAVAILABLE_SENTINEL)

@@ -26,8 +26,17 @@ def _tokens(*, user_id: str = "user-1") -> AuthTokens:
 
 
 async def test_config_flow_user_success_creates_entry(hass: object, enable_custom_integrations: None) -> None:
-    with patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login:
+    with (
+        patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login,
+        patch(
+            "custom_components.vivosun_growhub.config_flow.VivosunApiClient.get_devices",
+            new_callable=AsyncMock,
+        ) as get_devices,
+        patch("custom_components.vivosun_growhub.async_setup_entry", return_value=True),
+        patch("custom_components.vivosun_growhub.async_setup", return_value=True),
+    ):
         login.return_value = _tokens(user_id="account-123")
+        get_devices.return_value = []
 
         init_result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
         assert init_result["type"] is FlowResultType.FORM
@@ -38,9 +47,131 @@ async def test_config_flow_user_success_creates_entry(hass: object, enable_custo
             user_input={"email": "user@example.com", "password": "secret"},
         )
 
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "user@example.com"
-    assert result["data"] == {"email": "user@example.com", "password": "secret"}
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert result["title"] == "user@example.com"
+        assert result["data"] == {"email": "user@example.com", "password": "secret", "has_camera": False}
+        await hass.async_block_till_done()
+
+
+async def test_config_flow_user_with_camera_shows_optional_camera_step(
+    hass: object, enable_custom_integrations: None
+) -> None:
+    from custom_components.vivosun_growhub.models import DeviceInfo
+
+    with (
+        patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login,
+        patch(
+            "custom_components.vivosun_growhub.config_flow.VivosunApiClient.get_devices",
+            new_callable=AsyncMock,
+        ) as get_devices,
+        patch("custom_components.vivosun_growhub.async_setup_entry", return_value=True),
+        patch("custom_components.vivosun_growhub.async_setup", return_value=True),
+    ):
+        login.return_value = _tokens(user_id="account-123")
+        get_devices.return_value = [
+            DeviceInfo(
+                device_id="camera-1",
+                client_id="",
+                topic_prefix="",
+                name="GrowCam C4",
+                online=True,
+                scene_id=1001,
+                device_type="camera",
+            )
+        ]
+
+        init_result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+        result = await hass.config_entries.flow.async_configure(
+            init_result["flow_id"],
+            user_input={"email": "user@example.com", "password": "secret"},
+        )
+
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "camera"
+
+
+async def test_config_flow_camera_step_can_store_optional_ip(
+    hass: object, enable_custom_integrations: None
+) -> None:
+    from custom_components.vivosun_growhub.models import DeviceInfo
+
+    with (
+        patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login,
+        patch(
+            "custom_components.vivosun_growhub.config_flow.VivosunApiClient.get_devices",
+            new_callable=AsyncMock,
+        ) as get_devices,
+        patch("custom_components.vivosun_growhub.async_setup_entry", return_value=True),
+        patch("custom_components.vivosun_growhub.async_setup", return_value=True),
+    ):
+        login.return_value = _tokens(user_id="account-123")
+        get_devices.return_value = [
+            DeviceInfo(
+                device_id="camera-1",
+                client_id="",
+                topic_prefix="",
+                name="GrowCam C4",
+                online=True,
+                scene_id=1001,
+                device_type="camera",
+            )
+        ]
+
+        init_result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+        camera_result = await hass.config_entries.flow.async_configure(
+            init_result["flow_id"],
+            user_input={"email": "user@example.com", "password": "secret"},
+        )
+        result = await hass.config_entries.flow.async_configure(
+            camera_result["flow_id"],
+            user_input={"camera_ip": "10.0.15.202"},
+        )
+
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert result["data"] == {"email": "user@example.com", "password": "secret", "has_camera": True}
+        assert result["options"] == {"camera_ip": "10.0.15.202"}
+
+
+async def test_config_flow_camera_step_rejects_invalid_ip(
+    hass: object, enable_custom_integrations: None
+) -> None:
+    from custom_components.vivosun_growhub.models import DeviceInfo
+
+    with (
+        patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login,
+        patch(
+            "custom_components.vivosun_growhub.config_flow.VivosunApiClient.get_devices",
+            new_callable=AsyncMock,
+        ) as get_devices,
+        patch("custom_components.vivosun_growhub.async_setup_entry", return_value=True),
+        patch("custom_components.vivosun_growhub.async_setup", return_value=True),
+    ):
+        login.return_value = _tokens(user_id="account-123")
+        get_devices.return_value = [
+            DeviceInfo(
+                device_id="camera-1",
+                client_id="",
+                topic_prefix="",
+                name="GrowCam C4",
+                online=True,
+                scene_id=1001,
+                device_type="camera",
+            )
+        ]
+
+        init_result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+        camera_result = await hass.config_entries.flow.async_configure(
+            init_result["flow_id"],
+            user_input={"email": "user@example.com", "password": "secret"},
+        )
+        result = await hass.config_entries.flow.async_configure(
+            camera_result["flow_id"],
+            user_input={"camera_ip": "not-an-ip"},
+        )
+
+        assert result["type"] is FlowResultType.FORM
+        assert result["step_id"] == "camera"
+        assert result["errors"] == {"camera_ip": "invalid_ip"}
 
 
 async def test_config_flow_user_invalid_auth_maps_error(hass: object, enable_custom_integrations: None) -> None:
@@ -111,8 +242,17 @@ async def test_config_flow_duplicate_user_id_aborts(hass: object, enable_custom_
     )
     existing.add_to_hass(hass)
 
-    with patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login:
+    with (
+        patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login,
+        patch(
+            "custom_components.vivosun_growhub.config_flow.VivosunApiClient.get_devices",
+            new_callable=AsyncMock,
+        ) as get_devices,
+        patch("custom_components.vivosun_growhub.async_setup_entry", return_value=True),
+        patch("custom_components.vivosun_growhub.async_setup", return_value=True),
+    ):
         login.return_value = _tokens(user_id="account-123")
+        get_devices.return_value = []
         init_result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
         result = await hass.config_entries.flow.async_configure(
             init_result["flow_id"],

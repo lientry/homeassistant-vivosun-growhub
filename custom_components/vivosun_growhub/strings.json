@@ -7,6 +7,13 @@
           "email": "Email",
           "password": "Password"
         }
+      },
+      "camera": {
+        "title": "Configure GrowCam",
+        "description": "A GrowCam device was found on this account. You can optionally enter its LAN IP now. You can find the IP in the Vivosun app and add it later from the integration settings.",
+        "data": {
+          "camera_ip": "Camera IP"
+        }
       }
     },
     "error": {
@@ -20,9 +27,13 @@
       "init": {
         "title": "Integration options",
         "data": {
-          "temp_unit": "Temperature unit"
+          "temp_unit": "Temperature unit",
+          "camera_ip": "Camera IP"
         }
       }
+    },
+    "error": {
+      "invalid_ip": "Invalid IP address"
     }
   },
   "selector": {

@@ -26,21 +26,26 @@ async def test_smoke_full_bootstrap_chain_and_control_roundtrip(
     await coordinator.async_start()
     mqtt = _MqttStub.instances[0]
 
-    assert api.calls == ["login", "get_devices", "get_aws_identity", "get_point_log"]
+    assert api.calls == ["login", "get_devices", "get_aws_identity", "get_point_log", "get_point_log"]
     assert aws_auth.calls[:2] == ["get_credentials_for_identity", "sigv4_sign_mqtt_url"]
     assert mqtt.connected is True
     assert mqtt.published[0][0].endswith("/get")
 
+    device_id = coordinator.device.device_id
     await coordinator.async_publish_shadow_update({"state": {"desired": {"light": {"manu": {"lv": 66}}}}})
     await mqtt.emit(
         f"$aws/things/{coordinator.device.client_id}/shadow/update/accepted",
         b'{"state":{"reported":{"light":{"mode":0,"lv":66,"manu":{"lv":66,"spec":20}}}}}',
     )
 
-    shadow = coordinator.data["shadow"]
-    assert isinstance(shadow, dict)
-    assert shadow["light"]["level"] == 66
-    assert mqtt.shadow_updates[-1][0] == b'{"state":{"desired":{"light":{"manu":{"lv":66}}}}}'
+    shadows = coordinator.data["shadows"]
+    assert isinstance(shadows, dict)
+    device_shadow = shadows[device_id]
+    assert isinstance(device_shadow, dict)
+    assert device_shadow["light"]["level"] == 66
+    # Last published message is the shadow update control payload
+    last_published = mqtt.published[-1]
+    assert last_published[1] == b'{"state":{"desired":{"light":{"manu":{"lv":66}}}}}'
 
     await coordinator.async_shutdown()
 

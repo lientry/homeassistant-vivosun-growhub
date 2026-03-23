@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
@@ -10,7 +9,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
-from .entity_helpers import build_device_info, is_entity_available
+from .entity_helpers import build_device_info, shadow_slice
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -35,46 +34,42 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    async_add_entities([VivosunConnectionBinarySensorEntity(coordinator)])
+    entities = [
+        VivosunConnectionBinarySensorEntity(coordinator, device.device_id)
+        for device in coordinator.devices
+    ]
+    async_add_entities(entities)
 
 
 class VivosunConnectionBinarySensorEntity(CoordinatorEntity[VivosunCoordinator], BinarySensorEntity):  # type: ignore[misc]
-    """Representation of GrowHub cloud connected state."""
+    """Representation of a Vivosun device cloud connected state."""
 
     _attr_has_entity_name = True
     _attr_name = "Connected"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
-    def __init__(self, coordinator: VivosunCoordinator) -> None:
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
         """Initialize the connectivity entity."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"vivosun_growhub_{coordinator.device.device_id}_connected"
+        self._device_id = device_id
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_connected"
 
     @property
     def available(self) -> bool:
         """Return entity availability."""
-        return is_entity_available(self.coordinator)
+        return bool(self.coordinator.is_mqtt_connected)
 
     @property
     def device_info(self) -> DeviceInfo:
         """Return shared device info for this entity."""
-        return build_device_info(self.coordinator)
+        return build_device_info(self.coordinator, self._device_id)
 
     @property
     def is_on(self) -> bool | None:
-        """Return True when GrowHub reports connected, False when disconnected."""
-        data = self.coordinator.data
-        if not isinstance(data, Mapping):
+        """Return True when the device reports connected, False when disconnected."""
+        connection = shadow_slice(self.coordinator, self._device_id, "connection")
+        if not connection:
             return None
-
-        shadow = data.get("shadow")
-        if not isinstance(shadow, Mapping):
-            return None
-
-        connection = shadow.get("connection")
-        if not isinstance(connection, Mapping):
-            return None
-
         connected = connection.get("connected")
         if isinstance(connected, bool):
             return connected

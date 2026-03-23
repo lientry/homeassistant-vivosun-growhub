@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from .const import (
     CFAN_LEVEL_MAP,
@@ -16,6 +16,8 @@ from .const import (
     SHADOW_KEY_CIRCULATOR_FAN,
     SHADOW_KEY_CONNECTED,
     SHADOW_KEY_DUCT_FAN,
+    SHADOW_KEY_HEATER,
+    SHADOW_KEY_HUMIDIFIER,
     SHADOW_KEY_LEVEL,
     SHADOW_KEY_LIGHT,
     SHADOW_KEY_MANU,
@@ -35,6 +37,8 @@ _SUPPORTED_REPORTED_ROOT_KEYS: frozenset[str] = frozenset(
         "light",
         "cFan",
         "dFan",
+        "hmdf",
+        "heat",
         "plan",
         "cali",
         "btDev",
@@ -121,6 +125,26 @@ class DuctFanState(TypedDict):
     auto: DuctFanAutoState
 
 
+class HumidifierState(TypedDict, total=False):
+    """Normalized humidifier state slice from shadow.reported."""
+
+    on: bool
+    level: int | None
+    mode: int | None
+    water_warning: bool
+    target_humidity: int | None
+
+
+class HeaterState(TypedDict, total=False):
+    """Normalized heater state slice from shadow.reported."""
+
+    on: bool
+    level: int | None
+    mode: int | None
+    state: int | None
+    target_temp: int | None
+
+
 class ConnectionState(TypedDict):
     """Normalized root connectivity state from shadow.reported."""
 
@@ -133,6 +157,8 @@ class ShadowV1State(TypedDict, total=False):
     light: LightState
     cFan: CirculatorFanState
     dFan: DuctFanState
+    hmdf: HumidifierState
+    heat: HeaterState
     connection: ConnectionState
     reported_supported: dict[str, object]
 
@@ -146,6 +172,12 @@ class ChannelSensorState(TypedDict, total=False):
     outTemp: int | None
     outHumi: int | None
     outVpd: int | None
+    pTemp: int | None
+    pHumi: int | None
+    pVpd: int | None
+    waterLv: int | None
+    coreTemp: int | None
+    rssi: int | None
 
 
 def parse_shadow_document(document: dict[str, object]) -> ShadowV1State:
@@ -173,6 +205,14 @@ def parse_reported_fragment(reported_fragment: dict[str, object]) -> ShadowV1Sta
     dfan_raw = _as_dict(reported_fragment.get(SHADOW_KEY_DUCT_FAN))
     if dfan_raw is not None:
         parsed["dFan"] = _parse_dfan_state(dfan_raw)
+
+    hmdf_raw = _as_dict(reported_fragment.get(SHADOW_KEY_HUMIDIFIER))
+    if hmdf_raw is not None:
+        parsed["hmdf"] = _parse_hmdf_state(hmdf_raw)
+
+    heat_raw = _as_dict(reported_fragment.get(SHADOW_KEY_HEATER))
+    if heat_raw is not None:
+        parsed["heat"] = _parse_heat_state(heat_raw)
 
     if SHADOW_KEY_CONNECTED in reported_fragment:
         parsed["connection"] = ConnectionState(connected=_as_bool(reported_fragment.get(SHADOW_KEY_CONNECTED)))
@@ -295,6 +335,56 @@ def build_dfan_auto_threshold_payload(field: str, value: int | None) -> dict[str
     return _build_desired_payload(SHADOW_KEY_DUCT_FAN, {SHADOW_KEY_AUTO: {field: normalized_value}})
 
 
+def build_hmdf_on_payload(on: bool) -> dict[str, object]:
+    """Build desired humidifier on/off payload."""
+    return _build_desired_payload(SHADOW_KEY_HUMIDIFIER, {"on": int(on)})
+
+
+def build_hmdf_level_payload(level: int) -> dict[str, object]:
+    """Build desired humidifier manual level payload."""
+    if level < 0 or level > 10:
+        raise ValueError("Humidifier level must be in range 0..10")
+    return _build_desired_payload(
+        SHADOW_KEY_HUMIDIFIER,
+        {SHADOW_KEY_MODE: 0, SHADOW_KEY_MANU: {SHADOW_KEY_LEVEL: level}},
+    )
+
+
+def build_hmdf_mode_payload(mode: int) -> dict[str, object]:
+    """Build desired humidifier mode payload (0=manual, 1=auto)."""
+    return _build_desired_payload(SHADOW_KEY_HUMIDIFIER, {SHADOW_KEY_MODE: mode})
+
+
+def build_hmdf_target_payload(target_humidity: int) -> dict[str, object]:
+    """Build desired humidifier auto target humidity (raw, scaled by 100)."""
+    return _build_desired_payload(SHADOW_KEY_HUMIDIFIER, {"targetHumi": target_humidity})
+
+
+def build_heat_on_payload(on: bool) -> dict[str, object]:
+    """Build desired heater on/off payload."""
+    return _build_desired_payload(SHADOW_KEY_HEATER, {"on": int(on)})
+
+
+def build_heat_level_payload(level: int) -> dict[str, object]:
+    """Build desired heater manual level payload."""
+    if level < 0 or level > 10:
+        raise ValueError("Heater level must be in range 0..10")
+    return _build_desired_payload(
+        SHADOW_KEY_HEATER,
+        {SHADOW_KEY_MODE: 0, SHADOW_KEY_MANU: {SHADOW_KEY_LEVEL: level}},
+    )
+
+
+def build_heat_mode_payload(mode: int) -> dict[str, object]:
+    """Build desired heater mode payload (0=manual, 1=auto)."""
+    return _build_desired_payload(SHADOW_KEY_HEATER, {SHADOW_KEY_MODE: mode})
+
+
+def build_heat_target_payload(target_temp: int) -> dict[str, object]:
+    """Build desired heater auto target temperature (raw, scaled by 100)."""
+    return _build_desired_payload(SHADOW_KEY_HEATER, {"targetTemp": target_temp})
+
+
 def _extract_reported(document: dict[str, object]) -> dict[str, object]:
     state = _as_dict(document.get(SHADOW_ROOT_STATE))
     if state is not None:
@@ -383,21 +473,50 @@ def _parse_dfan_state(dfan: dict[str, object]) -> DuctFanState:
     )
 
 
+def _parse_hmdf_state(hmdf: dict[str, object]) -> HumidifierState:
+    manu = _as_dict(hmdf.get(SHADOW_KEY_MANU))
+    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
+    level = _as_int(hmdf.get(SHADOW_KEY_LEVEL))
+    if level is None:
+        level = manual_level
+
+    return HumidifierState(
+        on=_as_bool(hmdf.get("on")),
+        level=level,
+        mode=_as_int(hmdf.get(SHADOW_KEY_MODE)),
+        water_warning=_as_bool(hmdf.get("waterWarn")),
+        target_humidity=_normalize_sentinel_int(_as_int(hmdf.get("targetHumi"))),
+    )
+
+
+def _parse_heat_state(heat: dict[str, object]) -> HeaterState:
+    manu = _as_dict(heat.get(SHADOW_KEY_MANU))
+    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
+    level = _as_int(heat.get(SHADOW_KEY_LEVEL))
+    if level is None:
+        level = manual_level
+
+    return HeaterState(
+        on=_as_bool(heat.get("on")),
+        level=level,
+        mode=_as_int(heat.get(SHADOW_KEY_MODE)),
+        state=_as_int(heat.get("state")),
+        target_temp=_normalize_sentinel_int(_as_int(heat.get("targetTemp"))),
+    )
+
+
 def _parse_channel_sensor_object(payload: dict[str, object]) -> ChannelSensorState:
     sensors: ChannelSensorState = {}
+    sensor_values = cast("dict[str, int | None]", sensors)
 
-    if "inTemp" in payload:
-        sensors["inTemp"] = _normalize_sentinel_int(_as_int(payload.get("inTemp")))
-    if "inHumi" in payload:
-        sensors["inHumi"] = _normalize_sentinel_int(_as_int(payload.get("inHumi")))
-    if "inVpd" in payload:
-        sensors["inVpd"] = _normalize_sentinel_int(_as_int(payload.get("inVpd")))
-    if "outTemp" in payload:
-        sensors["outTemp"] = _normalize_sentinel_int(_as_int(payload.get("outTemp")))
-    if "outHumi" in payload:
-        sensors["outHumi"] = _normalize_sentinel_int(_as_int(payload.get("outHumi")))
-    if "outVpd" in payload:
-        sensors["outVpd"] = _normalize_sentinel_int(_as_int(payload.get("outVpd")))
+    for key in (
+        "inTemp", "inHumi", "inVpd",
+        "outTemp", "outHumi", "outVpd",
+        "pTemp", "pHumi", "pVpd",
+        "waterLv", "coreTemp", "rssi",
+    ):
+        if key in payload:
+            sensor_values[key] = _normalize_sentinel_int(_as_int(payload.get(key)))
 
     return sensors
 

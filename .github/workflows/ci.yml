@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install websockets>=13.1 ruff mypy pytest pytest-cov pytest-asyncio pytest-homeassistant-custom-component homeassistant
+          pip install websockets>=13.1 pycares ruff mypy pytest pytest-cov pytest-asyncio pytest-homeassistant-custom-component homeassistant
 
       - name: Ruff
         run: ruff check .
