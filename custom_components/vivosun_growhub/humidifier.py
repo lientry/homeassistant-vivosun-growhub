@@ -15,6 +15,8 @@ from .const import DOMAIN, MODE_AUTO, MODE_MANUAL, TEMP_SCALE_FACTOR
 from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, sensor_slice, shadow_slice
 from .shadow import (
+    build_dhmdf_on_payload,
+    build_dhmdf_target_payload,
     build_hmdf_mode_payload,
     build_hmdf_on_payload,
     build_hmdf_target_payload,
@@ -45,17 +47,20 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Vivosun humidifier entities from a config entry."""
+    """Set up Vivosun humidifier and dehumidifier entities from a config entry."""
     coordinator = _runtime(hass, entry).coordinator
     if coordinator is None:
         return
 
+    entities = []
     humidifiers = [d for d in coordinator.devices if d.device_type == "humidifier"]
     if humidifiers:
-        async_add_entities(
-            [VivosunHumidifierEntity(coordinator, d.device_id) for d in humidifiers]
-        )
-
+        entities.extend([VivosunHumidifierEntity(coordinator, d.device_id) for d in humidifiers])
+    dehumidifiers = [d for d in coordinator.devices if d.device_type == "dehumidifier"]
+    if dehumidifiers:
+        entities.extend([VivosunDehumidifierEntity(coordinator, d.device_id) for d in dehumidifiers])
+    if entities:
+        async_add_entities(entities)
 
 class VivosunHumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierEntity):  # type: ignore[misc]
     """Representation of a Vivosun AeroStream humidifier."""
@@ -170,3 +175,73 @@ class VivosunHumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierE
 
     def _hmdf_state(self) -> Mapping[str, object]:
         return shadow_slice(self.coordinator, self._device_id, "hmdf")
+
+
+class VivosunDehumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierEntity):  # type: ignore[misc]
+    """Representation of a Vivosun AeroDrain dehumidifier."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Dehumidifier"
+    _attr_device_class = HumidifierDeviceClass.DEHUMIDIFIER
+    _attr_supported_features = _EXPLICIT_TURN_FEATURES
+    _attr_min_humidity = 30
+    _attr_max_humidity = 90
+    _enable_turn_on_off_backwards_compatibility = HumidifierEntityFeature(0) == _EXPLICIT_TURN_FEATURES
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
+        """Initialize the dehumidifier entity."""
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_dehumidifier"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return whether the dehumidifier is active (not paused)."""
+        dhmdf = self._dhmdf_state()
+        on = dhmdf.get("on")
+        if isinstance(on, bool):
+            return on
+        return None
+
+    @property
+    def target_humidity(self) -> float | None:
+        """Return the target humidity percentage."""
+        dhmdf = self._dhmdf_state()
+        target = dhmdf.get("target_humidity")
+        if isinstance(target, int):
+            return target / TEMP_SCALE_FACTOR
+        return None
+
+    @property
+    def available(self) -> bool:
+        """Return entity availability."""
+        return is_entity_available(self.coordinator, self._device_id)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info for this entity."""
+        return build_device_info(self.coordinator, self._device_id)
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        """Unpause the dehumidifier."""
+        _ = kwargs
+        await self.coordinator.async_publish_shadow_update(
+            build_dhmdf_on_payload(True), device_id=self._device_id
+        )
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        """Pause the dehumidifier."""
+        _ = kwargs
+        await self.coordinator.async_publish_shadow_update(
+            build_dhmdf_on_payload(False), device_id=self._device_id
+        )
+
+    async def async_set_humidity(self, humidity: int) -> None:
+        """Set target humidity percentage."""
+        target_raw = int(humidity * TEMP_SCALE_FACTOR)
+        await self.coordinator.async_publish_shadow_update(
+            build_dhmdf_target_payload(target_raw), device_id=self._device_id
+        )
+
+    def _dhmdf_state(self) -> Mapping[str, object]:
+        return shadow_slice(self.coordinator, self._device_id, "dhmdf")
