@@ -539,16 +539,27 @@ def _parse_hmdf_state(hmdf: dict[str, object]) -> HumidifierState:
 
 
 def _parse_dhmdf_state(dhmdf: dict[str, object]) -> DehumidifierState:
+    # Build a sparse result so that partial update/accepted messages (e.g. only
+    # containing "pause") don't clobber unrelated fields via _deep_merge_mapping.
+    result: DehumidifierState = {}
     auto = _as_dict(dhmdf.get("auto")) or {}
-    raw_humi = _normalize_sentinel_int(_as_int(auto.get("tHumi")))
-    mode = _as_int(dhmdf.get("mode"))
-    return DehumidifierState(
-        on=((_as_int(dhmdf.get("pause")) == 0) and (mode is not None and mode != 0)),
-        mode=mode,
-        state=_as_int(dhmdf.get("state")),
-        pause=_as_int(dhmdf.get("pause")),
-        target_humidity=raw_humi,
-    )
+    if "tHumi" in auto:
+        raw_humi = _normalize_sentinel_int(_as_int(auto.get("tHumi")))
+        if raw_humi is not None:
+            result["target_humidity"] = raw_humi
+    mode = _as_int(dhmdf.get("mode")) if "mode" in dhmdf else None
+    pause = _as_int(dhmdf.get("pause")) if "pause" in dhmdf else None
+    if mode is not None:
+        result["mode"] = mode
+    if pause is not None:
+        result["pause"] = pause
+    if "state" in dhmdf:
+        result["state"] = _as_int(dhmdf.get("state"))
+    # AeroDrain D12: mode=0 means auto-dehumidify (normal run state).
+    # Use only pause to determine on/off — pause=0 means running.
+    if "pause" in dhmdf:
+        result["on"] = pause == 0
+    return result
 
 
 def _parse_heat_state(heat: dict[str, object]) -> HeaterState:
