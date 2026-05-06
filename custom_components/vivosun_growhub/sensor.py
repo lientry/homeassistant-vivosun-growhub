@@ -63,8 +63,14 @@ class VivosunSensorDescription(SensorEntityDescription):  # type: ignore[misc]
     """Description for a Vivosun channel sensor entity."""
 
     channel_key: str
+    channel_key_aliases: tuple[str, ...] = ()
     quantity: str
     state_class: SensorStateClass = SensorStateClass.MEASUREMENT
+
+    @property
+    def channel_key_lookup(self) -> tuple[str, ...]:
+        """Return the ordered tuple of channel keys to consult when reading."""
+        return (self.channel_key, *self.channel_key_aliases)
 
 
 _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
@@ -72,6 +78,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
         key="inside_temperature",
         name="Inside Temperature",
         channel_key="inTemp",
+        channel_key_aliases=("bTemp",),
         quantity="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -80,6 +87,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
         key="inside_humidity",
         name="Inside Humidity",
         channel_key="inHumi",
+        channel_key_aliases=("bHumi",),
         quantity="humidity",
         device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
@@ -89,6 +97,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
         key="inside_vpd",
         name="Inside VPD",
         channel_key="inVpd",
+        channel_key_aliases=("bVpd",),
         quantity="vpd",
         icon="mdi:leaf",
         native_unit_of_measurement="kPa",
@@ -98,6 +107,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
         key="outside_temperature",
         name="Outside Temperature",
         channel_key="outTemp",
+        channel_key_aliases=("pTemp",),
         quantity="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -106,6 +116,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
         key="outside_humidity",
         name="Outside Humidity",
         channel_key="outHumi",
+        channel_key_aliases=("pHumi",),
         quantity="humidity",
         device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
@@ -115,6 +126,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
         key="outside_vpd",
         name="Outside VPD",
         channel_key="outVpd",
+        channel_key_aliases=("pVpd",),
         quantity="vpd",
         icon="mdi:leaf",
         native_unit_of_measurement="kPa",
@@ -290,11 +302,12 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
 
     def _raw_channel_value(self) -> int | None:
         sensors = sensor_slice(self.coordinator, self._device_id)
-        value = sensors.get(self.entity_description.channel_key)
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            return value
+        for key in self.entity_description.channel_key_lookup:
+            value = sensors.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return value
         return None
 
     def _temp_unit(self) -> str:

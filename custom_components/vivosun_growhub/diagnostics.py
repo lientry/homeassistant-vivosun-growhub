@@ -104,7 +104,7 @@ async def async_get_config_entry_diagnostics(
             "mqtt_connected": mqtt_connected,
             "shadow_keys": shadow_keys,
             "sensor_keys": sensor_keys,
-            "last_update_success": coordinator.last_update_success,
+            "last_update_success": getattr(coordinator, "last_update_success", None),
             "last_update_success_time": last_update_iso,
         },
     }

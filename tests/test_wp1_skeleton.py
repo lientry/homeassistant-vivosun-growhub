@@ -20,6 +20,9 @@ from custom_components.vivosun_growhub.const import (
     MODE_PLAN,
     PLATFORMS,
     SENSOR_CHANNEL_KEYS,
+    SENSOR_KEY_BOX_HUMI,
+    SENSOR_KEY_BOX_TEMP,
+    SENSOR_KEY_BOX_VPD,
     SENSOR_KEY_CORE_TEMP,
     SENSOR_KEY_INSIDE_HUMI,
     SENSOR_KEY_INSIDE_TEMP,
@@ -81,6 +84,9 @@ async def test_constants_match_wp1_spec() -> None:
         SENSOR_KEY_OUTSIDE_TEMP,
         SENSOR_KEY_OUTSIDE_HUMI,
         SENSOR_KEY_OUTSIDE_VPD,
+        SENSOR_KEY_BOX_TEMP,
+        SENSOR_KEY_BOX_HUMI,
+        SENSOR_KEY_BOX_VPD,
         SENSOR_KEY_CORE_TEMP,
         SENSOR_KEY_RSSI,
         SENSOR_KEY_PROBE_TEMP,
@@ -88,7 +94,7 @@ async def test_constants_match_wp1_spec() -> None:
         SENSOR_KEY_PROBE_VPD,
         SENSOR_KEY_WATER_LEVEL,
     )
-    assert len(SENSOR_CHANNEL_KEYS) == 12
+    assert len(SENSOR_CHANNEL_KEYS) == 15
     assert SENSOR_UNAVAILABLE_SENTINEL == -6666
 
     assert MODE_MANUAL == 0
