@@ -85,7 +85,7 @@ async def async_get_config_entry_diagnostics(
     if not isinstance(mqtt_connected, bool):
         mqtt_connected = coordinator.is_mqtt_connected
 
-    last_update = coordinator.last_update_success_time
+    last_update = getattr(coordinator, "last_update_success_time", None)
     last_update_iso = _as_iso(last_update)
 
     diagnostics_payload: dict[str, Any] = {
@@ -104,6 +104,7 @@ async def async_get_config_entry_diagnostics(
             "mqtt_connected": mqtt_connected,
             "shadow_keys": shadow_keys,
             "sensor_keys": sensor_keys,
+            "last_update_success": coordinator.last_update_success,
             "last_update_success_time": last_update_iso,
         },
     }
@@ -114,7 +115,10 @@ async def async_get_config_entry_diagnostics(
 def _as_iso(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return value.isoformat()
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return isoformat()
+    return None
 
 
 def _redact_entry_identifier(value: str | None) -> str | None:
