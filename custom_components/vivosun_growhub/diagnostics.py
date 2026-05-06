@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -11,7 +12,6 @@ from .redaction import redact_identifier, sanitize_mapping_for_debug
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from datetime import datetime
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
@@ -112,12 +112,9 @@ async def async_get_config_entry_diagnostics(
     return sanitize_mapping_for_debug(redacted_diagnostics)
 
 
-def _as_iso(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    isoformat = getattr(value, "isoformat", None)
-    if callable(isoformat):
-        return isoformat()
+def _as_iso(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
     return None
 
 
