@@ -36,6 +36,7 @@ class _CoordinatorStub:
             "sensors": {self.device.device_id: {"inTemp": 2500, "inHumi": 5123}},
         }
         self.is_mqtt_connected = True
+        self.last_update_success = True
         self.last_update_success_time = datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
         self.support_capture_active = True
 
@@ -102,6 +103,7 @@ async def test_diagnostics_redacts_sensitive_values(
     assert coordinator_result["mqtt_connected"] is True
     assert coordinator_result["support_capture_enabled"] is True
     assert coordinator_result["support_capture_active"] is True
+    assert coordinator_result["last_update_success"] is True
     assert coordinator_result["shadow_keys"] == ["connection", "light"]
     assert coordinator_result["sensor_keys"] == ["inHumi", "inTemp"]
     assert coordinator_result["last_update_success_time"] == "2026-03-05T12:00:00+00:00"
@@ -170,3 +172,28 @@ async def test_diagnostics_coerces_non_serializable_support_capture_values(
     events = cast("list[dict[str, object]]", support_capture["events"])
     assert events[0]["raw"] == "<object>"
     json.dumps(result)
+
+
+async def test_diagnostics_handles_missing_last_update_success_time(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="user@example.com",
+        unique_id="user-998877",
+        data={"email": "user@example.com", "password": "super-secret"},
+    )
+    entry.add_to_hass(hass)
+    coordinator = _CoordinatorStub()
+    del coordinator.last_update_success_time
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry_id=entry.entry_id,
+        coordinator=cast("object", coordinator),
+    )
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    coordinator_result = cast("dict[str, object]", result["coordinator"])
+    assert coordinator_result["last_update_success"] is True
+    assert coordinator_result["last_update_success_time"] is None

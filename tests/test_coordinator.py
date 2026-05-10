@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import pytest
 
@@ -19,6 +19,7 @@ from custom_components.vivosun_growhub.const import (
 from custom_components.vivosun_growhub.coordinator import VivosunCoordinator
 from custom_components.vivosun_growhub.exceptions import VivosunAuthError, VivosunResponseError
 from custom_components.vivosun_growhub.models import AuthTokens, AwsIdentity, DeviceInfo
+from custom_components.vivosun_growhub.mqtt_client import MQTTConnectionError
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -554,6 +555,35 @@ async def test_coordinator_publish_shadow_update_encodes_payload_variants(
         (shadow_update_topic, b'{"state":{"desired":{"light":{"manu":{"lv":10}}}}}', 0, False),
         (shadow_update_topic, b'{"state":{"desired":{"light":{"manu":{"lv":5}}}}}', 0, False),
     ]
+
+    await coordinator.async_shutdown()
+
+
+async def test_support_capture_defers_topic_subscription_if_mqtt_drops(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    api = _ApiStub()
+    aws_auth = _AwsAuthStub()
+    aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
+    _patch_coordinator_deps(monkeypatch, api, aws_auth)
+
+    coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
+    await coordinator.async_start()
+
+    mqtt = _MqttStub.instances[0]
+
+    async def _drop_during_subscribe(_topics: list[tuple[str, int]]) -> None:
+        raise MQTTConnectionError("MQTT client disconnected")
+
+    mqtt.subscribe = _drop_during_subscribe  # type: ignore[method-assign]
+
+    await coordinator.async_start_support_capture(max_events=100)
+
+    snapshot = coordinator.support_capture_snapshot()
+    events = cast("list[dict[str, object]]", snapshot["events"])
+    assert snapshot["active"] is True
+    assert any(event["kind"] == "support_topics_subscription_deferred" for event in events)
 
     await coordinator.async_shutdown()
 

@@ -452,7 +452,17 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             data={"mqtt_connected": self.is_mqtt_connected, "device_count": len(self._devices)},
         )
         if self.is_mqtt_connected:
-            await self._async_subscribe_support_capture_topics()
+            try:
+                await self._async_subscribe_support_capture_topics()
+            except MQTTConnectionError:
+                self._logger.debug(
+                    "Support capture topic subscription deferred until MQTT reconnect",
+                    exc_info=True,
+                )
+                self._support_capture.record(
+                    "support_topics_subscription_deferred",
+                    data={"reason": "mqtt_disconnected"},
+                )
 
     async def async_stop_support_capture(self) -> None:
         """Stop support capture."""
