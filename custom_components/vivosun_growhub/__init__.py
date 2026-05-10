@@ -13,6 +13,7 @@ from .const import (
     CONF_EMAIL,
     CONF_PASSWORD,
     DOMAIN,
+    OPTION_SUPPORT_CAPTURE_ENABLED,
     PLATFORMS,
     SERVICE_START_SUPPORT_CAPTURE,
     SERVICE_STOP_SUPPORT_CAPTURE,
@@ -113,6 +114,7 @@ async def _async_handle_stop_support_capture(hass: HomeAssistant, call: ServiceC
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Vivosun GrowHub from a config entry."""
+    _register_services(hass)
     email_value = entry.data.get(CONF_EMAIL)
     password_value = entry.data.get(CONF_PASSWORD)
     if not isinstance(email_value, str) or not isinstance(password_value, str):
@@ -127,6 +129,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         await coordinator.async_start()
+        if entry.options.get(OPTION_SUPPORT_CAPTURE_ENABLED) is True:
+            await coordinator.async_start_support_capture(max_events=SUPPORT_CAPTURE_DEFAULT_MAX_EVENTS)
     except VivosunGrowhubError as err:
         await coordinator.async_shutdown()
         raise ConfigEntryNotReady(str(err)) from err

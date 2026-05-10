@@ -12,9 +12,11 @@ from custom_components.vivosun_growhub.const import (
     CONF_EMAIL,
     CONF_PASSWORD,
     DOMAIN,
+    OPTION_SUPPORT_CAPTURE_ENABLED,
     PLATFORMS,
     SERVICE_START_SUPPORT_CAPTURE,
     SERVICE_STOP_SUPPORT_CAPTURE,
+    SUPPORT_CAPTURE_DEFAULT_MAX_EVENTS,
 )
 from custom_components.vivosun_growhub.support_capture import SupportCaptureManager
 
@@ -106,3 +108,42 @@ async def test_support_capture_services_start_and_stop_single_entry(
     assert await async_unload_entry(hass, entry)
     assert hass.services.has_service(DOMAIN, SERVICE_START_SUPPORT_CAPTURE) is False
     assert hass.services.has_service(DOMAIN, SERVICE_STOP_SUPPORT_CAPTURE) is False
+
+
+async def test_setup_entry_registers_support_capture_services_without_async_setup(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("custom_components.vivosun_growhub.VivosunCoordinator", _CoordinatorStub)
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", AsyncMock(return_value=True))
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="test@example.com",
+        data={CONF_EMAIL: "test@example.com", CONF_PASSWORD: "secret"},
+    )
+
+    assert await async_setup_entry(hass, entry)
+    assert hass.services.has_service(DOMAIN, SERVICE_START_SUPPORT_CAPTURE) is True
+    assert hass.services.has_service(DOMAIN, SERVICE_STOP_SUPPORT_CAPTURE) is True
+
+
+async def test_setup_entry_starts_support_capture_when_option_enabled(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("custom_components.vivosun_growhub.VivosunCoordinator", _CoordinatorStub)
+    monkeypatch.setattr(hass.config_entries, "async_forward_entry_setups", AsyncMock(return_value=True))
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="test@example.com",
+        data={CONF_EMAIL: "test@example.com", CONF_PASSWORD: "secret"},
+        options={OPTION_SUPPORT_CAPTURE_ENABLED: True},
+    )
+
+    assert await async_setup_entry(hass, entry)
+
+    runtime = hass.data[DOMAIN][entry.entry_id]
+    coordinator = cast("_CoordinatorStub", runtime.coordinator)
+    assert coordinator.started_capture_max_events == [SUPPORT_CAPTURE_DEFAULT_MAX_EVENTS]

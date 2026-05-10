@@ -96,6 +96,7 @@ The config flow asks for:
 The options flow currently exposes:
 
 - `temp_unit`: `celsius` or `fahrenheit`
+- `support_capture_enabled`: enable local support capture so diagnostics exports include a rolling redacted MQTT/support buffer
 - `camera_ip`: optional GrowCam LAN IP, if one is present on the account
 
 ## What It Exposes
@@ -162,14 +163,14 @@ Fields:
 - `field`: threshold key such as `tMin`, `tMax`, `hMin`, `hMax`, `vpdMin`, `vpdMax`
 - `value`: integer or `null` to clear the threshold
 
-### Support capture services
+### Support capture
 
-For issue investigation, the integration also exposes opt-in support capture services:
+For issue investigation, you can enable support capture from the integration options. When enabled, the integration keeps a local, redacted rolling support buffer that is included in `Download diagnostics`.
+
+The integration still exposes advanced services for manual control if you need them:
 
 - `vivosun_growhub.start_support_capture`
 - `vivosun_growhub.stop_support_capture`
-
-Use them to start a local, redacted telemetry buffer before reproducing a problem. After reproducing it, stop capture and use `Download diagnostics` to export the captured support data.
 
 ## Runtime Model
 
@@ -230,12 +231,7 @@ Climate telemetry comes from REST polling, not from the MQTT shadow. After start
 
 Use `Download diagnostics` on the integration device page. Sensitive fields are redacted before export.
 
-For deeper troubleshooting, you can:
-
-1. Call `vivosun_growhub.start_support_capture`
-2. Reproduce the issue
-3. Call `vivosun_growhub.stop_support_capture`
-4. Export diagnostics
+For deeper troubleshooting, enable `support_capture_enabled` in the integration options before reproducing the issue, then export diagnostics. If you prefer manual control, you can still use the `vivosun_growhub.start_support_capture` and `vivosun_growhub.stop_support_capture` services around the reproduction window.
 
 The diagnostics export includes the local support-capture buffer so users can choose whether to share the resulting file for analysis.
 

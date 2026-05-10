@@ -18,6 +18,7 @@ CONF_PASSWORD = "password"
 CONF_CAMERA_IP = "camera_ip"
 CONF_HAS_CAMERA = "has_camera"
 DEFAULT_TEMP_UNIT = "celsius"
+OPTION_SUPPORT_CAPTURE_ENABLED = "support_capture_enabled"
 SERVICE_START_SUPPORT_CAPTURE = "start_support_capture"
 SERVICE_STOP_SUPPORT_CAPTURE = "stop_support_capture"
 SUPPORT_CAPTURE_DEFAULT_MAX_EVENTS = 500

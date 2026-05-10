@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.vivosun_growhub.const import DOMAIN
+from custom_components.vivosun_growhub.const import DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
 from custom_components.vivosun_growhub.diagnostics import async_get_config_entry_diagnostics
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
 
@@ -36,6 +37,7 @@ class _CoordinatorStub:
         }
         self.is_mqtt_connected = True
         self.last_update_success_time = datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
+        self.support_capture_active = True
 
     def support_capture_snapshot(self) -> dict[str, object]:
         return {
@@ -65,7 +67,7 @@ async def test_diagnostics_redacts_sensitive_values(
             "login_token": "token-456",
             "aws_identity_id": "us-east-2:identity-raw",
         },
-        options={"temp_unit": "celsius"},
+        options={"temp_unit": "celsius", OPTION_SUPPORT_CAPTURE_ENABLED: True},
     )
     entry.add_to_hass(hass)
     coordinator = _CoordinatorStub()
@@ -98,9 +100,12 @@ async def test_diagnostics_redacts_sensitive_values(
 
     coordinator_result = cast("dict[str, object]", result["coordinator"])
     assert coordinator_result["mqtt_connected"] is True
+    assert coordinator_result["support_capture_enabled"] is True
+    assert coordinator_result["support_capture_active"] is True
     assert coordinator_result["shadow_keys"] == ["connection", "light"]
     assert coordinator_result["sensor_keys"] == ["inHumi", "inTemp"]
     assert coordinator_result["last_update_success_time"] == "2026-03-05T12:00:00+00:00"
+    json.dumps(result)
 
 
 async def test_diagnostics_handles_missing_runtime(
@@ -126,3 +131,42 @@ async def test_diagnostics_handles_missing_runtime(
     data = cast("dict[str, object]", config_entry["data"])
     assert data["password"] == "***"
     assert data["email"] != "user@example.com"
+
+
+async def test_diagnostics_coerces_non_serializable_support_capture_values(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="user@example.com",
+        unique_id="user-998877",
+        data={"email": "user@example.com", "password": "super-secret"},
+    )
+    entry.add_to_hass(hass)
+    coordinator = _CoordinatorStub()
+
+    def _snapshot_with_object() -> dict[str, object]:
+        return {
+            "active": False,
+            "started_at": None,
+            "stopped_at": None,
+            "max_events": 0,
+            "dropped_events": 0,
+            "subscription_topics": [],
+            "devices": [],
+            "events": [{"raw": object()}],
+        }
+
+    coordinator.support_capture_snapshot = _snapshot_with_object  # type: ignore[method-assign]
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry_id=entry.entry_id,
+        coordinator=cast("object", coordinator),
+    )
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    support_capture = cast("dict[str, object]", result["support_capture"])
+    events = cast("list[dict[str, object]]", support_capture["events"])
+    assert events[0]["raw"] == "<object>"
+    json.dumps(result)

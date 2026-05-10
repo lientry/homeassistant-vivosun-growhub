@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.diagnostics import async_redact_data
 
-from .const import DOMAIN
+from .const import DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
 from .redaction import redact_identifier, sanitize_mapping_for_debug
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-    from datetime import datetime
-
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
@@ -103,13 +102,16 @@ async def async_get_config_entry_diagnostics(
         "support_capture": coordinator.support_capture_snapshot(),
         "coordinator": {
             "mqtt_connected": mqtt_connected,
+            "support_capture_enabled": bool(config_entry.options.get(OPTION_SUPPORT_CAPTURE_ENABLED, False)),
+            "support_capture_active": coordinator.support_capture_active,
             "shadow_keys": shadow_keys,
             "sensor_keys": sensor_keys,
             "last_update_success_time": last_update_iso,
         },
     }
     redacted_diagnostics = async_redact_data(diagnostics_payload, _DIAGNOSTICS_REDACT)
-    return sanitize_mapping_for_debug(redacted_diagnostics)
+    sanitized_diagnostics = sanitize_mapping_for_debug(redacted_diagnostics)
+    return cast("dict[str, Any]", _json_safe_value(sanitized_diagnostics))
 
 
 def _as_iso(value: datetime | None) -> str | None:
@@ -122,3 +124,15 @@ def _redact_entry_identifier(value: str | None) -> str | None:
     if value is None:
         return None
     return redact_identifier(value)
+
+
+def _json_safe_value(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe_value(nested_value) for key, nested_value in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    return f"<{type(value).__name__}>"

@@ -11,7 +11,15 @@ from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import VivosunApiClient
-from .const import CONF_CAMERA_IP, CONF_EMAIL, CONF_HAS_CAMERA, CONF_PASSWORD, DEFAULT_TEMP_UNIT, DOMAIN
+from .const import (
+    CONF_CAMERA_IP,
+    CONF_EMAIL,
+    CONF_HAS_CAMERA,
+    CONF_PASSWORD,
+    DEFAULT_TEMP_UNIT,
+    DOMAIN,
+    OPTION_SUPPORT_CAPTURE_ENABLED,
+)
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
 
 OPTIONS_TEMP_UNIT = "temp_unit"
@@ -119,14 +127,14 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
             return self._config_entry
         return self.config_entry
 
-    async def async_step_init(self, user_input: dict[str, str] | None = None) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, object] | None = None) -> FlowResult:
         """Manage options."""
         entry = self._entry()
         errors: dict[str, str] = {}
         if user_input is not None:
             normalized_input = self._normalize_options(user_input)
-            camera_ip = normalized_input.get(CONF_CAMERA_IP, "")
-            if camera_ip:
+            camera_ip = normalized_input.get(CONF_CAMERA_IP)
+            if isinstance(camera_ip, str) and camera_ip:
                 try:
                     ipaddress.ip_address(camera_ip)
                 except ValueError:
@@ -146,7 +154,11 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                     translation_key=OPTIONS_TEMP_UNIT,
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
-            )
+            ),
+            vol.Optional(
+                OPTION_SUPPORT_CAPTURE_ENABLED,
+                default=bool(entry.options.get(OPTION_SUPPORT_CAPTURE_ENABLED, False)),
+            ): selector.BooleanSelector(),
         }
         if self._should_show_camera_ip(entry):
             schema_fields[
@@ -168,11 +180,17 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         camera_devices = getattr(coordinator, "camera_devices", None)
         return bool(camera_devices)
 
-    def _normalize_options(self, user_input: dict[str, str]) -> dict[str, str]:
+    def _normalize_options(self, user_input: dict[str, object]) -> dict[str, object]:
         """Strip empty optional values so options remain stable across no-op submits."""
         normalized = dict(user_input)
+        support_capture_enabled = normalized.get(OPTION_SUPPORT_CAPTURE_ENABLED)
+        if support_capture_enabled is True:
+            normalized[OPTION_SUPPORT_CAPTURE_ENABLED] = True
+        else:
+            normalized.pop(OPTION_SUPPORT_CAPTURE_ENABLED, None)
+
         camera_ip = normalized.get(CONF_CAMERA_IP)
-        if camera_ip is None:
+        if not isinstance(camera_ip, str):
             return normalized
 
         stripped_camera_ip = camera_ip.strip()

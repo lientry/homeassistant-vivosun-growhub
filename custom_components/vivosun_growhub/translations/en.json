@@ -28,6 +28,7 @@
         "title": "Integration options",
         "data": {
           "temp_unit": "Temperature unit",
+          "support_capture_enabled": "Enable support capture for diagnostics",
           "camera_ip": "Camera IP"
         }
       }
