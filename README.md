@@ -162,6 +162,15 @@ Fields:
 - `field`: threshold key such as `tMin`, `tMax`, `hMin`, `hMax`, `vpdMin`, `vpdMax`
 - `value`: integer or `null` to clear the threshold
 
+### Support capture services
+
+For issue investigation, the integration also exposes opt-in support capture services:
+
+- `vivosun_growhub.start_support_capture`
+- `vivosun_growhub.stop_support_capture`
+
+Use them to start a local, redacted telemetry buffer before reproducing a problem. After reproducing it, stop capture and use `Download diagnostics` to export the captured support data.
+
 ## Runtime Model
 
 This integration is hybrid.
@@ -220,6 +229,15 @@ Climate telemetry comes from REST polling, not from the MQTT shadow. After start
 ### Diagnostics
 
 Use `Download diagnostics` on the integration device page. Sensitive fields are redacted before export.
+
+For deeper troubleshooting, you can:
+
+1. Call `vivosun_growhub.start_support_capture`
+2. Reproduce the issue
+3. Call `vivosun_growhub.stop_support_capture`
+4. Export diagnostics
+
+The diagnostics export includes the local support-capture buffer so users can choose whether to share the resulting file for analysis.
 
 ## License
 

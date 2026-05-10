@@ -100,6 +100,7 @@ async def async_get_config_entry_diagnostics(
             "client_id": device.client_id,
             "topic_prefix": device.topic_prefix,
         },
+        "support_capture": coordinator.support_capture_snapshot(),
         "coordinator": {
             "mqtt_connected": mqtt_connected,
             "shadow_keys": shadow_keys,

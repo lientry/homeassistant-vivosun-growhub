@@ -34,6 +34,7 @@ from .shadow import (
     parse_channel_sensor_payload,
     parse_shadow_document,
 )
+from .support_capture import SupportCaptureManager, summarize_support_capture_payload
 
 if TYPE_CHECKING:
     import aiohttp
@@ -81,6 +82,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._devices: list[DeviceInfo] = []
         self._camera_devices: list[DeviceInfo] = []
         self._mqtt_client: MQTTClient | None = None
+        self._support_capture = SupportCaptureManager()
 
         # Per-device state keyed by device_id
         self._shadow_states: dict[str, dict[str, object]] = {}
@@ -119,6 +121,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     def camera_devices(self) -> list[DeviceInfo]:
         """Return discovered camera devices."""
         return list(self._camera_devices)
+
+    @property
+    def support_capture_active(self) -> bool:
+        """Return whether support capture is active."""
+        return self._support_capture.active
+
+    def support_capture_snapshot(self) -> dict[str, object]:
+        """Return diagnostics-safe support capture state."""
+        return self._support_capture.snapshot()
 
     def get_device(self, device_id: str) -> DeviceInfo | None:
         """Return a device by ID."""
@@ -218,6 +229,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         target_device = self._resolve_device(device_id)
         topic = TOPIC_SHADOW_UPDATE.format(thing=target_device.client_id)
         await mqtt_client.publish(topic, encoded, qos=qos)
+        self._support_capture.record(
+            "shadow_update_request",
+            data={
+                "device_id": target_device.device_id,
+                "topic": topic,
+                "qos": qos,
+                **summarize_support_capture_payload(encoded),
+            },
+        )
 
     def _resolve_device(self, device_id: str | None) -> DeviceInfo:
         """Resolve a device_id to DeviceInfo, defaulting to primary."""
@@ -323,6 +343,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             await mqtt_client.subscribe(extra_topics)
             self._logger.debug("Subscribed to MQTT topics for %s", device.name)
 
+        if self._support_capture.active:
+            await self._async_subscribe_support_capture_topics()
+
         self._logger.info("Connected MQTT session for %d devices", len(self._devices))
 
         for device in self._devices:
@@ -341,6 +364,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             return
 
         device_id = self._route_topic_to_device(topic)
+        self._support_capture.record(
+            "mqtt_publish",
+            data={
+                "device_id": device_id or "",
+                "topic": topic,
+                "qos": qos,
+                **summarize_support_capture_payload(payload),
+            },
+        )
         if device_id is None:
             return
 
@@ -398,6 +430,69 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             if topic.startswith(prefix + "/"):
                 return dev_id
         return None
+
+    async def async_start_support_capture(self, *, max_events: int) -> None:
+        """Start support capture and subscribe extra diagnostics topics when connected."""
+        self._support_capture.start(
+            max_events=max_events,
+            devices=[
+                {
+                    "device_id": device.device_id,
+                    "device_type": device.device_type,
+                    "client_id": device.client_id,
+                    "topic_prefix": device.topic_prefix,
+                    "name": device.name,
+                }
+                for device in self._devices
+            ],
+            subscription_topics=self._support_capture_topic_names(),
+        )
+        self._support_capture.record(
+            "capture_started",
+            data={"mqtt_connected": self.is_mqtt_connected, "device_count": len(self._devices)},
+        )
+        if self.is_mqtt_connected:
+            await self._async_subscribe_support_capture_topics()
+
+    async def async_stop_support_capture(self) -> None:
+        """Stop support capture."""
+        self._support_capture.record("capture_stopping", data={"mqtt_connected": self.is_mqtt_connected})
+        self._support_capture.stop()
+
+    def _support_capture_topic_names(self) -> list[str]:
+        """Return additional topic subscriptions used only during support capture."""
+        topics: list[str] = []
+        for device in self._devices:
+            if device.client_id:
+                topics.extend(
+                    [
+                        f"$aws/things/{device.client_id}/shadow/get/rejected",
+                        f"$aws/things/{device.client_id}/shadow/update/rejected",
+                        f"$aws/things/{device.client_id}/shadow/name/+/get/accepted",
+                        f"$aws/things/{device.client_id}/shadow/name/+/get/rejected",
+                        f"$aws/things/{device.client_id}/shadow/name/+/update/accepted",
+                        f"$aws/things/{device.client_id}/shadow/name/+/update/rejected",
+                        f"$aws/things/{device.client_id}/shadow/name/+/update/documents",
+                        f"$aws/things/{device.client_id}/shadow/name/+/update/delta",
+                    ]
+                )
+            if device.topic_prefix:
+                topics.append(f"{device.topic_prefix}/#")
+        return sorted(set(topics))
+
+    async def _async_subscribe_support_capture_topics(self) -> None:
+        """Subscribe extra diagnostics topics used only while support capture is active."""
+        mqtt_client = self._mqtt_client
+        if mqtt_client is None or not mqtt_client.is_connected:
+            return
+        topics = self._support_capture_topic_names()
+        if not topics:
+            return
+        await mqtt_client.subscribe([(topic, 1) for topic in topics])
+        self._support_capture.record(
+            "support_topics_subscribed",
+            data={"topic_count": len(topics)},
+        )
 
     def _parse_json_object(self, payload: bytes) -> dict[str, object]:
         decoded = json.loads(payload)
@@ -492,7 +587,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         if device is None or mqtt_client is None or not mqtt_client.is_connected:
             return
         self._last_shadow_refresh_request_at[device_id] = datetime.now(tz=UTC)
-        await mqtt_client.publish(TOPIC_SHADOW_GET.format(thing=device.client_id), b"{}")
+        topic = TOPIC_SHADOW_GET.format(thing=device.client_id)
+        await mqtt_client.publish(topic, b"{}")
+        self._support_capture.record(
+            "shadow_get_request",
+            data={
+                "device_id": device.device_id,
+                "topic": topic,
+            },
+        )
 
     async def _credentials_refresh_loop(self) -> None:
         """Wait for refresh boundary and trigger reconnect cycle."""

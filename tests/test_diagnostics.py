@@ -37,6 +37,18 @@ class _CoordinatorStub:
         self.is_mqtt_connected = True
         self.last_update_success_time = datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
 
+    def support_capture_snapshot(self) -> dict[str, object]:
+        return {
+            "active": True,
+            "started_at": "2026-03-05T11:55:00+00:00",
+            "stopped_at": None,
+            "max_events": 500,
+            "dropped_events": 0,
+            "subscription_topics": ["$aws/things/device/shadow/get/rejected"],
+            "devices": [{"device_id": "device-123456", "device_type": "controller"}],
+            "events": [{"ts": "2026-03-05T11:55:01+00:00", "kind": "capture_started"}],
+        }
+
 
 async def test_diagnostics_redacts_sensitive_values(
     hass: HomeAssistant,
@@ -78,6 +90,11 @@ async def test_diagnostics_redacts_sensitive_values(
     assert device["device_id"] != "device-123456"
     assert device["client_id"] != "vivosun-VSCTLE42A-account-device-123456"
     assert device["topic_prefix"] != "vivosun/user/123456/device/123456"
+
+    support_capture = cast("dict[str, object]", result["support_capture"])
+    assert support_capture["active"] is True
+    assert support_capture["max_events"] == 500
+    assert support_capture["dropped_events"] == 0
 
     coordinator_result = cast("dict[str, object]", result["coordinator"])
     assert coordinator_result["mqtt_connected"] is True

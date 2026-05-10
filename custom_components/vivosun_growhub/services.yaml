@@ -21,3 +21,34 @@ set_duct_fan_auto_threshold:
       selector:
         number:
           step: 1
+start_support_capture:
+  name: Start Support Capture
+  description: Start a local support-capture session for diagnostics export.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional config entry id. Required only if multiple Vivosun entries are configured.
+      required: false
+      selector:
+        text:
+    max_events:
+      name: Max Events
+      description: Maximum number of redacted capture events to keep in the local diagnostics buffer.
+      required: false
+      example: 500
+      default: 500
+      selector:
+        number:
+          min: 10
+          max: 5000
+          step: 10
+stop_support_capture:
+  name: Stop Support Capture
+  description: Stop a local support-capture session. Download diagnostics afterward to export the captured data.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Optional config entry id. Required only if multiple Vivosun entries are configured.
+      required: false
+      selector:
+        text:
