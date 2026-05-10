@@ -10,7 +10,7 @@ Go to **Settings → Devices & Services → Vivosun GrowHub**, then open the int
 
 ## 2. Enable support capture
 
-Turn on **Enable support capture for diagnostics**, then save.
+Turn on **Enable support capture for diagnostics**, then submit.
 
 Wait for the integration to finish reloading before continuing.
 
