@@ -303,6 +303,31 @@ async def test_coordinator_mqtt_callbacks_update_shadow_and_sensor_state(
     await coordinator.async_shutdown()
 
 
+async def test_coordinator_accepts_desired_only_shadow_payloads(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    api = _ApiStub()
+    aws_auth = _AwsAuthStub()
+    aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
+    _patch_coordinator_deps(monkeypatch, api, aws_auth)
+
+    coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
+    await coordinator.async_start()
+
+    mqtt = _MqttStub.instances[0]
+    device_id = coordinator.device.device_id
+    await mqtt.emit(
+        TOPIC_SHADOW_GET_ACCEPTED.format(thing=coordinator.device.client_id),
+        b'{"state":{"desired":{"hmdf":{"on":1,"targetHumi":5500}}}}',
+    )
+
+    assert coordinator.data["shadows"][device_id]["hmdf"]["on"] is True
+    assert coordinator.data["shadows"][device_id]["hmdf"]["target_humidity"] == 5500
+
+    await coordinator.async_shutdown()
+
+
 async def test_coordinator_mqtt_shadow_update_refreshes_plan_stage_info_immediately(
     hass: HomeAssistant,
     monkeypatch: MonkeyPatch,

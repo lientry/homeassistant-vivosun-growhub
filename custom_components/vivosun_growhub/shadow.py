@@ -451,7 +451,12 @@ def _extract_reported(document: dict[str, object]) -> dict[str, object]:
             if reported is not None:
                 return reported
 
-    raise ShadowParseError("Shadow payload does not include state.reported")
+    if state is not None:
+        desired = _as_dict(state.get("desired"))
+        if desired is not None:
+            return desired
+
+    raise ShadowParseError("Shadow payload does not include state.reported or state.desired")
 
 
 def _parse_light_state(light: dict[str, object]) -> LightState:

@@ -131,6 +131,35 @@ def test_parse_shadow_document_accepts_update_documents_shape() -> None:
     assert parsed["light"]["spectrum"] == 17
 
 
+def test_parse_shadow_document_falls_back_to_desired_when_reported_missing() -> None:
+    payload: dict[str, object] = {
+        "state": {
+            "desired": {
+                "hmdf": {
+                    "on": 1,
+                    "targetHumi": 5500,
+                }
+            },
+            "metadata": {
+                "desired": {
+                    "hmdf": {
+                        "on": {"timestamp": 1777359930},
+                    }
+                }
+            },
+        }
+    }
+
+    parsed = parse_shadow_document(payload)
+    assert parsed["hmdf"] == {
+        "on": True,
+        "level": None,
+        "mode": None,
+        "water_warning": False,
+        "target_humidity": 5500,
+    }
+
+
 def test_parse_shadow_delta_fragment_for_partial_updates() -> None:
     delta_payload: dict[str, object] = {
         "state": {
