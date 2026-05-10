@@ -80,7 +80,6 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
         key="inside_humidity",
         name="Inside Humidity",
         channel_key="inHumi",
-        channel_key_aliases=("bHumi",),
         quantity="humidity",
         device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
@@ -179,6 +178,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
 
 _DEVICE_TYPE_SENSORS: dict[str, frozenset[str]] = {
     "controller": frozenset({"inTemp", "inHumi", "inVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
+    "dehumidifier": frozenset({"pTemp", "pHumi", "pVpd"}),
     "humidifier": frozenset({"pTemp", "pHumi", "pVpd", "waterLv", "coreTemp"}),
     "heater": frozenset({"pTemp", "pHumi", "pVpd"}),
 }
