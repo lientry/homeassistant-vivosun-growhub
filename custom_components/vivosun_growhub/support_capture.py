@@ -21,6 +21,8 @@ class SupportCaptureManager:
         self._max_events = 0
         self._dropped_events = 0
         self._subscription_topics: list[str] = []
+        self._subscription_results: dict[str, dict[str, object]] = {}
+        self._model_metadata_results: list[dict[str, object]] = []
         self._devices: list[dict[str, object]] = []
         self._events: deque[dict[str, object]] = deque()
 
@@ -43,6 +45,8 @@ class SupportCaptureManager:
         self._max_events = max_events
         self._dropped_events = 0
         self._subscription_topics = list(subscription_topics)
+        self._subscription_results = {}
+        self._model_metadata_results = []
         self._devices = [sanitize_mapping_for_debug(dict(device)) for device in devices]
         self._events = deque(maxlen=max_events)
 
@@ -65,6 +69,23 @@ class SupportCaptureManager:
             event["data"] = sanitize_mapping_for_debug(dict(data))
         self._events.append(event)
 
+    def record_subscription_result(
+        self,
+        topic: str,
+        *,
+        status: str,
+        reason: str | None = None,
+    ) -> None:
+        """Record the latest broker outcome for an attempted support topic filter."""
+        result: dict[str, object] = {"topic": topic, "status": status}
+        if reason is not None:
+            result["reason"] = reason
+        self._subscription_results[topic] = sanitize_mapping_for_debug(result)
+
+    def record_model_metadata_result(self, result: Mapping[str, object]) -> None:
+        """Record a support-capture model metadata result."""
+        self._model_metadata_results.append(sanitize_mapping_for_debug(dict(result)))
+
     def snapshot(self) -> dict[str, Any]:
         """Return a diagnostics-safe snapshot of support capture state."""
         return {
@@ -74,6 +95,10 @@ class SupportCaptureManager:
             "max_events": self._max_events,
             "dropped_events": self._dropped_events,
             "subscription_topics": list(self._subscription_topics),
+            "subscription_results": [
+                self._subscription_results[topic] for topic in sorted(self._subscription_results)
+            ],
+            "model_metadata_results": list(self._model_metadata_results),
             "devices": list(self._devices),
             "events": list(self._events),
         }

@@ -55,7 +55,7 @@ class DeviceInfo:
 def infer_device_type(name: str, client_id: str = "") -> str:
     """Infer device type from stable model tokens and friendly-name hints."""
     combined = f"{name} {client_id}".lower()
-    model_token = _client_model_token(client_id)
+    model_token = client_model_token(client_id)
     if model_token.startswith("VSCTLE") or "growhub" in combined or "controller" in combined:
         return "controller"
     if model_token.startswith("VSDRY") or "aerodrain" in combined or "dehumidifier" in combined:
@@ -69,7 +69,7 @@ def infer_device_type(name: str, client_id: str = "") -> str:
     return "unknown"
 
 
-def _client_model_token(client_id: str) -> str:
+def client_model_token(client_id: str) -> str:
     parts = client_id.split("-")
     if len(parts) >= 2:
         return parts[1].upper()

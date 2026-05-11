@@ -568,22 +568,159 @@ async def test_support_capture_defers_topic_subscription_if_mqtt_drops(
     aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
     _patch_coordinator_deps(monkeypatch, api, aws_auth)
 
+    original_subscribe = _MqttStub.subscribe
+
+    async def _drop_probe_subscribe(self: _MqttStub, topics: list[tuple[str, int]]) -> None:
+        if isinstance(self.client_id, str) and self.client_id.startswith("ha-vivosun-probe-"):
+            self.connected = False
+            raise MQTTConnectionError("MQTT client disconnected")
+        await original_subscribe(self, topics)
+
+    monkeypatch.setattr(_MqttStub, "subscribe", _drop_probe_subscribe)
+
     coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
     await coordinator.async_start()
-
-    mqtt = _MqttStub.instances[0]
-
-    async def _drop_during_subscribe(_topics: list[tuple[str, int]]) -> None:
-        raise MQTTConnectionError("MQTT client disconnected")
-
-    mqtt.subscribe = _drop_during_subscribe  # type: ignore[method-assign]
 
     await coordinator.async_start_support_capture(max_events=100)
 
     snapshot = coordinator.support_capture_snapshot()
     events = cast("list[dict[str, object]]", snapshot["events"])
+    subscription_results = cast("list[dict[str, object]]", snapshot["subscription_results"])
     assert snapshot["active"] is True
+    assert coordinator.is_mqtt_connected is True
     assert any(event["kind"] == "support_topics_subscription_deferred" for event in events)
+    assert subscription_results
+    assert all(result["status"] == "deferred" for result in subscription_results)
+
+    await coordinator.async_shutdown()
+
+
+async def test_support_capture_topics_include_named_shadow_and_prefix_probes(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    api = _ApiStub()
+    aws_auth = _AwsAuthStub()
+    aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
+    _patch_coordinator_deps(monkeypatch, api, aws_auth)
+
+    coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
+    await coordinator.async_start()
+
+    topics = coordinator._support_capture_topic_names()
+
+    assert "$aws/things/thing-1/shadow/get/rejected" in topics
+    assert "$aws/things/thing-1/shadow/name/+/update/documents" in topics
+    assert "$aws/things/thing-2/shadow/name/+/update/delta" in topics
+    assert "topic/1/#" in topics
+    assert "topic/2/#" in topics
+
+    await coordinator.async_shutdown()
+
+
+async def test_support_capture_records_accepted_and_rejected_topic_filters(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    api = _ApiStub()
+    aws_auth = _AwsAuthStub()
+    aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
+    _patch_coordinator_deps(monkeypatch, api, aws_auth)
+
+    original_subscribe = _MqttStub.subscribe
+
+    async def _subscribe_with_single_rejection(self: _MqttStub, topics: list[tuple[str, int]]) -> None:
+        if (
+            isinstance(self.client_id, str)
+            and self.client_id.startswith("ha-vivosun-probe-")
+        ):
+            assert len(topics) == 1
+            if topics[0][0] == "$aws/things/thing-1/shadow/name/+/update/rejected":
+                raise MQTTConnectionError("Broker rejected one or more topic subscriptions")
+        await original_subscribe(self, topics)
+
+    monkeypatch.setattr(_MqttStub, "subscribe", _subscribe_with_single_rejection)
+
+    coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
+    await coordinator.async_start()
+
+    await coordinator.async_start_support_capture(max_events=100)
+
+    snapshot = coordinator.support_capture_snapshot()
+    events = cast("list[dict[str, object]]", snapshot["events"])
+    subscription_results = cast("list[dict[str, object]]", snapshot["subscription_results"])
+    by_topic = {cast("str", result["topic"]): result for result in subscription_results}
+
+    assert coordinator.is_mqtt_connected is True
+    assert by_topic["$aws/things/thing-1/shadow/name/+/update/rejected"]["status"] == "rejected"
+    assert by_topic["topic/1/#"]["status"] == "accepted"
+    assert by_topic["topic/2/#"]["status"] == "accepted"
+    assert any(
+        event["kind"] == "support_topics_subscribed"
+        and cast("dict[str, object]", event["data"])["rejected_topic_count"] == 1
+        for event in events
+    )
+
+    await coordinator.async_shutdown()
+
+
+async def test_support_capture_records_model_metadata_results(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    api = _ApiStub()
+    api.devices = [
+        DeviceInfo(
+            device_id="device-2",
+            client_id="vivosun-VSHUMH05-account-device-2",
+            topic_prefix="topic/2",
+            name="AeroStream H05",
+            online=True,
+            scene_id=66079,
+            device_type="humidifier",
+        ),
+        DeviceInfo(
+            device_id="device-1",
+            client_id="vivosun-VSCTLE42AP-account-device-1",
+            topic_prefix="topic/1",
+            name="GrowHub E42A+",
+            online=True,
+            scene_id=66078,
+            device_type="controller",
+        ),
+    ]
+    aws_auth = _AwsAuthStub()
+    aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
+    _patch_coordinator_deps(monkeypatch, api, aws_auth)
+
+    coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
+    await coordinator.async_start()
+    await coordinator.async_start_support_capture(max_events=100)
+
+    snapshot = coordinator.support_capture_snapshot()
+    model_metadata_results = cast(
+        "list[dict[str, object]]", snapshot["model_metadata_results"]
+    )
+    by_token = {
+        cast("str", result["model_code"]): result for result in model_metadata_results
+    }
+
+    assert by_token["VSCTLE42AP"]["matched"] is True
+    assert by_token["VSCTLE42AP"]["default_name"] == "GrowHub E42A+"
+    assert by_token["VSCTLE42AP"]["channel_param_key"] == {
+        "0": {"temp": "bTemp", "humi": "bHumi"},
+        "1": {"temp": "pTemp", "humi": "pHumi"},
+    }
+    assert by_token["VSHUMH05"]["matched"] is True
+    assert by_token["VSHUMH05"]["comm_mode_list"] == ["MQTT"]
+    assert by_token["VSHUMH05"]["data_upload_groups"] == [
+        {
+            "group_name": "Probe",
+            "group_type": "CLIMATE",
+            "shadow_channel": 0,
+            "data_keys": ["pTemp", "pHumi", "pVpd", "pCo2"],
+        }
+    ]
 
     await coordinator.async_shutdown()
 

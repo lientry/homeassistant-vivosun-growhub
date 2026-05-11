@@ -62,6 +62,8 @@ def test_support_capture_manager_records_bounded_events() -> None:
     assert snapshot["active"] is False
     assert snapshot["max_events"] == 2
     assert snapshot["dropped_events"] == 1
+    assert snapshot["subscription_results"] == []
+    assert snapshot["model_metadata_results"] == []
     events = cast("list[dict[str, object]]", snapshot["events"])
     assert [event["kind"] for event in events] == ["two", "three"]
 

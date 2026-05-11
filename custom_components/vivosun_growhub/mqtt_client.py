@@ -392,6 +392,7 @@ class MQTTClient:
         thing: str,
         topic_prefix: str,
         client_id: str | None = None,
+        label: str = "mqtt",
         keepalive_seconds: float = 60,
         connect_timeout: float = 15.0,
     ) -> None:
@@ -399,6 +400,7 @@ class MQTTClient:
         self._thing = thing
         self._topic_prefix = topic_prefix
         self._client_id = client_id or thing
+        self._label = label
         self._keepalive = keepalive_seconds
         self._connect_timeout = connect_timeout
 
@@ -590,8 +592,11 @@ class MQTTClient:
                 await self._handle_packet(packet)
         except asyncio.CancelledError:
             raise
+        except websockets.exceptions.ConnectionClosedOK:
+            _LOGGER.debug("MQTT receive loop closed cleanly for %s", self._label)
+            await self.disconnect()
         except Exception:
-            _LOGGER.exception("MQTT receive loop failed")
+            _LOGGER.exception("MQTT receive loop failed for %s", self._label)
             await self.disconnect()
 
     async def _handle_packet(self, packet: ParsedPacket) -> None:

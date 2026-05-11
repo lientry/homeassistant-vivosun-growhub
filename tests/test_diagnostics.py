@@ -63,6 +63,20 @@ class _CoordinatorStub:
             "max_events": 500,
             "dropped_events": 0,
             "subscription_topics": ["$aws/things/device/shadow/get/rejected"],
+            "subscription_results": [
+                {
+                    "topic": "$aws/things/device/shadow/get/rejected",
+                    "status": "accepted",
+                }
+            ],
+            "model_metadata_results": [
+                {
+                    "model_code": "VSHUMH05",
+                    "matched": True,
+                    "default_name": "AeroStream H05",
+                    "comm_mode_list": ["MQTT"],
+                }
+            ],
             "devices": [{"device_id": "device-123456", "device_type": "controller"}],
             "events": [{"ts": "2026-03-05T11:55:01+00:00", "kind": "capture_started"}],
         }
@@ -179,6 +193,8 @@ async def test_diagnostics_coerces_non_serializable_support_capture_values(
             "max_events": 0,
             "dropped_events": 0,
             "subscription_topics": [],
+            "subscription_results": [],
+            "model_metadata_results": [],
             "devices": [],
             "events": [{"raw": object()}],
         }
