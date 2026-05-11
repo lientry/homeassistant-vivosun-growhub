@@ -8,6 +8,7 @@ Unofficial Home Assistant integration for Vivosun GrowHub lighting, fans, humidi
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Custom%20Integration-blue)
 ![Runtime](https://img.shields.io/badge/Runtime-Hybrid%20MQTT%20%2B%20REST-4c8bf5)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
+[![HACS](https://img.shields.io/badge/HACS-Default-orange.svg)](https://hacs.xyz)
 
 <a href="#why-this-integration">Why This Integration?</a>
 ◆ <a href="#quick-start">Quick Start</a>
@@ -47,8 +48,10 @@ What this integration is not:
 Verified working:
 
 - GrowHub `E42A`
+- GrowHub `E42A+`
 - GrowHub `E42`
 - GrowHub `E25`
+- GrowCam (LAN RTSP via the optional `camera_ip` option)
 
 Supported Home Assistant version:
 
@@ -56,29 +59,39 @@ Supported Home Assistant version:
 
 Notes:
 
+- The E42A+ controller publishes its built-in box and external probe telemetry under `bTemp/bHumi/bVpd` and `pTemp/pHumi/pVpd` instead of the older `inTemp/outTemp` keys; the integration accepts both shapes
+- GrowCam devices are detected even when the cloud payload omits `clientId`/`topicPrefix` or the user renamed the camera to a short name like `Cam`. After detection, set the camera's LAN IP via the integration options to enable the RTSP stream
 - The integration has been tested against current Home Assistant releases, not older 2024-era builds
 - Older Home Assistant versions may partially work, but they are not a supported target for this repository
 
-Likely compatible but not yet confirmed:
-
-- GrowHub `E42A+`
-
 ## Quick Start
 
-### Manual install
+### Install
 
-1. Copy `custom_components/vivosun_growhub` to your Home Assistant `config/custom_components` folder.
-2. Restart Home Assistant.
-3. Add the integration via `Settings -> Devices & Services`.
+If you do not already use HACS, start with the official docs:
 
-### HACS install
+- https://hacs.xyz/docs/use/
 
-1. Add this repository as a custom repository in HACS with type `Integration`.
-2. Install `Vivosun GrowHub`.
-3. Restart Home Assistant.
-4. Add the integration from the UI.
+Install `Vivosun GrowHub` from HACS. You can search for it in the Home Assistant UI or use the button below if you have My Home Assistant redirects set up:
+
+[![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=lientry&repository=homeassistant-vivosun-growhub&category=integration)
+
+After installation, restart Home Assistant.
+
+Then add `Vivosun GrowHub` via `Settings -> Devices & Services -> Add Integration` in the Home Assistant UI. You can also simply click the button below if you have My Home Assistant redirects set up:
+
+[![Add Integration to your Home Assistant instance.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=vivosun_growhub)
 
 ## Installation
+
+### HACS
+
+`Vivosun GrowHub` is available through HACS.
+
+1. Open HACS and search for `Vivosun GrowHub`, or use the button above.
+2. Install the integration.
+3. Restart Home Assistant.
+4. Add `Vivosun GrowHub` from `Settings -> Devices & Services`.
 
 ### Requirements
 
