@@ -156,6 +156,35 @@ async def test_get_devices_maps_grow_group_to_device_info() -> None:
     assert headers["access-token"] == "access-token-value"
 
 
+async def test_get_devices_maps_vsctl_controller_token_to_controller() -> None:
+    payload = {
+        "code": 0,
+        "success": True,
+        "message": "success",
+        "data": {
+            "deviceGroup": {
+                "GROW": [
+                    {
+                        "deviceId": "device-1",
+                        "clientId": "vivosun-VSCTL002-account-device-1",
+                        "topicPrefix": "vivosun/topic/1",
+                        "name": "E25 Controller",
+                        "onlineStatus": 1,
+                        "scene": {"sceneId": 1001},
+                    }
+                ]
+            }
+        },
+    }
+    session = cast("aiohttp.ClientSession", _MockSession(responses=[_MockResponse(status=200, payload=payload)]))
+    client = VivosunApiClient(session)
+
+    devices = await client.get_devices(_valid_tokens())
+
+    assert len(devices) == 1
+    assert devices[0].device_type == "controller"
+
+
 async def test_get_devices_coerces_string_online_status() -> None:
     """get_devices() should coerce string onlineStatus to int (API inconsistency)."""
     payload = {
