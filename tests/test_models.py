@@ -11,3 +11,7 @@ def test_infer_device_type_prefers_dehumidifier_over_humidifier_substring() -> N
 
 def test_infer_device_type_uses_dehumidifier_model_token() -> None:
     assert infer_device_type("Tent", "vivosun-VSDRYD12-acc-device-1") == "dehumidifier"
+
+
+def test_infer_device_type_uses_vsctl_controller_model_token() -> None:
+    assert infer_device_type("Tent", "vivosun-VSCTL002-acc-device-1") == "controller"
