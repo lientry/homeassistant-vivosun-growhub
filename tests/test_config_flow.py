@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.vivosun_growhub.const import DOMAIN
+from custom_components.vivosun_growhub.const import CONF_CAMERA_IPS, DOMAIN
 from custom_components.vivosun_growhub.exceptions import (
     VivosunAuthError,
     VivosunConnectionError,
@@ -90,9 +90,7 @@ async def test_config_flow_user_with_camera_shows_optional_camera_step(
         assert result["step_id"] == "camera"
 
 
-async def test_config_flow_camera_step_can_store_optional_ip(
-    hass: object, enable_custom_integrations: None
-) -> None:
+async def test_config_flow_camera_step_can_store_optional_ip(hass: object, enable_custom_integrations: None) -> None:
     from custom_components.vivosun_growhub.models import DeviceInfo
 
     with (
@@ -129,12 +127,64 @@ async def test_config_flow_camera_step_can_store_optional_ip(
 
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"] == {"email": "user@example.com", "password": "secret", "has_camera": True}
-        assert result["options"] == {"camera_ip": "10.0.15.202"}
+        assert result["options"] == {CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"}}
 
 
-async def test_config_flow_camera_step_rejects_invalid_ip(
+async def test_config_flow_camera_step_configures_each_discovered_camera(
     hass: object, enable_custom_integrations: None
 ) -> None:
+    from custom_components.vivosun_growhub.models import DeviceInfo
+
+    cameras = [
+        DeviceInfo(
+            device_id=f"camera-{index}",
+            client_id="",
+            topic_prefix="",
+            name=f"GrowCam Tent {index}",
+            online=True,
+            scene_id=1000 + index,
+            device_type="camera",
+        )
+        for index in (1, 2)
+    ]
+    with (
+        patch("custom_components.vivosun_growhub.config_flow.VivosunApiClient.login", new_callable=AsyncMock) as login,
+        patch(
+            "custom_components.vivosun_growhub.config_flow.VivosunApiClient.get_devices",
+            new_callable=AsyncMock,
+        ) as get_devices,
+        patch("custom_components.vivosun_growhub.async_setup_entry", return_value=True),
+        patch("custom_components.vivosun_growhub.async_setup", return_value=True),
+    ):
+        login.return_value = _tokens(user_id="account-123")
+        get_devices.return_value = cameras
+        init_result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
+        first_camera = await hass.config_entries.flow.async_configure(
+            init_result["flow_id"],
+            user_input={"email": "user@example.com", "password": "secret"},
+        )
+        second_camera = await hass.config_entries.flow.async_configure(
+            first_camera["flow_id"],
+            user_input={"camera_ip": "10.0.15.202"},
+        )
+        assert second_camera["type"] is FlowResultType.FORM
+        assert second_camera["description_placeholders"]["camera_name"] == "GrowCam Tent 2"
+
+        result = await hass.config_entries.flow.async_configure(
+            second_camera["flow_id"],
+            user_input={"camera_ip": "10.0.15.203"},
+        )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"] == {
+        CONF_CAMERA_IPS: {
+            "camera-1": "10.0.15.202",
+            "camera-2": "10.0.15.203",
+        }
+    }
+
+
+async def test_config_flow_camera_step_rejects_invalid_ip(hass: object, enable_custom_integrations: None) -> None:
     from custom_components.vivosun_growhub.models import DeviceInfo
 
     with (

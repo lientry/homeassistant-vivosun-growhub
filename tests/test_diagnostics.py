@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.vivosun_growhub.const import DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
+from custom_components.vivosun_growhub.const import CONF_CAMERA_IPS, DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
 from custom_components.vivosun_growhub.diagnostics import async_get_config_entry_diagnostics
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
 
@@ -30,9 +30,7 @@ class _CoordinatorStub:
         self.data: dict[str, object] = {
             "mqtt_connected": True,
             "devices": {self.device.device_id: self.device},
-            "shadows": {
-                self.device.device_id: {"light": {"level": 42}, "connection": {"connected": True}}
-            },
+            "shadows": {self.device.device_id: {"light": {"level": 42}, "connection": {"connected": True}}},
             "sensors": {self.device.device_id: {"inTemp": 2500, "inHumi": 5123}},
         }
         self.camera_devices = [
@@ -53,7 +51,7 @@ class _CoordinatorStub:
 
     @property
     def devices(self) -> list[DeviceInfo]:
-        return [self.device]
+        return getattr(self, "_devices", [self.device])
 
     def support_capture_snapshot(self) -> dict[str, object]:
         return {
@@ -97,7 +95,11 @@ async def test_diagnostics_redacts_sensitive_values(
             "login_token": "token-456",
             "aws_identity_id": "us-east-2:identity-raw",
         },
-        options={"temp_unit": "celsius", OPTION_SUPPORT_CAPTURE_ENABLED: True},
+        options={
+            "temp_unit": "celsius",
+            OPTION_SUPPORT_CAPTURE_ENABLED: True,
+            CONF_CAMERA_IPS: {"camera-654321": "10.0.15.202"},
+        },
     )
     entry.add_to_hass(hass)
     coordinator = _CoordinatorStub()
@@ -130,6 +132,13 @@ async def test_diagnostics_redacts_sensitive_values(
     assert discovered_devices[0]["device_id"] != "device-123456"
     assert discovered_devices[1]["device_type"] == "camera"
     assert discovered_devices[1]["is_primary"] is False
+    camera_configuration = cast("dict[str, object]", result["camera_configuration"])
+    assert camera_configuration["discovered_count"] == 1
+    assert camera_configuration["configured_count"] == 1
+    cameras = cast("list[dict[str, object]]", camera_configuration["cameras"])
+    assert cameras[0]["ip_configured"] is True
+    assert "10.0.15.202" not in json.dumps(result)
+    assert result["identifier_collisions"] == []
 
     support_capture = cast("dict[str, object]", result["support_capture"])
     assert support_capture["active"] is True
@@ -145,6 +154,43 @@ async def test_diagnostics_redacts_sensitive_values(
     assert coordinator_result["sensor_keys"] == ["inHumi", "inTemp"]
     assert coordinator_result["last_update_success_time"] == "2026-03-05T12:00:00+00:00"
     json.dumps(result)
+
+
+async def test_diagnostics_reports_identifier_collisions(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="user@example.com",
+        unique_id="user-998877",
+        data={"email": "user@example.com", "password": "super-secret"},
+    )
+    entry.add_to_hass(hass)
+    coordinator = _CoordinatorStub()
+    duplicate = DeviceInfo(
+        device_id="device-other",
+        client_id=coordinator.device.client_id,
+        topic_prefix=coordinator.device.topic_prefix,
+        name="GrowHub Duplicate",
+        online=True,
+        scene_id=66080,
+        device_type="controller",
+    )
+    coordinator._devices = [coordinator.device, duplicate]
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry_id=entry.entry_id,
+        coordinator=cast("object", coordinator),
+    )
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    collisions = cast("list[dict[str, object]]", result["identifier_collisions"])
+    assert {collision["identifier_type"] for collision in collisions} == {
+        "client_id",
+        "topic_prefix",
+    }
+    assert all(collision["count"] == 2 for collision in collisions)
 
 
 async def test_diagnostics_handles_missing_runtime(
