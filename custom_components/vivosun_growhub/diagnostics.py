@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.diagnostics import async_redact_data
 
-from .const import DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
+from .camera_config import camera_ips_from_options
+from .const import CONF_CAMERA_IP, CONF_CAMERA_IPS, DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
 from .redaction import redact_identifier, sanitize_mapping_for_debug
 
 if TYPE_CHECKING:
@@ -31,6 +32,8 @@ _DIAGNOSTICS_REDACT = {
     "secret_access_key",
     "session_token",
     "token",
+    CONF_CAMERA_IP,
+    CONF_CAMERA_IPS,
 }
 
 
@@ -67,6 +70,11 @@ async def async_get_config_entry_diagnostics(
         coordinator,
         primary_device_id=device.device_id if device else None,
     )
+    camera_devices = getattr(coordinator, "camera_devices", [])
+    if not isinstance(camera_devices, list):
+        camera_devices = []
+    camera_configuration = _build_camera_configuration(config_entry.options, camera_devices)
+    identifier_collisions = _build_identifier_collisions(coordinator)
     snapshot = coordinator.data if isinstance(coordinator.data, dict) else {}
     shadow = None
     sensors = snapshot.get("sensors")
@@ -107,6 +115,8 @@ async def async_get_config_entry_diagnostics(
             "topic_prefix": device.topic_prefix,
         },
         "discovered_devices": discovered_devices,
+        "camera_configuration": camera_configuration,
+        "identifier_collisions": identifier_collisions,
         "support_capture": coordinator.support_capture_snapshot(),
         "coordinator": {
             "mqtt_connected": mqtt_connected,
@@ -153,22 +163,18 @@ def _build_discovered_device_inventory(
     primary_device_id: str | None,
 ) -> list[dict[str, object]]:
     inventory: list[dict[str, object]] = []
-    seen: set[tuple[str, str, str]] = set()
-
     for collection_name in ("devices", "camera_devices"):
         devices = getattr(coordinator, collection_name, ())
         if not isinstance(devices, list):
             continue
-        for candidate in devices:
+        for collection_index, candidate in enumerate(devices):
             device_id = getattr(candidate, "device_id", "")
             client_id = getattr(candidate, "client_id", "")
             topic_prefix = getattr(candidate, "topic_prefix", "")
-            key = (device_id, client_id, topic_prefix)
-            if key in seen:
-                continue
-            seen.add(key)
             inventory.append(
                 {
+                    "collection": collection_name,
+                    "collection_index": collection_index,
                     "name": getattr(candidate, "name", ""),
                     "online": getattr(candidate, "online", False),
                     "device_type": getattr(candidate, "device_type", "unknown"),
@@ -181,3 +187,67 @@ def _build_discovered_device_inventory(
             )
 
     return inventory
+
+
+def _build_camera_configuration(
+    options: Mapping[str, object],
+    camera_devices: list[object],
+) -> dict[str, object]:
+    """Return diagnostics-safe camera configuration coverage."""
+    typed_camera_devices = [device for device in camera_devices if hasattr(device, "device_id")]
+    configured_ips = camera_ips_from_options(options, cast("list[Any]", typed_camera_devices))
+    return {
+        "discovered_count": len(typed_camera_devices),
+        "configured_count": sum(
+            1 for device in typed_camera_devices if getattr(device, "device_id", "") in configured_ips
+        ),
+        "uses_legacy_single_ip": isinstance(options.get(CONF_CAMERA_IP), str),
+        "cameras": [
+            {
+                "name": getattr(device, "name", ""),
+                "device_id": getattr(device, "device_id", ""),
+                "scene_id": getattr(device, "scene_id", 0),
+                "online": getattr(device, "online", False),
+                "ip_configured": getattr(device, "device_id", "") in configured_ips,
+                "lan_username_present": bool(getattr(device, "camera_username", None)),
+                "lan_password_present": bool(getattr(device, "camera_password", None)),
+            }
+            for device in typed_camera_devices
+        ],
+    }
+
+
+def _build_identifier_collisions(coordinator: object) -> list[dict[str, object]]:
+    """Return duplicate cloud identifiers that can break routing or entity identity."""
+    devices: list[object] = []
+    for collection_name in ("devices", "camera_devices"):
+        collection = getattr(coordinator, collection_name, ())
+        if isinstance(collection, list):
+            devices.extend(collection)
+
+    collisions: list[dict[str, object]] = []
+    for attribute in ("device_id", "client_id", "topic_prefix"):
+        grouped: dict[str, list[object]] = {}
+        for device in devices:
+            value = getattr(device, attribute, "")
+            if isinstance(value, str) and value:
+                grouped.setdefault(value, []).append(device)
+        for value, matches in grouped.items():
+            if len(matches) < 2:
+                continue
+            collisions.append(
+                {
+                    "identifier_type": attribute,
+                    "identifier_value_redacted": redact_identifier(value),
+                    "count": len(matches),
+                    "devices": [
+                        {
+                            "name": getattr(device, "name", ""),
+                            "device_type": getattr(device, "device_type", "unknown"),
+                            "scene_id": getattr(device, "scene_id", 0),
+                        }
+                        for device in matches
+                    ],
+                }
+            )
+    return collisions

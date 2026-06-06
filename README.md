@@ -51,7 +51,7 @@ Verified working:
 - GrowHub `E42A+`
 - GrowHub `E42`
 - GrowHub `E25`
-- GrowCam (LAN RTSP via the optional `camera_ip` option)
+- GrowCam (LAN RTSP via an optional per-camera IP)
 
 Supported Home Assistant version:
 
@@ -110,7 +110,7 @@ The options flow currently exposes:
 
 - `temp_unit`: `celsius` or `fahrenheit`
 - `support_capture_enabled`: enable local support capture so diagnostics exports include a rolling redacted MQTT/support buffer
-- `camera_ip`: optional GrowCam LAN IP, if one is present on the account
+- Per-camera GrowCam LAN IPs, when cameras are present on the account
 
 ## What It Exposes
 
@@ -145,7 +145,8 @@ Fan behavior is device-accurate rather than linear:
 ### Camera
 
 - `camera.growhub_<device>_camera`
-- Uses the optional `camera_ip` setting and LAN credentials from the account payload to build the RTSP stream URL
+- Creates one entity per configured GrowCam
+- Uses each camera's optional LAN IP and LAN credentials from the account payload to build its RTSP stream URL
 
 ### Sensors
 

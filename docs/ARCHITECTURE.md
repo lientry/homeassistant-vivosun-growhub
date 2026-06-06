@@ -152,7 +152,7 @@ Special mode:
 ### Camera
 
 - represented as a Home Assistant `camera` entity
-- uses the optional `camera_ip` option plus LAN credentials exposed by the account payload
+- uses a per-device camera IP mapping plus LAN credentials exposed by the account payload
 - RTSP stream URL is derived at runtime and credentials are URL-encoded before use
 
 ## Failure handling

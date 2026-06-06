@@ -10,7 +10,7 @@
       },
       "camera": {
         "title": "Configure GrowCam",
-        "description": "A GrowCam device was found on this account. You can optionally enter its LAN IP now. You can find the IP in the Vivosun app and add it later from the integration settings.",
+        "description": "Enter the optional LAN IP for {camera_name} ({camera_number} of {camera_count}). You can find the IP in the Vivosun app and add or change it later from the integration settings.",
         "data": {
           "camera_ip": "Camera IP"
         }
@@ -28,7 +28,13 @@
         "title": "Integration options",
         "data": {
           "temp_unit": "Temperature unit",
-          "support_capture_enabled": "Enable support capture for diagnostics",
+          "support_capture_enabled": "Enable support capture for diagnostics"
+        }
+      },
+      "camera": {
+        "title": "Configure GrowCam",
+        "description": "Enter the optional LAN IP for {camera_name} ({camera_number} of {camera_count}).",
+        "data": {
           "camera_ip": "Camera IP"
         }
       }

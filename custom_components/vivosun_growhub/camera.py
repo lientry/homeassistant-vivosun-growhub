@@ -8,7 +8,8 @@ from urllib.parse import quote
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 
-from .const import CONF_CAMERA_IP, DOMAIN
+from .camera_config import camera_ips_from_options
+from .const import DOMAIN
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -36,22 +37,26 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    camera_ip = str(entry.options.get(CONF_CAMERA_IP, "")).strip()
-    if not camera_ip:
-        return
-
     camera_devices = coordinator.camera_devices
     if not camera_devices:
         return
-    if len(camera_devices) > 1:
-        _LOGGER.warning("Multiple Vivosun cameras found but only one camera_ip option is supported")
+    camera_ips = camera_ips_from_options(entry.options, camera_devices)
 
-    camera_device = camera_devices[0]
-    if not camera_device.camera_username or not camera_device.camera_password:
-        _LOGGER.warning("Skipping Vivosun camera because LAN credentials are missing")
-        return
+    entities: list[VivosunGrowCamEntity] = []
+    for camera_device in camera_devices:
+        camera_ip = camera_ips.get(camera_device.device_id)
+        if not camera_ip:
+            continue
+        if not camera_device.camera_username or not camera_device.camera_password:
+            _LOGGER.warning(
+                "Skipping Vivosun camera %s because LAN credentials are missing",
+                camera_device.name,
+            )
+            continue
+        entities.append(VivosunGrowCamEntity(device=camera_device, camera_ip=camera_ip))
 
-    async_add_entities([VivosunGrowCamEntity(device=camera_device, camera_ip=camera_ip)])
+    if entities:
+        async_add_entities(entities)
 
 
 class VivosunGrowCamEntity(Camera):  # type: ignore[misc]
@@ -73,11 +78,7 @@ class VivosunGrowCamEntity(Camera):  # type: ignore[misc]
     @property
     def available(self) -> bool:
         """Return True when the camera has the required connection details."""
-        return bool(
-            self._camera_ip
-            and self._device.camera_username
-            and self._device.camera_password
-        )
+        return bool(self._camera_ip and self._device.camera_username and self._device.camera_password)
 
     @property
     def use_stream_for_stills(self) -> bool:

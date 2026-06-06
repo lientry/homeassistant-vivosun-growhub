@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.camera import VivosunGrowCamEntity, async_setup_entry
-from custom_components.vivosun_growhub.const import CONF_CAMERA_IP, DOMAIN
+from custom_components.vivosun_growhub.const import CONF_CAMERA_IP, CONF_CAMERA_IPS, DOMAIN
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
 
 if TYPE_CHECKING:
@@ -29,6 +29,20 @@ class _StubCoordinator:
                 camera_password="4kt5em",
             )
         ]
+
+
+def _second_camera() -> DeviceInfo:
+    return DeviceInfo(
+        device_id="camera-2",
+        client_id="",
+        topic_prefix="",
+        name="GrowCam C4 Tent 2",
+        online=True,
+        scene_id=1002,
+        device_type="camera",
+        camera_username="user2",
+        camera_password="pass2",
+    )
 
 
 async def test_camera_setup_creates_camera_entity_when_ip_is_configured(
@@ -66,6 +80,42 @@ async def test_camera_setup_skips_when_ip_not_configured(hass: HomeAssistant) ->
     await async_setup_entry(hass, entry, _add)
 
     assert added == []
+
+
+async def test_camera_setup_creates_entity_for_each_configured_camera(
+    hass: HomeAssistant,
+) -> None:
+    coordinator = _StubCoordinator()
+    coordinator.camera_devices.append(_second_camera())
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="t",
+        data={},
+        options={
+            CONF_CAMERA_IPS: {
+                "camera-1": "10.0.15.202",
+                "camera-2": "10.0.15.203",
+            }
+        },
+    )
+    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    added: list[VivosunGrowCamEntity] = []
+
+    def _add(entities: list[VivosunGrowCamEntity]) -> None:
+        added.extend(entities)
+
+    await async_setup_entry(hass, entry, _add)
+
+    assert {entity.unique_id for entity in added} == {
+        "vivosun_growhub_camera-1_camera",
+        "vivosun_growhub_camera-2_camera",
+    }
+    assert {await entity.stream_source() for entity in added} == {
+        "rtsp://abjd:4kt5em@10.0.15.202:554/",
+        "rtsp://user2:pass2@10.0.15.203:554/",
+    }
 
 
 async def test_camera_stream_source_quotes_credentials() -> None:

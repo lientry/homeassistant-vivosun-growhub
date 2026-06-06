@@ -20,6 +20,8 @@ Wait for the integration to finish reloading before continuing.
 
 Do a short, deliberate test run.
 
+For camera discovery, missing camera, or duplicated-device reports, no device action is required. Wait for the integration reload to finish, then continue to step 4.
+
 If the device already has Home Assistant controls, use them once.
 
 If the device does not have working Home Assistant controls yet, use the **Vivosun app** instead.
