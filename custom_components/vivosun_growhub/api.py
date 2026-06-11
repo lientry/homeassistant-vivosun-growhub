@@ -21,7 +21,6 @@ from .const import (
     API_PROTOCOL_VERSION,
     API_REQUEST_TIMEOUT_SECONDS,
     APP_VERSION,
-    SERVER_PLATFORM,
     SENSOR_KEY_BOX_HUMI,
     SENSOR_KEY_BOX_TEMP,
     SENSOR_KEY_BOX_VPD,
@@ -38,6 +37,7 @@ from .const import (
     SENSOR_KEY_RSSI,
     SENSOR_KEY_WATER_LEVEL,
     SENSOR_UNAVAILABLE_SENTINEL,
+    SERVER_PLATFORM,
 )
 from .encryption import encrypt_request_body
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError

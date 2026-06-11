@@ -42,7 +42,7 @@ def encrypt_request_body(plaintext: bytes, *, timestamp_ms: int) -> tuple[str, s
     ``request_time`` and ``request_code`` must be sent as the ``Request-Time``
     and ``Request-Code`` headers; ``body`` is the JSON payload to transmit.
     """
-    md5_hex = hashlib.md5(str(timestamp_ms).encode()).hexdigest()  # noqa: S324 - matches app
+    md5_hex = hashlib.md5(str(timestamp_ms).encode()).hexdigest()  # MD5 matches app
 
     key_len = secrets.choice(_AES_KEY_LENGTHS)
     key_start = secrets.randbelow(_MD5_HEX_LENGTH - key_len + 1)
