@@ -13,6 +13,13 @@ API_AWS_IDENTITY_PATH = "/iot/user/awsIdentity"
 API_POINT_LOG_PATH = "/iot/data/getPointLog"
 API_REQUEST_TIMEOUT_SECONDS = 15
 
+# Headers the official app attaches to every request. The cloud rejects
+# unencrypted production POSTs (see encryption.py); these mirror the real
+# client so requests are accepted. APP_VERSION tracks the Play Store release.
+APP_VERSION = "4.63.1"
+API_PROTOCOL_VERSION = "1.0.5"
+SERVER_PLATFORM = "android"
+
 CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
 CONF_CAMERA_IP = "camera_ip"

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -16,7 +18,9 @@ from .const import (
     API_LOGIN_PATH,
     API_PLAN_STAGE_INFO_PATH,
     API_POINT_LOG_PATH,
+    API_PROTOCOL_VERSION,
     API_REQUEST_TIMEOUT_SECONDS,
+    APP_VERSION,
     SENSOR_KEY_BOX_HUMI,
     SENSOR_KEY_BOX_TEMP,
     SENSOR_KEY_BOX_VPD,
@@ -33,7 +37,9 @@ from .const import (
     SENSOR_KEY_RSSI,
     SENSOR_KEY_WATER_LEVEL,
     SENSOR_UNAVAILABLE_SENTINEL,
+    SERVER_PLATFORM,
 )
+from .encryption import encrypt_request_body
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
 from .models import AuthTokens, AwsIdentity, DeviceInfo, PlanStageInfo, infer_device_type
 from .redaction import redact_identifier, sanitize_mapping_for_debug
@@ -282,11 +288,25 @@ class VivosunApiClient:
     ) -> Mapping[str, object]:
         """Call endpoint and return validated envelope data payload."""
         url = f"{self._base_url}{path}"
-        request_kwargs: dict[str, object] = {"timeout": self._timeout}
+        request_headers = self._base_headers()
         if headers is not None:
-            request_kwargs["headers"] = dict(headers)
+            request_headers.update(headers)
+        request_kwargs: dict[str, object] = {"timeout": self._timeout, "headers": request_headers}
+
         if json_body is not None:
-            request_kwargs["json"] = dict(json_body)
+            plaintext = json.dumps(dict(json_body), separators=(",", ":")).encode()
+            # The cloud requires production POST bodies to be encrypted; login is
+            # the one POST exempted (it must work before encryption keys exist).
+            if method.upper() == "POST" and path != API_LOGIN_PATH:
+                request_time, request_code, body = encrypt_request_body(
+                    plaintext, timestamp_ms=int(time.time() * 1000)
+                )
+                request_headers["Request-Time"] = request_time
+                request_headers["Request-Code"] = request_code
+            else:
+                body = plaintext
+            request_headers["Content-Type"] = "application/json"
+            request_kwargs["data"] = body
 
         try:
             async with self._session.request(method, url, **request_kwargs) as response:
@@ -323,6 +343,14 @@ class VivosunApiClient:
 
         data = self._expect_mapping(payload, "data")
         return data
+
+    def _base_headers(self) -> dict[str, str]:
+        """Headers the official app sends on every request (mirrors its client)."""
+        return {
+            "Server-Platform": SERVER_PLATFORM,
+            "Api-Version": API_PROTOCOL_VERSION,
+            "App-Version": APP_VERSION,
+        }
 
     def _auth_headers(self, tokens: AuthTokens) -> dict[str, str]:
         """Build auth headers for authenticated endpoints."""
