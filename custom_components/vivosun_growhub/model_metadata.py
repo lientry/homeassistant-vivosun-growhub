@@ -8,6 +8,29 @@ from typing import Any
 from .models import client_model_token
 
 _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
+    "VSCBC80": {
+        "default_name": "VCure C80",
+        "device_type": "controller",
+        "comm_mode_list": ["MQTT"],
+        "channel_param_key": {
+            "0": {"temp": "bTemp", "humi": "bHumi"},
+            "1": {"temp": "pTemp", "humi": "pHumi"},
+        },
+        "data_upload_groups": [
+            {
+                "group_name": "Built-in",
+                "group_type": "CLIMATE",
+                "shadow_channel": 0,
+                "data_keys": ["bTemp", "bHumi", "bVpd"],
+            },
+            {
+                "group_name": "Probe",
+                "group_type": "CLIMATE",
+                "shadow_channel": 0,
+                "data_keys": ["pTemp", "pHumi", "pVpd"],
+            },
+        ],
+    },
     "VSCTL001": {
         "default_name": "GrowHub E42",
         "device_type": "controller",

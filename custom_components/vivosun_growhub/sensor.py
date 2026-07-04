@@ -193,6 +193,7 @@ _DEVICE_TYPE_SENSORS: dict[str, frozenset[str]] = {
     "dehumidifier": frozenset({"pTemp", "pHumi", "pVpd"}),
     "humidifier": frozenset({"pTemp", "pHumi", "pVpd", "waterLv", "coreTemp"}),
     "heater": frozenset({"pTemp", "pHumi", "pVpd"}),
+    "curing_box": frozenset({"pTemp", "pHumi", "pVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
 }
 
 

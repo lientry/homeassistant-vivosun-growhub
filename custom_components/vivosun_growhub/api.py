@@ -117,7 +117,9 @@ class VivosunApiClient:
 
         device_id = self._optional_str(device, "deviceId")
         scene_id = self._optional_scene_id(device)
-        if device_id is None or scene_id is None:
+        if scene_id is None:
+            scene_id = 0
+        if device_id is None:
             self._log_skipped_device(device, category_key=category_key, index=index)
             return None
 

@@ -66,6 +66,8 @@ def infer_device_type(name: str, client_id: str = "") -> str:
         return "heater"
     if "growcam" in combined or "camera" in combined:
         return "camera"
+    if model_token.startswith("VSCB") or "vcure" in combined:
+        return "curing_box"
     return "unknown"
 
 
