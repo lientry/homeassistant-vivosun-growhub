@@ -57,6 +57,10 @@ _SUPPORTED_REPORTED_ROOT_KEYS: frozenset[str] = frozenset(
         "blTime",
         "portMod",
         "openApi",
+        "ctlGlass",
+        "ctlLight",
+        "ctlLock",
+        "cure",
     }
 )
 _DFAN_AUTO_FIELDS: frozenset[str] = frozenset(
