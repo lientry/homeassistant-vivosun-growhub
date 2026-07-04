@@ -93,6 +93,13 @@ class VivosunCureModeSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity)
             return None
         return _PREFIX_TO_MODE.get(cont_id.split("+")[0])
 
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        plan = self._reported("plan")
+        stage = plan.get("stage1")
+        stage = stage if isinstance(stage, dict) else {}
+        return {"cont_id": stage.get("contId"), "start_t": stage.get("startT")}
+
     async def _publish(self, payload: dict[str, object]) -> None:
         await self.coordinator.async_publish_shadow_update(
             {"state": {"desired": {"plan": {"stage1": payload}}}},
