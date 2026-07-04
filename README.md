@@ -256,3 +256,115 @@ MIT.
 ## Trademark note
 
 `VIVOSUN` and related marks belong to their respective owners. This project is unofficial and uses vendor names only to identify device compatibility.
+
+## VCure C80 (curing box)
+
+Supported since this fork: telemetry sensors (probe + built-in climate, core temp, WiFi),
+control switches (privacy glass, interior light, control lock) and a mode select for the
+five built-in presets. Custom recipes are account-bound and show as unknown in the select.
+
+### Optional: phase-based target band template sensors
+
+Target bands per preset (envelope across the recipe stages), rendered as overlay lines
+in history graphs. Add as a package, e.g. `/config/packages/vcure_targets.yaml`:
+
+```yaml
+template:
+  - sensor:
+      - name: "vcure_ziel_temp_min"
+        unit_of_measurement: "°C"
+        state: >-
+          {{ {"Schnellzyklus": 17, "Feinzyklus": 17, "Nur Curen": 17, "Kaltlagerung": 16, "Extract-Cure": 10}.get(states('select.vcure_c80_modus'), 16) }}
+      - name: "vcure_ziel_temp_max"
+        unit_of_measurement: "°C"
+        state: >-
+          {{ {"Schnellzyklus": 20, "Feinzyklus": 20, "Nur Curen": 20, "Kaltlagerung": 18, "Extract-Cure": 13}.get(states('select.vcure_c80_modus'), 20) }}
+      - name: "vcure_ziel_rh_min"
+        unit_of_measurement: "%"
+        state: >-
+          {{ {"Schnellzyklus": 55, "Feinzyklus": 58, "Nur Curen": 59, "Kaltlagerung": 57, "Extract-Cure": 55}.get(states('select.vcure_c80_modus'), 55) }}
+      - name: "vcure_ziel_rh_max"
+        unit_of_measurement: "%"
+        state: >-
+          {{ {"Schnellzyklus": 59, "Feinzyklus": 60, "Nur Curen": 64, "Kaltlagerung": 61, "Extract-Cure": 60}.get(states('select.vcure_c80_modus'), 62) }}
+      - name: "vcure_vpd_min"
+        unit_of_measurement: "kPa"
+        state: >-
+          {{ {"Schnellzyklus": 0.8, "Feinzyklus": 0.8, "Nur Curen": 0.7, "Kaltlagerung": 0.7, "Extract-Cure": 0.5}.get(states('select.vcure_c80_modus'), 0.7) }}
+      - name: "vcure_vpd_max"
+        unit_of_measurement: "kPa"
+        state: >-
+          {{ {"Schnellzyklus": 1.1, "Feinzyklus": 1.0, "Nur Curen": 0.9, "Kaltlagerung": 0.9, "Extract-Cure": 0.7}.get(states('select.vcure_c80_modus'), 1.0) }}
+```
+
+Band values derived from the preset recipe stages shown in the VIVOSUN app (drying →
+curing → storing envelope). Adjust to your recipes. Requires `packages: !include_dir_named packages`
+under `homeassistant:` in `configuration.yaml`.
+
+### Optional: example dashboard view
+
+```yaml
+type: panel
+cards:
+  - type: grid
+    columns: 4
+    square: false
+    cards:
+      - type: vertical-stack
+        cards:
+          - type: grid
+            columns: 3
+            square: false
+            cards:
+              - type: button
+                entity: switch.vcure_c80_privacy_glass
+                name: Glass
+                tap_action: {action: toggle}
+              - type: button
+                entity: switch.vcure_c80_interior_light
+                name: Light
+                tap_action: {action: toggle}
+              - type: button
+                entity: switch.vcure_c80_control_lock
+                name: Lock
+                tap_action: {action: toggle}
+          - type: tile
+            entity: select.vcure_c80_modus
+            features:
+              - type: select-options
+      - type: entities
+        title: VCure C80
+        entities:
+          - binary_sensor.vcure_c80_connected
+          - sensor.vcure_c80_core_temperature
+          - sensor.vcure_c80_outside_humidity
+          - sensor.vcure_c80_outside_temperature
+          - sensor.vcure_c80_outside_vpd
+          - sensor.vcure_c80_probe_humidity
+          - sensor.vcure_c80_probe_temperature
+          - sensor.vcure_c80_probe_vpd
+          - sensor.vcure_c80_wifi_signal
+      - type: history-graph
+        title: Chamber 24h
+        hours_to_show: 24
+        entities:
+          - sensor.vcure_c80_probe_humidity
+          - sensor.vcure_c80_probe_temperature
+          - sensor.vcure_c80_probe_vpd
+          - {entity: sensor.vcure_ziel_temp_min, name: Target min}
+          - {entity: sensor.vcure_ziel_temp_max, name: Target max}
+          - {entity: sensor.vcure_ziel_rh_min, name: Target min}
+          - {entity: sensor.vcure_ziel_rh_max, name: Target max}
+          - {entity: sensor.vcure_vpd_min, name: Target min}
+          - {entity: sensor.vcure_vpd_max, name: Target max}
+      - type: history-graph
+        title: Ambient 24h
+        hours_to_show: 24
+        entities:
+          - sensor.vcure_c80_outside_humidity
+          - sensor.vcure_c80_outside_temperature
+          - sensor.vcure_c80_outside_vpd
+```
+
+Channel semantics on the VCure: `p*` (probe) = chamber, `b*` (built-in, exposed as
+"Outside") = housing/ambient.

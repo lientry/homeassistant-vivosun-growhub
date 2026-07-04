@@ -20,15 +20,15 @@ from .models import RuntimeData
 
 OPTION_STOPPED = "Gestoppt"
 
-# contId-Konstanten aus Support-Capture 2026-07-04. Preset-IDs sind global,
-# die Custom-ID ist kontogebunden und aendert sich bei Rezept-Bearbeitung.
+# contId constants from support capture 2026-07-04. Preset IDs are global.
+# Custom recipes are account-bound and intentionally not mapped; an active
+# custom recipe shows as unknown.
 _MODE_CONT_IDS: dict[str, str] = {
     "Schnellzyklus": "234193+1756947323",
     "Feinzyklus": "234194+1756947323",
     "Nur Curen": "234195+1756947324",
     "Kaltlagerung": "234196+1756947324",
     "Extract-Cure": "234197+1757484248",
-    "Custom": "352002+1783181090",
 }
 _PREFIX_TO_MODE: dict[str, str] = {
     cid.split("+")[0]: name for name, cid in _MODE_CONT_IDS.items()
