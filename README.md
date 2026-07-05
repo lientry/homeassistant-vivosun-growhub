@@ -33,6 +33,7 @@ What is working:
 - AeroStream humidifier support
 - AeroFlux heater support
 - GrowCam camera support with optional LAN IP setup
+- VCure C80 support with curing telemetry, built-in mode selection, privacy glass, interior light, and door lock controls
 - Climate telemetry polling for inside/outside temperature, humidity, and VPD
 - Grow plan sensors: active stage name, light schedule, and read-only recipe schedules for fan, humidifier, dehumidifier, drip irrigation, heater, and air conditioner
 - Redacted diagnostics export
@@ -51,6 +52,7 @@ Verified working:
 - GrowHub `E42A+`
 - GrowHub `E42`
 - GrowHub `E25`
+- VCure C80 (`VSCBC80`)
 - GrowCam (LAN RTSP via an optional per-camera IP)
 
 Supported Home Assistant version:
@@ -147,6 +149,15 @@ Fan behavior is device-accurate rather than linear:
 - `camera.growhub_<device>_camera`
 - Creates one entity per configured GrowCam
 - Uses each camera's optional LAN IP and LAN credentials from the account payload to build its RTSP stream URL
+
+### VCure C80
+
+- `select.vcure_<device>_mode`
+- `switch.vcure_<device>_privacy_glass`
+- `switch.vcure_<device>_interior_light`
+- `switch.vcure_<device>_door_lock`
+
+The mode selector exposes the built-in VCure presets. Custom recipes are not exposed yet because their identifiers need a reliable discovery path.
 
 ### Sensors
 
