@@ -128,7 +128,7 @@ class VivosunApiClient:
         topic_prefix = self._optional_str(device, "topicPrefix")
         device_type = infer_device_type(name, client_id or "")
         scene_id = self._optional_scene_id(device)
-        supports_point_log = scene_id is not None
+        supports_point_log = scene_id is not None or device_type in _NO_SCENE_DEVICE_TYPES
         camera_username, camera_password = self._extract_camera_credentials(device)
 
         if device_type == "unknown" and (camera_username is not None or camera_password is not None):
