@@ -185,6 +185,38 @@ async def test_get_devices_maps_vsctl_controller_token_to_controller() -> None:
     assert devices[0].device_type == "controller"
 
 
+async def test_get_devices_maps_vcure_without_scene_to_curing_box() -> None:
+    payload = {
+        "code": 0,
+        "success": True,
+        "message": "success",
+        "data": {
+            "deviceGroup": {
+                "STORE": [
+                    {
+                        "deviceId": "vcure-1",
+                        "clientId": "vivosun-VSCBC80-account-device-1",
+                        "topicPrefix": "vivosun/topic/vcure",
+                        "name": "VCure C80",
+                        "onlineStatus": 1,
+                        "scene": None,
+                    }
+                ]
+            }
+        },
+    }
+    session = cast("aiohttp.ClientSession", _MockSession(responses=[_MockResponse(status=200, payload=payload)]))
+    client = VivosunApiClient(session)
+
+    devices = await client.get_devices(_valid_tokens())
+
+    assert len(devices) == 1
+    assert devices[0].device_type == "curing_box"
+    assert devices[0].scene_id == 0
+    assert devices[0].supports_point_log is False
+    assert client.skipped_devices == []
+
+
 async def test_get_devices_coerces_string_online_status() -> None:
     """get_devices() should coerce string onlineStatus to int (API inconsistency)."""
     payload = {
@@ -277,6 +309,53 @@ async def test_get_devices_skips_non_iot_entries_without_required_mqtt_fields() 
     assert len(devices) == 1
     assert devices[0].device_id == "device-1"
     assert devices[0].device_type == "controller"
+    assert client.skipped_devices[0]["device_group"] == "DHMDF"
+    assert client.skipped_devices[0]["missing_fields"] == ["sceneId", "clientId", "topicPrefix"]
+
+
+async def test_get_devices_tracks_skipped_missing_scene_entry() -> None:
+    payload = {
+        "code": 0,
+        "success": True,
+        "message": "success",
+        "data": {
+            "deviceGroup": {
+                "GROW": [
+                    {
+                        "deviceId": "device-1",
+                        "clientId": "vivosun-VSCTLE42A-account-device-1",
+                        "topicPrefix": "vivosun/topic/1",
+                        "name": "GrowHub A",
+                        "onlineStatus": 1,
+                        "scene": None,
+                    }
+                ]
+            }
+        },
+    }
+    session = cast("aiohttp.ClientSession", _MockSession(responses=[_MockResponse(status=200, payload=payload)]))
+    client = VivosunApiClient(session)
+
+    devices = await client.get_devices(_valid_tokens())
+
+    assert devices == []
+    assert client.skipped_devices == [
+        {
+            "device_group": "GROW",
+            "index": 0,
+            "available_keys": ["clientId", "deviceId", "name", "onlineStatus", "scene", "topicPrefix"],
+            "model_token": "VSCTLE42A",
+            "missing_fields": ["sceneId"],
+            "raw": {
+                "deviceId": "dev...03204de9",
+                "clientId": "viv...fecc5306",
+                "topicPrefix": "viv...66ce0025",
+                "name": "GrowHub A",
+                "onlineStatus": 1,
+                "scene": None,
+            },
+        }
+    ]
 
 
 async def test_get_devices_extracts_camera_lan_credentials() -> None:

@@ -272,6 +272,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         end_time = int(datetime.now(tz=UTC).timestamp())
         start_time = end_time - _POINT_LOG_WINDOW_SECONDS
         for device in self._devices:
+            if not device.supports_point_log:
+                continue
             try:
                 point_log = await self._api.get_point_log(
                     tokens, device, start_time=start_time, end_time=end_time
@@ -609,6 +611,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     **support_capture_model_metadata(device.client_id),
                 }
             )
+
+    def skipped_devices_snapshot(self) -> list[dict[str, object]]:
+        """Return skipped getTotalList entries recorded by the API client."""
+        skipped = getattr(self._api, "skipped_devices", [])
+        if isinstance(skipped, list):
+            return [dict(entry) for entry in skipped if isinstance(entry, dict)]
+        return []
 
     def _parse_json_object(self, payload: bytes) -> dict[str, object]:
         decoded = json.loads(payload)

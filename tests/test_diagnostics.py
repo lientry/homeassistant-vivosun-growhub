@@ -79,6 +79,9 @@ class _CoordinatorStub:
             "events": [{"ts": "2026-03-05T11:55:01+00:00", "kind": "capture_started"}],
         }
 
+    def skipped_devices_snapshot(self) -> list[dict[str, object]]:
+        return []
+
 
 async def test_diagnostics_redacts_sensitive_values(
     hass: HomeAssistant,
@@ -132,6 +135,7 @@ async def test_diagnostics_redacts_sensitive_values(
     assert discovered_devices[0]["device_id"] != "device-123456"
     assert discovered_devices[1]["device_type"] == "camera"
     assert discovered_devices[1]["is_primary"] is False
+    assert result["skipped_devices"] == []
     camera_configuration = cast("dict[str, object]", result["camera_configuration"])
     assert camera_configuration["discovered_count"] == 1
     assert camera_configuration["configured_count"] == 1
@@ -191,6 +195,52 @@ async def test_diagnostics_reports_identifier_collisions(
         "topic_prefix",
     }
     assert all(collision["count"] == 2 for collision in collisions)
+
+
+async def test_diagnostics_includes_redacted_skipped_devices(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="user@example.com",
+        unique_id="user-998877",
+        data={"email": "user@example.com", "password": "super-secret"},
+    )
+    entry.add_to_hass(hass)
+    coordinator = _CoordinatorStub()
+
+    def _skipped_devices() -> list[dict[str, object]]:
+        return [
+            {
+                "device_group": "GROW",
+                "index": 0,
+                "available_keys": ["clientId", "deviceId", "name"],
+                "model_token": "VSCTLE42A",
+                "missing_fields": ["sceneId"],
+                "raw": {
+                    "deviceId": "raw-device-id",
+                    "clientId": "vivosun-VSCTLE42A-account-device-1",
+                    "topicPrefix": "vivosun/topic/1",
+                },
+            }
+        ]
+
+    coordinator.skipped_devices_snapshot = _skipped_devices  # type: ignore[method-assign]
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry_id=entry.entry_id,
+        coordinator=cast("object", coordinator),
+    )
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    skipped_devices = cast("list[dict[str, object]]", result["skipped_devices"])
+    assert skipped_devices[0]["missing_fields"] == ["sceneId"]
+    assert skipped_devices[0]["model_token"] == "VSCTLE42A"
+    serialized = json.dumps(result)
+    assert "raw-device-id" not in serialized
+    assert "vivosun-VSCTLE42A-account-device-1" not in serialized
+    assert "vivosun/topic/1" not in serialized
 
 
 async def test_diagnostics_handles_missing_runtime(

@@ -50,6 +50,7 @@ class DeviceInfo:
     device_type: str = "unknown"
     camera_username: str | None = None
     camera_password: str | None = None
+    supports_point_log: bool = True
 
 
 def infer_device_type(name: str, client_id: str = "") -> str:

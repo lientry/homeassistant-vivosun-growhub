@@ -255,7 +255,7 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
         self.entity_description = description
         self._entry = entry
         self._device_id = device_id
-        self._attr_name = description.name
+        self._attr_name = description.name if isinstance(description.name, str) else None
         self._attr_device_class = description.device_class
         self._attr_state_class = description.state_class
         self._attr_unique_id = f"vivosun_growhub_{device_id}_{description.channel_key}"
@@ -277,7 +277,8 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
             if self._temp_unit() == _UNIT_FAHRENHEIT:
                 return str(UnitOfTemperature.FAHRENHEIT)
             return str(UnitOfTemperature.CELSIUS)
-        return cast("str | None", self.entity_description.native_unit_of_measurement)
+        native_unit = self.entity_description.native_unit_of_measurement
+        return native_unit if isinstance(native_unit, str) else None
 
     @property
     def native_value(self) -> float | None:

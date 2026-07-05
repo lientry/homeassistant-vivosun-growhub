@@ -10,7 +10,7 @@ from .models import client_model_token
 _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
     "VSCBC80": {
         "default_name": "VCure C80",
-        "device_type": "controller",
+        "device_type": "curing_box",
         "comm_mode_list": ["MQTT"],
         "channel_param_key": {
             "0": {"temp": "bTemp", "humi": "bHumi"},
