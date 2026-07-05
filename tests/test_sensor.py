@@ -87,6 +87,31 @@ async def test_sensor_setup_creates_seventeen_entities(hass: HomeAssistant) -> N
     }
 
 
+async def test_sensor_setup_creates_curing_box_telemetry_entities(hass: HomeAssistant) -> None:
+    coordinator = _StubCoordinator(device_type="curing_box")
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
+    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    added: list[VivosunChannelSensorEntity] = []
+
+    def _add(entities: list[VivosunChannelSensorEntity]) -> None:
+        added.extend(entities)
+
+    await async_setup_entry(hass, entry, _add)
+
+    assert {entity.unique_id for entity in added} == {
+        f"vivosun_growhub_{_DEV_ID}_pTemp",
+        f"vivosun_growhub_{_DEV_ID}_pHumi",
+        f"vivosun_growhub_{_DEV_ID}_pVpd",
+        f"vivosun_growhub_{_DEV_ID}_outTemp",
+        f"vivosun_growhub_{_DEV_ID}_outHumi",
+        f"vivosun_growhub_{_DEV_ID}_outVpd",
+        f"vivosun_growhub_{_DEV_ID}_coreTemp",
+        f"vivosun_growhub_{_DEV_ID}_rssi",
+    }
+
+
 async def test_sensor_values_scale_and_map_correctly(hass: HomeAssistant) -> None:
     coordinator = _StubCoordinator()
     coordinator.data = {

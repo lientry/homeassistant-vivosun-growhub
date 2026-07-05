@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.humidifier import (
     HumidifierDeviceClass,
     HumidifierEntity,
-    HumidifierEntityFeature,
 )
+from homeassistant.components.humidifier.const import HumidifierEntityFeature
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MODE_AUTO, MODE_MANUAL, TEMP_SCALE_FACTOR
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.device_registry import DeviceInfo
+    from homeassistant.helpers.entity import Entity
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
     from .models import RuntimeData
@@ -52,7 +53,7 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    entities = []
+    entities: list[Entity] = []
     humidifiers = [d for d in coordinator.devices if d.device_type == "humidifier"]
     if humidifiers:
         entities.extend([VivosunHumidifierEntity(coordinator, d.device_id) for d in humidifiers])
@@ -69,7 +70,6 @@ class VivosunHumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierE
     _attr_name = "Humidifier"
     _attr_device_class = HumidifierDeviceClass.HUMIDIFIER
     _attr_supported_features = _EXPLICIT_TURN_FEATURES | HumidifierEntityFeature.MODES
-    _attr_available_modes: ClassVar[list[str]] = list(_HMDF_MODES)
     _attr_min_humidity = 0
     _attr_max_humidity = 100
     _enable_turn_on_off_backwards_compatibility = HumidifierEntityFeature(0) == _EXPLICIT_TURN_FEATURES
@@ -79,6 +79,7 @@ class VivosunHumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierE
         super().__init__(coordinator)
         self._device_id = device_id
         self._attr_unique_id = f"vivosun_growhub_{device_id}_humidifier"
+        self._attr_available_modes = list(_HMDF_MODES)
 
     @property
     def is_on(self) -> bool | None:

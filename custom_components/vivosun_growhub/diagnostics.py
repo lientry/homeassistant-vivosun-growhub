@@ -102,6 +102,9 @@ async def async_get_config_entry_diagnostics(
     if not isinstance(last_update_success, bool):
         last_update_success = None
 
+    skipped_devices_snapshot = getattr(coordinator, "skipped_devices_snapshot", None)
+    skipped_devices = skipped_devices_snapshot() if callable(skipped_devices_snapshot) else []
+
     diagnostics_payload: dict[str, Any] = {
         "config_entry": redacted_entry,
         "runtime_available": True,
@@ -115,6 +118,7 @@ async def async_get_config_entry_diagnostics(
             "topic_prefix": device.topic_prefix,
         },
         "discovered_devices": discovered_devices,
+        "skipped_devices": skipped_devices,
         "camera_configuration": camera_configuration,
         "identifier_collisions": identifier_collisions,
         "support_capture": coordinator.support_capture_snapshot(),

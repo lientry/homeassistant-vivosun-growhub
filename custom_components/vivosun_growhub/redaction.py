@@ -88,4 +88,6 @@ def _is_identifier_key(key_lower: str) -> bool:
 
 
 def _is_secret_key(key_lower: str) -> bool:
+    if key_lower.replace("_", "") == "modeltoken":
+        return False
     return any(marker in key_lower for marker in _SECRET_KEY_MARKERS)

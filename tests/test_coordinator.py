@@ -256,6 +256,35 @@ async def test_coordinator_bootstrap_order_and_initial_shadow_get(
     await coordinator.async_shutdown()
 
 
+async def test_coordinator_skips_point_log_for_no_scene_devices(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    api = _ApiStub()
+    api.devices = [
+        DeviceInfo(
+            device_id="vcure-1",
+            client_id="thing-vcure",
+            topic_prefix="topic/vcure",
+            name="VCure C80",
+            online=True,
+            scene_id=0,
+            device_type="curing_box",
+            supports_point_log=False,
+        )
+    ]
+    aws_auth = _AwsAuthStub()
+    aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
+    _patch_coordinator_deps(monkeypatch, api, aws_auth)
+
+    coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
+    await coordinator.async_start()
+
+    assert api.calls == ["login", "get_devices", "get_aws_identity"]
+
+    await coordinator.async_shutdown()
+
+
 async def test_coordinator_mqtt_callbacks_update_shadow_and_sensor_state(
     hass: HomeAssistant,
     monkeypatch: MonkeyPatch,

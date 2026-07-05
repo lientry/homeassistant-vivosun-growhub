@@ -173,7 +173,7 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
             self.hass.loop,
         ).result()
 
-    def toggle(self, **kwargs: object) -> None:
+    def toggle(self, **kwargs: object) -> None:  # type: ignore[misc]
         """Synchronously bridge toggle for HA action support detection."""
         asyncio.run_coroutine_threadsafe(
             self.async_toggle(**kwargs),

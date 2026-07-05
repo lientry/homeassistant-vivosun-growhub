@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import aiohttp
@@ -41,7 +41,7 @@ from .const import (
 )
 from .encryption import encrypt_request_body
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
-from .models import AuthTokens, AwsIdentity, DeviceInfo, PlanStageInfo, infer_device_type
+from .models import AuthTokens, AwsIdentity, DeviceInfo, PlanStageInfo, client_model_token, infer_device_type
 from .redaction import redact_identifier, sanitize_mapping_for_debug
 
 if TYPE_CHECKING:
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 _AUTH_MESSAGE_MARKERS = ("auth", "credential", "forbidden", "invalid", "login", "password", "token", "unauthorized")
 _SP_APP_ID = "com.vivosun.android"
+_NO_SCENE_DEVICE_TYPES = frozenset({"curing_box"})
 
 
 class VivosunApiClient:
@@ -60,6 +61,12 @@ class VivosunApiClient:
         self._session = session
         self._base_url = base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=API_REQUEST_TIMEOUT_SECONDS)
+        self._skipped_devices: list[dict[str, object]] = []
+
+    @property
+    def skipped_devices(self) -> list[dict[str, object]]:
+        """Return rejected getTotalList entries from the last discovery call."""
+        return [dict(entry) for entry in self._skipped_devices]
 
     async def login(self, email: str, password: str) -> AuthTokens:
         """Authenticate with Vivosun and return account tokens."""
@@ -89,6 +96,7 @@ class VivosunApiClient:
         device_group = self._expect_mapping(data, "deviceGroup")
 
         devices: list[DeviceInfo] = []
+        self._skipped_devices = []
         for category_key, category_devices in device_group.items():
             if not isinstance(category_devices, list):
                 continue
@@ -112,37 +120,50 @@ class VivosunApiClient:
         """Parse a device entry, skipping unsupported/non-IoT categories safely."""
         name = self._optional_str(device, "name")
         if name is None:
-            self._log_skipped_device(device, category_key=category_key, index=index)
+            self._track_skipped_device(device, category_key=category_key, index=index, missing_fields=("name",))
             return None
 
         device_id = self._optional_str(device, "deviceId")
-        scene_id = self._optional_scene_id(device)
-        if device_id is None or scene_id is None:
-            self._log_skipped_device(device, category_key=category_key, index=index)
-            return None
-
         client_id = self._optional_str(device, "clientId")
         topic_prefix = self._optional_str(device, "topicPrefix")
         device_type = infer_device_type(name, client_id or "")
+        scene_id = self._optional_scene_id(device)
+        supports_point_log = scene_id is not None
         camera_username, camera_password = self._extract_camera_credentials(device)
 
         if device_type == "unknown" and (camera_username is not None or camera_password is not None):
             device_type = "camera"
 
-        if device_type != "camera" and (client_id is None or topic_prefix is None):
-            self._log_skipped_device(device, category_key=category_key, index=index)
+        missing_fields: list[str] = []
+        if device_id is None:
+            missing_fields.append("deviceId")
+        if scene_id is None and device_type not in _NO_SCENE_DEVICE_TYPES and device_type != "camera":
+            missing_fields.append("sceneId")
+        if device_type != "camera":
+            if client_id is None:
+                missing_fields.append("clientId")
+            if topic_prefix is None:
+                missing_fields.append("topicPrefix")
+        if missing_fields:
+            self._track_skipped_device(
+                device,
+                category_key=category_key,
+                index=index,
+                missing_fields=tuple(missing_fields),
+            )
             return None
 
         return DeviceInfo(
-            device_id=device_id,
+            device_id=device_id or "",
             client_id=client_id or "",
             topic_prefix=topic_prefix or "",
             name=name,
             online=self._optional_int(device, "onlineStatus", default=0) == 1,
-            scene_id=scene_id,
+            scene_id=scene_id or 0,
             device_type=device_type,
             camera_username=camera_username,
             camera_password=camera_password,
+            supports_point_log=supports_point_log,
         )
 
     def _extract_camera_credentials(self, device: Mapping[str, object]) -> tuple[str | None, str | None]:
@@ -168,6 +189,28 @@ class VivosunApiClient:
             index,
             sanitize_mapping_for_debug(dict(device)),
         )
+
+    def _track_skipped_device(
+        self,
+        device: Mapping[str, object],
+        *,
+        category_key: str,
+        index: int,
+        missing_fields: tuple[str, ...],
+    ) -> None:
+        """Record and log a skipped getTotalList entry for diagnostics."""
+        client_id = self._optional_str(device, "clientId") or ""
+        self._skipped_devices.append(
+            {
+                "device_group": category_key,
+                "index": index,
+                "available_keys": sorted(str(key) for key in device),
+                "model_token": client_model_token(client_id) if client_id else "",
+                "missing_fields": list(missing_fields),
+                "raw": sanitize_mapping_for_debug(dict(device)),
+            }
+        )
+        self._log_skipped_device(device, category_key=category_key, index=index)
 
     async def get_aws_identity(self, tokens: AuthTokens, aws_identity_id: str = "") -> AwsIdentity:
         """Fetch AWS identity payload used for Cognito exchange in later phases."""
@@ -291,7 +334,7 @@ class VivosunApiClient:
         request_headers = self._base_headers()
         if headers is not None:
             request_headers.update(headers)
-        request_kwargs: dict[str, object] = {"timeout": self._timeout, "headers": request_headers}
+        request_kwargs: dict[str, Any] = {"timeout": self._timeout, "headers": request_headers}
 
         if json_body is not None:
             plaintext = json.dumps(dict(json_body), separators=(",", ":")).encode()

@@ -50,6 +50,7 @@ class DeviceInfo:
     device_type: str = "unknown"
     camera_username: str | None = None
     camera_password: str | None = None
+    supports_point_log: bool = True
 
 
 def infer_device_type(name: str, client_id: str = "") -> str:
@@ -66,6 +67,8 @@ def infer_device_type(name: str, client_id: str = "") -> str:
         return "heater"
     if "growcam" in combined or "camera" in combined:
         return "camera"
+    if model_token.startswith("VSCB") or "vcure" in combined:
+        return "curing_box"
     return "unknown"
 
 
