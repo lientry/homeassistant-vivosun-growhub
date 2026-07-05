@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, cast
 
-from homeassistant.components.light import ColorMode, LightEntity
+from homeassistant.components.light import ColorMode, LightEntity  # type: ignore[attr-defined]
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, LIGHT_MIN_BRIGHTNESS
@@ -49,14 +49,14 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
 
     _attr_has_entity_name = True
     _attr_name = "Grow Light"
-    _attr_supported_color_modes: ClassVar[set[ColorMode]] = {ColorMode.BRIGHTNESS}
-    _attr_color_mode = ColorMode.BRIGHTNESS
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
         """Initialize the light entity."""
         super().__init__(coordinator)
         self._device_id = device_id
         self._attr_unique_id = f"vivosun_growhub_{device_id}_light"
+        self._attr_supported_color_modes = {ColorMode.BRIGHTNESS}
+        self._attr_color_mode = ColorMode.BRIGHTNESS
 
     @property
     def is_on(self) -> bool:

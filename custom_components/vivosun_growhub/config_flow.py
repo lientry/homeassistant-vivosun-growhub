@@ -28,7 +28,7 @@ from .models import DeviceInfo
 OPTIONS_TEMP_UNIT = "temp_unit"
 
 if TYPE_CHECKING:
-    from homeassistant.data_entry_flow import FlowResult
+    from collections.abc import Mapping
 
 
 class VivosunGrowhubConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # type: ignore[misc,call-arg]
@@ -43,7 +43,7 @@ class VivosunGrowhubConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # typ
         self._camera_index = 0
         self._camera_ips: dict[str, str] = {}
 
-    async def async_step_user(self, user_input: dict[str, str] | None = None) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, str] | None = None) -> config_entries.ConfigFlowResult:
         """Handle the initial step."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -79,7 +79,7 @@ class VivosunGrowhubConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # typ
         )
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
-    async def async_step_camera(self, user_input: dict[str, str] | None = None) -> FlowResult:
+    async def async_step_camera(self, user_input: dict[str, str] | None = None) -> config_entries.ConfigFlowResult:
         """Optionally collect LAN IPs for discovered GrowCam devices."""
         pending = self._pending_user_input
         if pending is None or not self._camera_devices:
@@ -114,7 +114,7 @@ class VivosunGrowhubConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # typ
             },
         )
 
-    def _create_camera_entry(self, pending: dict[str, str]) -> FlowResult:
+    def _create_camera_entry(self, pending: dict[str, str]) -> config_entries.ConfigFlowResult:
         """Create a config entry after all discovered cameras were presented."""
         options: dict[str, object] = {}
         if self._camera_ips:
@@ -159,7 +159,7 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
             return self._config_entry
         return self.config_entry
 
-    async def async_step_init(self, user_input: dict[str, object] | None = None) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, object] | None = None) -> config_entries.ConfigFlowResult:
         """Manage options."""
         entry = self._entry()
         errors: dict[str, str] = {}
@@ -193,7 +193,7 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         schema = vol.Schema(schema_fields)
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
-    async def async_step_camera(self, user_input: dict[str, object] | None = None) -> FlowResult:
+    async def async_step_camera(self, user_input: dict[str, object] | None = None) -> config_entries.ConfigFlowResult:
         """Configure each discovered GrowCam by stable device ID."""
         if self._pending_options is None or not self._camera_devices:
             return await self.async_step_init()
@@ -249,7 +249,7 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
             return []
         return [device for device in camera_devices if isinstance(device, DeviceInfo)]
 
-    def _finish_options(self, options: dict[str, object]) -> FlowResult:
+    def _finish_options(self, options: dict[str, object]) -> config_entries.ConfigFlowResult:
         """Save normalized options and reload when they changed."""
         entry = self._entry()
         options.pop(CONF_CAMERA_IP, None)
@@ -260,7 +260,7 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
     @staticmethod
     def _preserve_camera_options(
         normalized: dict[str, object],
-        existing: dict[str, object],
+        existing: Mapping[str, object],
     ) -> None:
         """Preserve camera settings when no cameras are currently discoverable."""
         for key in (CONF_CAMERA_IP, CONF_CAMERA_IPS):

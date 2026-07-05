@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, cast
 
-from homeassistant.components.climate import (
-    ClimateEntity,
-    ClimateEntityFeature,
-    HVACAction,
-    HVACMode,
-)
+from homeassistant.components.climate import ClimateEntity
+from homeassistant.components.climate.const import ClimateEntityFeature, HVACAction, HVACMode
 from homeassistant.const import UnitOfTemperature
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -62,13 +58,11 @@ class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateE
 
     _attr_has_entity_name = True
     _attr_name = "Heater"
-    _attr_hvac_modes: ClassVar[list[HVACMode]] = [HVACMode.OFF, HVACMode.HEAT]
     _attr_supported_features = (
         _EXPLICIT_TURN_FEATURES
         | ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.PRESET_MODE
     )
-    _attr_preset_modes: ClassVar[list[str]] = list(_HEAT_PRESETS)
     _attr_min_temp = 0
     _attr_max_temp = 40
     _attr_target_temperature_step = 1
@@ -85,6 +79,8 @@ class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateE
         self._device_id = device_id
         self._entry = entry
         self._attr_unique_id = f"vivosun_growhub_{device_id}_climate"
+        self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
+        self._attr_preset_modes = list(_HEAT_PRESETS)
 
     @property
     def temperature_unit(self) -> str:

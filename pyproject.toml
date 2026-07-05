@@ -30,9 +30,10 @@ select = [
 known-first-party = ["custom_components.vivosun_growhub"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 strict = true
 warn_return_any = true
+warn_unused_ignores = false
 warn_unused_configs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
