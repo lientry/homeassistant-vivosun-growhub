@@ -213,7 +213,7 @@ async def test_get_devices_maps_vcure_without_scene_to_curing_box() -> None:
     assert len(devices) == 1
     assert devices[0].device_type == "curing_box"
     assert devices[0].scene_id == 0
-    assert devices[0].supports_point_log is False
+    assert devices[0].supports_point_log is True  # VSCBC80 serves point_log despite missing sceneId
     assert client.skipped_devices == []
 
 
