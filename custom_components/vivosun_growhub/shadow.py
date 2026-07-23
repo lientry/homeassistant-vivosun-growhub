@@ -12,6 +12,7 @@ from .const import (
     LIGHT_MIN_BRIGHTNESS,
     MODE_AUTO,
     SENSOR_UNAVAILABLE_SENTINEL,
+    SHADOW_KEY_AIRCON,
     SHADOW_KEY_AUTO,
     SHADOW_KEY_CIRCULATOR_FAN,
     SHADOW_KEY_CONNECTED,
@@ -42,6 +43,7 @@ _SUPPORTED_REPORTED_ROOT_KEYS: frozenset[str] = frozenset(
         "hmdf",
         "dhmdf",
         "heat",
+        "aircd",
         "plan",
         "cali",
         "btDev",
@@ -163,6 +165,19 @@ class HeaterState(TypedDict, total=False):
     target_temp: int | None
 
 
+class AirConditionerState(TypedDict, total=False):
+    """Normalized air conditioner state slice from shadow.reported (aircd)."""
+
+    state: int | None
+    mode: int | None
+    pause: int | None
+    func: int | None
+    wind_level: int | None
+    target_temp: int | None
+    target_humidity: int | None
+    min_target_temp: int | None
+
+
 class ConnectionState(TypedDict):
     """Normalized root connectivity state from shadow.reported."""
 
@@ -192,6 +207,7 @@ class ShadowV1State(TypedDict, total=False):
     hmdf: HumidifierState
     dhmdf: DehumidifierState
     heat: HeaterState
+    aircd: AirConditionerState
     connection: ConnectionState
     plan: PlanState
     reported_supported: dict[str, object]
@@ -254,6 +270,10 @@ def parse_reported_fragment(reported_fragment: dict[str, object]) -> ShadowV1Sta
     heat_raw = _as_dict(reported_fragment.get(SHADOW_KEY_HEATER))
     if heat_raw is not None:
         parsed["heat"] = _parse_heat_state(heat_raw)
+
+    aircd_raw = _as_dict(reported_fragment.get(SHADOW_KEY_AIRCON))
+    if aircd_raw is not None:
+        parsed["aircd"] = _parse_aircd_state(aircd_raw)
 
     if SHADOW_KEY_CONNECTED in reported_fragment:
         parsed["connection"] = ConnectionState(connected=_as_bool(reported_fragment.get(SHADOW_KEY_CONNECTED)))
@@ -415,7 +435,8 @@ def build_heat_level_payload(level: int) -> dict[str, object]:
     if level < 0 or level > 10:
         raise ValueError("Heater level must be in range 0..10")
     return _build_desired_payload(
-        SHADOW_KEY_HEATER,
+        SHADOW_KEY_AIRCON,
+    SHADOW_KEY_HEATER,
         {SHADOW_KEY_MODE: 0, SHADOW_KEY_MANU: {SHADOW_KEY_LEVEL: level}},
     )
 
@@ -428,6 +449,28 @@ def build_heat_mode_payload(mode: int) -> dict[str, object]:
 def build_heat_target_payload(target_temp: int) -> dict[str, object]:
     """Build desired heater auto target temperature (raw, scaled by 100)."""
     return _build_desired_payload(SHADOW_KEY_HEATER, {"targetTemp": target_temp})
+
+
+def build_aircd_on_payload(on: bool) -> dict[str, object]:
+    """Build desired air conditioner on/off payload (aircd.state)."""
+    return _build_desired_payload(SHADOW_KEY_AIRCON, {"state": int(on)})
+
+
+def build_aircd_func_payload(func: int) -> dict[str, object]:
+    """Build desired air conditioner function payload, turning the unit on."""
+    return _build_desired_payload(SHADOW_KEY_AIRCON, {"state": 1, "func": func})
+
+
+def build_aircd_target_temp_payload(target_temp: int) -> dict[str, object]:
+    """Build desired air conditioner target temperature (raw, scaled by 100)."""
+    return _build_desired_payload(SHADOW_KEY_AIRCON, {"tTemp": target_temp})
+
+
+def build_aircd_wind_payload(level: int) -> dict[str, object]:
+    """Build desired air conditioner wind/fan level payload (0..100)."""
+    if level < 0 or level > 100:
+        raise ValueError("Wind level must be in range 0..100")
+    return _build_desired_payload(SHADOW_KEY_AIRCON, {"wdLv": level})
 
 
 def build_dhmdf_target_payload(target_humidity: int) -> dict[str, object]:
@@ -587,6 +630,19 @@ def _parse_heat_state(heat: dict[str, object]) -> HeaterState:
         mode=_as_int(heat.get(SHADOW_KEY_MODE)),
         state=_as_int(heat.get("state")),
         target_temp=_normalize_sentinel_int(_as_int(heat.get("targetTemp"))),
+    )
+
+
+def _parse_aircd_state(aircd: dict[str, object]) -> AirConditionerState:
+    return AirConditionerState(
+        state=_as_int(aircd.get("state")),
+        mode=_as_int(aircd.get(SHADOW_KEY_MODE)),
+        pause=_as_int(aircd.get("pause")),
+        func=_as_int(aircd.get("func")),
+        wind_level=_as_int(aircd.get("wdLv")),
+        target_temp=_normalize_sentinel_int(_as_int(aircd.get("tTemp"))),
+        target_humidity=_normalize_sentinel_int(_as_int(aircd.get("tHumi"))),
+        min_target_temp=_normalize_sentinel_int(_as_int(aircd.get("tMin"))),
     )
 
 

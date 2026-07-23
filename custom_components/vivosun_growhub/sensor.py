@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -193,6 +194,7 @@ _DEVICE_TYPE_SENSORS: dict[str, frozenset[str]] = {
     "dehumidifier": frozenset({"pTemp", "pHumi", "pVpd"}),
     "humidifier": frozenset({"pTemp", "pHumi", "pVpd", "waterLv", "coreTemp"}),
     "heater": frozenset({"pTemp", "pHumi", "pVpd"}),
+    "air_conditioner": frozenset({"pTemp", "pHumi", "pVpd"}),
     "curing_box": frozenset({"pTemp", "pHumi", "pVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
 }
 
@@ -285,6 +287,8 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
         """Return current sensor value from the latest point-log sample."""
         raw_value = self._raw_channel_value()
         if raw_value is None:
+            if self.entity_description.quantity == "vpd":
+                return self._computed_vpd()
             return None
 
         if self.entity_description.quantity == "signal_strength":
@@ -300,7 +304,8 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
     def extra_state_attributes(self) -> dict[str, str] | None:
         """Return extra attributes for non-standard quantities."""
         if self.entity_description.quantity == "vpd":
-            return {"quantity": "vpd"}
+            source = "reported" if self._raw_channel_value() is not None else "computed"
+            return {"quantity": "vpd", "source": source}
         return None
 
     def _raw_channel_value(self) -> int | None:
@@ -311,6 +316,32 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
                 continue
             if isinstance(value, int):
                 return value
+        return None
+
+    def _computed_vpd(self) -> float | None:
+        """Compute air VPD (kPa) from the sibling temperature/humidity channels.
+
+        Some devices (e.g. the original GrowHub E42 / VSCTL001) never publish a
+        VPD value even though they report temperature and humidity, so the VPD
+        entity would otherwise stay unknown forever.
+        """
+        sensors = sensor_slice(self.coordinator, self._device_id)
+        for vpd_key in self.entity_description.channel_key_lookup:
+            if not vpd_key.endswith("Vpd"):
+                continue
+            prefix = vpd_key[: -len("Vpd")]
+            temp_raw = sensors.get(f"{prefix}Temp")
+            humi_raw = sensors.get(f"{prefix}Humi")
+            if isinstance(temp_raw, bool) or isinstance(humi_raw, bool):
+                continue
+            if not isinstance(temp_raw, int) or not isinstance(humi_raw, int):
+                continue
+            temp_c = temp_raw / TEMP_SCALE_FACTOR
+            humidity = humi_raw / TEMP_SCALE_FACTOR
+            if not 0 <= humidity <= 100:
+                continue
+            saturation_kpa = 0.6108 * math.exp(17.27 * temp_c / (temp_c + 237.3))
+            return round(saturation_kpa * (1 - humidity / 100), 2)
         return None
 
     def _temp_unit(self) -> str:
