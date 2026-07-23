@@ -10,6 +10,10 @@ import pytest
 from custom_components.vivosun_growhub.mqtt_client import ReceivedPublish
 from custom_components.vivosun_growhub.shadow import (
     ShadowParseError,
+    build_aircd_func_payload,
+    build_aircd_on_payload,
+    build_aircd_target_temp_payload,
+    build_aircd_wind_payload,
     build_cfan_level_payload,
     build_cfan_night_mode_payload,
     build_cfan_oscillate_payload,
@@ -362,3 +366,46 @@ def test_parse_reported_fragment_dehumidifier_sparse_state() -> None:
         "on": True,
         "target_humidity": 6000,
     }
+
+
+def test_parse_reported_fragment_parses_aircd_state() -> None:
+    fragment = {
+        "aircd": {
+            "mode": 0,
+            "inPlan": 0,
+            "state": 1,
+            "pause": 0,
+            "func": 1,
+            "wdLv": 50,
+            "tMin": 1600,
+            "tTemp": 2399,
+            "tHumi": 8000,
+            "tVpd": -6666,
+        }
+    }
+
+    parsed = parse_reported_fragment(fragment)
+
+    aircd = parsed["aircd"]
+    assert aircd["state"] == 1
+    assert aircd["mode"] == 0
+    assert aircd["pause"] == 0
+    assert aircd["func"] == 1
+    assert aircd["wind_level"] == 50
+    assert aircd["target_temp"] == 2399
+    assert aircd["target_humidity"] == 8000
+    assert aircd["min_target_temp"] == 1600
+    assert "aircd" in parsed["reported_supported"]
+
+
+def test_build_aircd_payloads() -> None:
+    assert build_aircd_on_payload(True) == {"state": {"desired": {"aircd": {"state": 1}}}}
+    assert build_aircd_on_payload(False) == {"state": {"desired": {"aircd": {"state": 0}}}}
+    assert build_aircd_func_payload(3) == {"state": {"desired": {"aircd": {"state": 1, "func": 3}}}}
+    assert build_aircd_target_temp_payload(2399) == {"state": {"desired": {"aircd": {"tTemp": 2399}}}}
+    assert build_aircd_wind_payload(50) == {"state": {"desired": {"aircd": {"wdLv": 50}}}}
+
+
+def test_build_aircd_wind_payload_rejects_out_of_range() -> None:
+    with pytest.raises(ValueError, match="Wind level"):
+        build_aircd_wind_payload(101)
