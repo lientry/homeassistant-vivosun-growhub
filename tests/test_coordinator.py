@@ -15,6 +15,7 @@ from custom_components.vivosun_growhub.const import (
     TOPIC_SHADOW_GET,
     TOPIC_SHADOW_GET_ACCEPTED,
     TOPIC_SHADOW_UPDATE,
+    TOPIC_SHADOW_UPDATE_ACCEPTED,
 )
 from custom_components.vivosun_growhub.coordinator import VivosunCoordinator
 from custom_components.vivosun_growhub.exceptions import VivosunAuthError, VivosunResponseError
@@ -354,6 +355,79 @@ async def test_coordinator_accepts_desired_only_shadow_payloads(
 
     assert coordinator.data["shadows"][device_id]["hmdf"]["on"] is True
     assert coordinator.data["shadows"][device_id]["hmdf"]["target_humidity"] == 5500
+
+    await coordinator.async_shutdown()
+
+
+async def test_coordinator_partial_hmdf_update_does_not_clobber_prior_state(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A routine partial hmdf heartbeat must preserve prior on/mode/target."""
+    api = _ApiStub()
+    aws_auth = _AwsAuthStub()
+    aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
+    _patch_coordinator_deps(monkeypatch, api, aws_auth)
+
+    coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
+    await coordinator.async_start()
+
+    mqtt = _MqttStub.instances[0]
+    device_id = coordinator.device.device_id
+
+    # Commanded/reported full state: on, auto mode, target 55%.
+    await mqtt.emit(
+        TOPIC_SHADOW_GET_ACCEPTED.format(thing=coordinator.device.client_id),
+        b'{"state":{"reported":{"hmdf":{"on":1,"mode":1,"targetHumi":5500}}}}',
+    )
+    # Routine partial heartbeat that only carries manual level + water flag.
+    await mqtt.emit(
+        TOPIC_SHADOW_UPDATE_ACCEPTED.format(thing=coordinator.device.client_id),
+        b'{"state":{"reported":{"hmdf":{"manu":{"lv":5},"waterWarn":false}}}}',
+    )
+
+    hmdf = coordinator.data["shadows"][device_id]["hmdf"]
+    assert hmdf["on"] is True
+    assert hmdf["mode"] == 1
+    assert hmdf["target_humidity"] == 5500
+    assert hmdf["level"] == 5
+    assert hmdf["water_warning"] is False
+
+    await coordinator.async_shutdown()
+
+
+async def test_coordinator_partial_aircd_update_does_not_clobber_prior_state(
+    hass: HomeAssistant,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """A routine partial aircd heartbeat must preserve prior state/func/target."""
+    api = _ApiStub()
+    aws_auth = _AwsAuthStub()
+    aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
+    _patch_coordinator_deps(monkeypatch, api, aws_auth)
+
+    coordinator = VivosunCoordinator(hass, object(), email="user@example.com", password="secret")
+    await coordinator.async_start()
+
+    mqtt = _MqttStub.instances[0]
+    device_id = coordinator.device.device_id
+
+    # Full reported state: AC on, cool func, target 24.00C.
+    await mqtt.emit(
+        TOPIC_SHADOW_GET_ACCEPTED.format(thing=coordinator.device.client_id),
+        b'{"state":{"reported":{"aircd":{"state":1,"func":1,"tTemp":2400}}}}',
+    )
+    # Routine partial heartbeat that only carries the fan/wind level.
+    await mqtt.emit(
+        TOPIC_SHADOW_UPDATE_ACCEPTED.format(thing=coordinator.device.client_id),
+        b'{"state":{"reported":{"aircd":{"wdLv":50}}}}',
+    )
+
+    aircd = coordinator.data["shadows"][device_id]["aircd"]
+    assert aircd["state"] == 1
+    assert aircd["func"] == 1
+    assert aircd["target_temp"] == 2400
+    assert aircd["wind_level"] == 50
 
     await coordinator.async_shutdown()
 
