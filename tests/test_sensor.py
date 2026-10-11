@@ -156,13 +156,95 @@ async def test_sensor_values_scale_and_map_correctly(hass: HomeAssistant) -> Non
     assert inside_vpd.device_class is None
     assert inside_vpd.state_class == SensorStateClass.MEASUREMENT
     assert inside_vpd.native_unit_of_measurement == "kPa"
-    assert inside_vpd.extra_state_attributes == {"quantity": "vpd"}
+    assert inside_vpd.extra_state_attributes == {"quantity": "vpd", "source": "reported"}
 
     assert entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_outTemp"].native_value == 18.76
     assert entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_outHumi"].native_value == 52.34
     assert entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_outVpd"].native_value == 0.98
     assert entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_coreTemp"].native_value == 38.39
     assert entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_rssi"].native_value == -35.0
+async def test_sensor_vpd_computed_when_device_omits_vpd(hass: HomeAssistant) -> None:
+    """VSCTL001 (GrowHub E42) reports temp/humidity but never VPD - compute it."""
+    coordinator = _StubCoordinator()
+    coordinator.data = {
+        "sensors": {
+            _DEV_ID: {
+                "inTemp": 2345,
+                "inHumi": 6012,
+                "outTemp": 1876,
+                "outHumi": 5234,
+            },
+        },
+        "shadows": {_DEV_ID: {"connection": {"connected": True}}},
+    }
+
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
+    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    added: list[VivosunChannelSensorEntity] = []
+
+    def _add(entities: list[VivosunChannelSensorEntity]) -> None:
+        added.extend(entities)
+
+    await async_setup_entry(hass, entry, _add)
+    entity_by_unique_id = {entity.unique_id: entity for entity in added}
+
+    inside_vpd = entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_inVpd"]
+    assert inside_vpd.native_value == 1.15
+    assert inside_vpd.extra_state_attributes == {"quantity": "vpd", "source": "computed"}
+
+    outside_vpd = entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_outVpd"]
+    assert outside_vpd.native_value == 1.03
+    assert outside_vpd.extra_state_attributes == {"quantity": "vpd", "source": "computed"}
+
+
+async def test_sensor_vpd_reported_value_wins_over_computed(hass: HomeAssistant) -> None:
+    coordinator = _StubCoordinator()
+    coordinator.data = {
+        "sensors": {
+            _DEV_ID: {"inTemp": 2345, "inHumi": 6012, "inVpd": 145},
+        },
+    }
+
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
+    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    added: list[VivosunChannelSensorEntity] = []
+
+    def _add(entities: list[VivosunChannelSensorEntity]) -> None:
+        added.extend(entities)
+
+    await async_setup_entry(hass, entry, _add)
+    entity_by_unique_id = {entity.unique_id: entity for entity in added}
+
+    inside_vpd = entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_inVpd"]
+    assert inside_vpd.native_value == 1.45
+    assert inside_vpd.extra_state_attributes == {"quantity": "vpd", "source": "reported"}
+
+
+async def test_sensor_vpd_stays_none_without_humidity(hass: HomeAssistant) -> None:
+    coordinator = _StubCoordinator()
+    coordinator.data = {
+        "sensors": {
+            _DEV_ID: {"inTemp": 2345},
+        },
+    }
+
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
+    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+
+    added: list[VivosunChannelSensorEntity] = []
+
+    def _add(entities: list[VivosunChannelSensorEntity]) -> None:
+        added.extend(entities)
+
+    await async_setup_entry(hass, entry, _add)
+    entity_by_unique_id = {entity.unique_id: entity for entity in added}
+
+    assert entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_inVpd"].native_value is None
 
 
 async def test_sensor_aliases_map_e42a_plus_channel_keys(hass: HomeAssistant) -> None:

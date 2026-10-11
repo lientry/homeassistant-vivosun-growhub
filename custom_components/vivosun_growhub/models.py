@@ -65,6 +65,8 @@ def infer_device_type(name: str, client_id: str = "") -> str:
         return "humidifier"
     if model_token.startswith("VSHT") or "aeroflux" in combined or "heater" in combined:
         return "heater"
+    if model_token.startswith("VSAC") or "aerolush" in combined or "air conditioner" in combined:
+        return "air_conditioner"
     if "growcam" in combined or "camera" in combined:
         return "camera"
     if model_token.startswith("VSCB") or "vcure" in combined:

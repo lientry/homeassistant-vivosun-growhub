@@ -19,3 +19,11 @@ def test_infer_device_type_uses_vsctl_controller_model_token() -> None:
 
 def test_infer_device_type_uses_vscb_curing_box_model_token() -> None:
     assert infer_device_type("Post Harvest", "vivosun-VSCBC80-acc-device-1") == "curing_box"
+
+
+def test_infer_device_type_air_conditioner_model_token() -> None:
+    assert infer_device_type("AeroLush C08", "vivosun-VSACA08-acc-device-1") == "air_conditioner"
+
+
+def test_infer_device_type_air_conditioner_name_hint() -> None:
+    assert infer_device_type("Tent AeroLush", "") == "air_conditioner"

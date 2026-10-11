@@ -10,7 +10,11 @@ from homeassistant.components.climate.const import HVACAction, HVACMode
 from homeassistant.const import UnitOfTemperature
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.vivosun_growhub.climate import VivosunHeaterClimateEntity, async_setup_entry
+from custom_components.vivosun_growhub.climate import (
+    VivosunAirConditionerClimateEntity,
+    VivosunHeaterClimateEntity,
+    async_setup_entry,
+)
 from custom_components.vivosun_growhub.const import DOMAIN, MODE_AUTO, MODE_MANUAL
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
 from custom_components.vivosun_growhub.shadow import (
@@ -172,4 +176,76 @@ async def test_climate_commands_publish_expected_shadow_payloads() -> None:
     await entity.async_set_preset_mode("manual")
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
         build_heat_mode_payload(MODE_MANUAL), device_id=_DEV_ID
+    )
+
+
+async def test_c08_cooling_climate_from_captured_shadow(hass: HomeAssistant) -> None:
+    coordinator = _StubCoordinator()
+    coordinator._device = DeviceInfo(
+        device_id=_DEV_ID,
+        client_id="vivosun-VSACA08-acc-device-1",
+        topic_prefix="prefix/ac",
+        name="AeroLush C08",
+        online=True,
+        scene_id=66078,
+        device_type="air_conditioner",
+    )
+    coordinator.data = {
+        "shadows": {_DEV_ID: {"aircd": {
+            "state": 1, "func": 1, "pause": 0,
+            "target_temp": 2399, "min_target_temp": 1600, "wind_level": 50,
+        }}},
+        "sensors": {_DEV_ID: {"pTemp": 2175, "pHumi": 6125}},
+    }
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry_id=entry.entry_id, coordinator=cast("VivosunCoordinator", coordinator)
+    )
+    added: list[Entity] = []
+    await async_setup_entry(hass, entry, added.extend)
+    assert len(added) == 1
+    assert isinstance(added[0], VivosunAirConditionerClimateEntity)
+    ac = added[0]
+
+    assert ac.hvac_modes == [HVACMode.OFF, HVACMode.COOL]
+    assert ac.hvac_mode == HVACMode.COOL
+    assert ac.hvac_action == HVACAction.COOLING
+    assert ac.target_temperature == 23.99
+    assert ac.min_temp == 16.0
+    assert ac.current_temperature == 21.75
+    assert ac.current_humidity == 61.25
+
+    await ac.async_set_hvac_mode(HVACMode.COOL)
+    coordinator.async_publish_shadow_update.assert_awaited_with(
+        {"state": {"desired": {"aircd": {"state": 1, "func": 1}}}},
+        device_id=_DEV_ID,
+    )
+    coordinator.async_publish_shadow_update.reset_mock()
+    await ac.async_set_temperature(temperature=23.5)
+    coordinator.async_publish_shadow_update.assert_awaited_with(
+        {"state": {"desired": {"aircd": {"tTemp": 2350}}}},
+        device_id=_DEV_ID,
+    )
+    coordinator.async_publish_shadow_update.reset_mock()
+    await ac.async_turn_off()
+    coordinator.async_publish_shadow_update.assert_awaited_with(
+        {"state": {"desired": {"aircd": {"state": 0}}}},
+        device_id=_DEV_ID,
+    )
+    coordinator.async_publish_shadow_update.reset_mock()
+    await ac.async_set_hvac_mode(HVACMode.DRY)
+    coordinator.async_publish_shadow_update.assert_not_awaited()
+
+    coordinator.data["shadows"] = {_DEV_ID: {"aircd": {"state": 1, "func": 3}}}
+    assert ac.hvac_mode is None  # Unsupported mode must not appear as cooling.
+
+    ac_f = VivosunAirConditionerClimateEntity(
+        cast("VivosunCoordinator", coordinator),
+        MockConfigEntry(domain=DOMAIN, title="t", data={}, options={"temp_unit": "fahrenheit"}),
+        _DEV_ID,
+    )
+    await ac_f.async_set_temperature(temperature=77)
+    coordinator.async_publish_shadow_update.assert_awaited_with(
+        {"state": {"desired": {"aircd": {"tTemp": 2500}}}},
+        device_id=_DEV_ID,
     )
