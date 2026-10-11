@@ -13,7 +13,6 @@ from custom_components.vivosun_growhub.shadow import (
     build_aircd_func_payload,
     build_aircd_on_payload,
     build_aircd_target_temp_payload,
-    build_aircd_wind_payload,
     build_cfan_level_payload,
     build_cfan_night_mode_payload,
     build_cfan_oscillate_payload,
@@ -22,8 +21,6 @@ from custom_components.vivosun_growhub.shadow import (
     build_dfan_level_payload,
     build_dhmdf_on_payload,
     build_dhmdf_target_payload,
-    build_h09_auto_payload,
-    build_h09_manual_payload,
     build_light_level_payload,
     build_light_mode_payload,
     build_light_spectrum_payload,
@@ -142,14 +139,14 @@ def test_parse_shadow_document_falls_back_to_desired_when_reported_missing() -> 
         "state": {
             "desired": {
                 "hmdf": {
-                    "mode": 1,
-                    "auto": {"tHumi": 5500},
+                    "on": 1,
+                    "targetHumi": 5500,
                 }
             },
             "metadata": {
                 "desired": {
                     "hmdf": {
-                        "mode": {"timestamp": 1777359930},
+                        "on": {"timestamp": 1777359930},
                     }
                 }
             },
@@ -158,7 +155,7 @@ def test_parse_shadow_document_falls_back_to_desired_when_reported_missing() -> 
 
     parsed = parse_shadow_document(payload)
     assert parsed["hmdf"] == {
-        "mode": 1,
+        "on": True,
         "target_humidity": 5500,
     }
 
@@ -303,10 +300,6 @@ def test_level_payload_builder_validates_bounds() -> None:
         build_cfan_level_payload(201)
     with pytest.raises(ValueError):
         build_dfan_level_payload(101)
-    with pytest.raises(ValueError):
-        build_h09_manual_payload(101)
-    with pytest.raises(ValueError):
-        build_h09_manual_payload(-1)
 
 
 def test_non_level_payload_builders_match_required_structure() -> None:
@@ -319,16 +312,6 @@ def test_non_level_payload_builders_match_required_structure() -> None:
     assert build_dhmdf_target_payload(6000) == {
         "state": {"desired": {"dhmdf": {"auto": {"tHumi": 6000}}}}
     }
-    assert build_h09_manual_payload(0) == {
-        "state": {"desired": {"hmdf": {"mode": 1, "manu": {"lv": 0}}}}
-    }
-    assert build_h09_manual_payload(50) == {
-        "state": {"desired": {"hmdf": {"mode": 1, "manu": {"lv": 50}}}}
-    }
-    assert build_h09_auto_payload(5500) == {
-        "state": {"desired": {"hmdf": {"mode": 2, "auto": {"tHumi": 5500}}}}
-    }
-    assert build_h09_auto_payload() == {"state": {"desired": {"hmdf": {"mode": 2}}}}
     assert build_dfan_auto_mode_payload(True) == {"state": {"desired": {"dFan": {"mode": 1}}}}
     assert build_dfan_auto_threshold_payload("tMax", 2800) == {
         "state": {"desired": {"dFan": {"auto": {"tMax": 2800}}}}
@@ -381,6 +364,54 @@ def test_parse_reported_fragment_dehumidifier_sparse_state() -> None:
     }
 
 
+def test_c08_shadow_parses_captured_fields_and_partial_report() -> None:
+    # Public issue #33: VSACA08 reported aircd values.
+    payload = {
+        "aircd": {
+            "state": 1, "pause": 0, "func": 1, "wdLv": 50,
+            "tTemp": 2399, "tMin": 1600, "tHumi": 8000, "tVpd": -6666,
+        }
+    }
+    parsed = parse_reported_fragment(payload)
+    assert parsed["aircd"] == {
+        "state": 1,
+        "pause": 0,
+        "func": 1,
+        "wind_level": 50,
+        "target_temp": 2399,
+        "min_target_temp": 1600,
+        "target_humidity": 8000,
+    }
+    assert parse_reported_fragment({"aircd": {"wdLv": 25}})["aircd"] == {"wind_level": 25}
+
+
+def test_c08_shadow_commands_use_reported_schema() -> None:
+    assert build_aircd_on_payload(False) == {"state": {"desired": {"aircd": {"state": 0}}}}
+    assert build_aircd_func_payload(1) == {
+        "state": {"desired": {"aircd": {"state": 1, "func": 1}}}
+    }
+    assert build_aircd_target_temp_payload(2350) == {
+        "state": {"desired": {"aircd": {"tTemp": 2350}}}
+    }
+
+
+def test_h09_reported_shadow_target_and_explicit_unavailable() -> None:
+    # Captured H09 reported.hmdf fields from public issue #36.
+    parsed = parse_reported_fragment(
+        {"hmdf": {"mode": 1, "lv": 0, "manu": {"lv": 0}, "auto": {"tHumi": 5959}, "waterWarn": 0}}
+    )
+    assert parsed["hmdf"] == {
+        "mode": 1,
+        "level": 0,
+        "target_humidity": 5959,
+        "water_warning": False,
+    }
+    assert parse_reported_fragment({"hmdf": {"auto": {"tHumi": -6666}}})["hmdf"] == {
+        "target_humidity": None
+    }
+    assert parse_reported_fragment({"hmdf": {"mode": 2}})["hmdf"] == {"mode": 2}
+
+
 def test_parse_reported_fragment_parses_aircd_state() -> None:
     fragment = {
         "aircd": {
@@ -401,7 +432,7 @@ def test_parse_reported_fragment_parses_aircd_state() -> None:
 
     aircd = parsed["aircd"]
     assert aircd["state"] == 1
-    assert aircd["mode"] == 0
+    assert parsed["reported_supported"]["aircd"]["mode"] == 0
     assert aircd["pause"] == 0
     assert aircd["func"] == 1
     assert aircd["wind_level"] == 50
@@ -414,14 +445,8 @@ def test_parse_reported_fragment_parses_aircd_state() -> None:
 def test_build_aircd_payloads() -> None:
     assert build_aircd_on_payload(True) == {"state": {"desired": {"aircd": {"state": 1}}}}
     assert build_aircd_on_payload(False) == {"state": {"desired": {"aircd": {"state": 0}}}}
-    assert build_aircd_func_payload(3) == {"state": {"desired": {"aircd": {"state": 1, "func": 3}}}}
+    assert build_aircd_func_payload(1) == {"state": {"desired": {"aircd": {"state": 1, "func": 1}}}}
     assert build_aircd_target_temp_payload(2399) == {"state": {"desired": {"aircd": {"tTemp": 2399}}}}
-    assert build_aircd_wind_payload(50) == {"state": {"desired": {"aircd": {"wdLv": 50}}}}
-
-
-def test_build_aircd_wind_payload_rejects_out_of_range() -> None:
-    with pytest.raises(ValueError, match="Wind level"):
-        build_aircd_wind_payload(101)
 
 
 def test_parse_reported_fragment_humidifier_full_state() -> None:

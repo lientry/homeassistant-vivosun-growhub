@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
@@ -42,11 +43,22 @@ from .const import (
 )
 from .encryption import encrypt_request_body
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
-from .models import AuthTokens, AwsIdentity, DeviceInfo, PlanStageInfo, client_model_token, infer_device_type
+from .models import (
+    AuthTokens,
+    AwsIdentity,
+    CaptureDevice,
+    DeviceInfo,
+    PlanStageInfo,
+    client_model_token,
+    infer_device_type,
+)
 from .redaction import redact_identifier, sanitize_mapping_for_debug
+from .support_capture import summarize_rest_telemetry
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from .support_capture import SupportCaptureManager
 
 _LOGGER = logging.getLogger(__name__)
 _AUTH_MESSAGE_MARKERS = ("auth", "credential", "forbidden", "invalid", "login", "password", "token", "unauthorized")
@@ -63,11 +75,22 @@ class VivosunApiClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=API_REQUEST_TIMEOUT_SECONDS)
         self._skipped_devices: list[dict[str, object]] = []
+        self._capture_devices: list[CaptureDevice] = []
+        self._support_capture: SupportCaptureManager | None = None
+
+    def set_support_capture(self, capture: SupportCaptureManager) -> None:
+        """Attach an opt-in recorder; normal REST parsing remains unchanged."""
+        self._support_capture = capture
 
     @property
     def skipped_devices(self) -> list[dict[str, object]]:
         """Return rejected getTotalList entries from the last discovery call."""
         return [dict(entry) for entry in self._skipped_devices]
+
+    @property
+    def capture_devices(self) -> list[CaptureDevice]:
+        """Return non-camera discovery routes, including entity-rejected entries."""
+        return list(self._capture_devices)
 
     async def login(self, email: str, password: str) -> AuthTokens:
         """Authenticate with Vivosun and return account tokens."""
@@ -98,6 +121,7 @@ class VivosunApiClient:
 
         devices: list[DeviceInfo] = []
         self._skipped_devices = []
+        self._capture_devices = []
         for category_key, category_devices in device_group.items():
             if not isinstance(category_devices, list):
                 continue
@@ -145,6 +169,20 @@ class VivosunApiClient:
                 missing_fields.append("clientId")
             if topic_prefix is None:
                 missing_fields.append("topicPrefix")
+        if device_type != "camera" and client_id and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", client_id):
+            safe_prefix = topic_prefix or ""
+            if any(char in safe_prefix for char in ("+", "#", "\x00")) or len(safe_prefix) > 512:
+                safe_prefix = ""
+            self._capture_devices.append(
+                CaptureDevice(
+                    client_id=client_id,
+                    device_id=device_id or "",
+                    topic_prefix=safe_prefix,
+                    name=name,
+                    device_type=device_type,
+                    missing_fields=tuple(missing_fields),
+                )
+            )
         if missing_fields:
             self._track_skipped_device(
                 device,
@@ -271,9 +309,26 @@ class VivosunApiClient:
         )
         entries = self._expect_sequence(data, "iotDataLogList")
         if not entries:
+            if self._support_capture is not None and self._support_capture.active:
+                self._support_capture.record_rest_telemetry_result(device.device_id, {
+                    "model_token": client_model_token(device.client_id), "status": "empty",
+                })
             return {}
 
         latest = self._expect_mapping_item(entries[-1], "iotDataLogList[-1]")
+        if self._support_capture is not None and self._support_capture.active:
+            self._support_capture.record_rest_samples(
+                device.device_id,
+                [row for row in entries[-20:] if isinstance(row, dict)],
+            )
+            self._support_capture.record_rest_telemetry_result(
+                device.device_id,
+                {
+                    "model_token": client_model_token(device.client_id),
+                    "status": "captured",
+                    **summarize_rest_telemetry(latest),
+                },
+            )
         snapshot: dict[str, int | None] = {}
         for key in (
             SENSOR_KEY_INSIDE_TEMP,

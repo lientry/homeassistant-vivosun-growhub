@@ -395,6 +395,7 @@ class MQTTClient:
         label: str = "mqtt",
         keepalive_seconds: float = 60,
         connect_timeout: float = 15.0,
+        subscribe_required_topics: bool = True,
     ) -> None:
         self._websocket_url = websocket_url
         self._thing = thing
@@ -403,6 +404,7 @@ class MQTTClient:
         self._label = label
         self._keepalive = keepalive_seconds
         self._connect_timeout = connect_timeout
+        self._subscribe_required_topics = subscribe_required_topics
 
         self._ws: _WebSocketLike | None = None
         self._connected = False
@@ -439,7 +441,7 @@ class MQTTClient:
         self._message_callbacks.append(callback)
 
     async def connect(self) -> None:
-        """Open websocket, complete MQTT handshake, and subscribe required topics."""
+        """Open websocket and handshake; optionally subscribe the normal entity topics."""
         if self._connected:
             return
         if self._keepalive <= 0:
@@ -474,7 +476,8 @@ class MQTTClient:
             self._receive_task = asyncio.create_task(self._receive_loop(), name="vivosun_mqtt_receive")
             self._keepalive_task = asyncio.create_task(self._keepalive_loop(), name="vivosun_mqtt_keepalive")
 
-            await self.subscribe([(topic, 1) for topic in self.required_topics])
+            if self._subscribe_required_topics:
+                await self.subscribe([(topic, 1) for topic in self.required_topics])
         except Exception:
             await self.disconnect()
             raise

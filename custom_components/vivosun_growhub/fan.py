@@ -11,9 +11,10 @@ from homeassistant.components.fan import FanEntity, FanEntityFeature
 from homeassistant.helpers.entity_platform import async_get_current_platform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, E42A_DFAN_AUTO_MODE, MODE_AUTO
 from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
+from .models import client_model_token
 from .shadow import (
     build_cfan_level_payload,
     build_cfan_night_mode_payload,
@@ -127,6 +128,10 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
             raw_percentage = kwargs.get("percentage")
             if isinstance(raw_percentage, int):
                 requested_percentage = raw_percentage
+
+        # Auto selects its own speed; a manual level would cancel it.
+        if requested_preset == "auto" and requested_percentage is None:
+            return
 
         # Presets such as natural_wind intentionally do not expose a percentage.
         if requested_preset is not None and requested_percentage is None and self.percentage is None:
@@ -321,7 +326,7 @@ class VivosunDuctFanEntity(_VivosunFanBase):
         """Set duct fan preset mode."""
         if preset_mode == "auto":
             await self.coordinator.async_publish_shadow_update(
-                build_dfan_auto_mode_payload(True), device_id=self._device_id
+                build_dfan_auto_mode_payload(True, auto_mode=self._auto_mode), device_id=self._device_id
             )
             return
         if preset_mode == "manual":
@@ -330,6 +335,13 @@ class VivosunDuctFanEntity(_VivosunFanBase):
             )
             return
         raise ValueError(f"Unsupported duct fan preset: {preset_mode}")
+
+    @property
+    def _auto_mode(self) -> int:
+        device = self.coordinator.get_device(self._device_id)
+        if device and client_model_token(device.client_id) == "VSCTLE42A":
+            return E42A_DFAN_AUTO_MODE
+        return MODE_AUTO
 
     async def async_set_auto_threshold(self, field: str, value: int | None = None) -> None:
         """Set a duct fan auto-threshold field."""

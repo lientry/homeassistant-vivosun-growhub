@@ -133,9 +133,7 @@ _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
         "default_name": "AeroLush C08",
         "device_type": "air_conditioner",
         "comm_mode_list": ["MQTT"],
-        "channel_param_key": {
-            "1": {"temp": "pTemp", "humi": "pHumi"},
-        },
+        "channel_param_key": {"1": {"temp": "pTemp", "humi": "pHumi"}},
         "data_upload_groups": [
             {
                 "group_name": "Probe",

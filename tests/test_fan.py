@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -230,7 +231,7 @@ async def test_duct_fan_state_and_commands() -> None:
     coordinator.async_publish_shadow_update.reset_mock()
     await entity.async_set_preset_mode("auto")
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_dfan_auto_mode_payload(True), device_id=_DEV_ID
+        {"state": {"desired": {"dFan": {"mode": 2}}}}, device_id=_DEV_ID
     )
 
     coordinator.async_publish_shadow_update.reset_mock()
@@ -261,6 +262,26 @@ async def test_duct_fan_state_and_commands() -> None:
     await entity.async_turn_off()
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
         build_dfan_level_payload(0), device_id=_DEV_ID
+    )
+
+
+async def test_duct_fan_auto_turn_on_preserves_preset_and_legacy_mode() -> None:
+    coordinator = _StubCoordinator()
+    coordinator.data = {"shadows": {_DEV_ID: {"dFan": {"level": 60, "auto_enabled": False}}}}
+    entity = _make_dfan(coordinator)
+
+    await entity.async_turn_on(preset_mode="auto")
+    coordinator.async_publish_shadow_update.assert_awaited_once_with(
+        {"state": {"desired": {"dFan": {"mode": 2}}}},
+        device_id=_DEV_ID,
+    )
+
+    legacy = replace(_controller_device(_DEV_ID), client_id="vivosun-VSCTL001-acc-dev-1")
+    old_coordinator = _StubCoordinator([legacy])
+    await _make_dfan(old_coordinator).async_set_preset_mode("auto")
+    old_coordinator.async_publish_shadow_update.assert_awaited_once_with(
+        {"state": {"desired": {"dFan": {"mode": 1}}}},
+        device_id=_DEV_ID,
     )
 
 

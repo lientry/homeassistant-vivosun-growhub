@@ -99,7 +99,6 @@ SENSOR_CHANNEL_KEYS = (
 SENSOR_UNAVAILABLE_SENTINEL = -6666
 TEMP_SCALE_FACTOR = 100
 WATER_LEVEL_SCALE_FACTOR = 1000
-# VGrow DWC kit water sensor (AUX port) reports waterLv in hundredths of a percent.
 DWC_WATER_LEVEL_SCALE_FACTOR = 100
 LIGHT_MIN_BRIGHTNESS = 25
 
@@ -111,8 +110,8 @@ MODE_MANUAL = 0
 MODE_AUTO = 1
 MODE_CYCLE = 1
 MODE_PLAN = 2
+E42A_DFAN_AUTO_MODE = 2
 
-# H09 uses a different mode enum from older AeroStream humidifiers.
 H09_MODE_MANUAL = 1
 H09_MODE_AUTO = 2
 

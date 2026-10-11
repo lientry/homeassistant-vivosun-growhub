@@ -57,6 +57,8 @@ def infer_device_type(name: str, client_id: str = "") -> str:
     """Infer device type from stable model tokens and friendly-name hints."""
     combined = f"{name} {client_id}".lower()
     model_token = client_model_token(client_id)
+    if model_token == "VSACA08":
+        return "air_conditioner"
     if model_token.startswith("VSCTL") or "growhub" in combined or "controller" in combined:
         return "controller"
     if model_token.startswith("VSDRY") or "aerodrain" in combined or "dehumidifier" in combined:
@@ -65,13 +67,23 @@ def infer_device_type(name: str, client_id: str = "") -> str:
         return "humidifier"
     if model_token.startswith("VSHT") or "aeroflux" in combined or "heater" in combined:
         return "heater"
-    if model_token.startswith("VSAC") or "aerolush" in combined or "air conditioner" in combined:
-        return "air_conditioner"
     if "growcam" in combined or "camera" in combined:
         return "camera"
     if model_token.startswith("VSCB") or "vcure" in combined:
         return "curing_box"
     return "unknown"
+
+
+@dataclass(slots=True, frozen=True)
+class CaptureDevice:
+    """Account-discovered routing for read-only capture, independent of entities."""
+
+    client_id: str
+    device_id: str
+    topic_prefix: str
+    name: str
+    device_type: str
+    missing_fields: tuple[str, ...] = ()
 
 
 def client_model_token(client_id: str) -> str:

@@ -201,6 +201,29 @@ async def test_connect_and_required_subscriptions_flow() -> None:
     assert ws.sent[-1] == b"\xe0\x00"
 
 
+async def test_capture_connection_can_handshake_before_individual_filter_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = _MockWebSocket()
+    await ws.feed_bytes(_connack_packet())
+
+    async def connect_stub(_uri: str, **_kwargs: object) -> _MockWebSocket:
+        return ws
+
+    monkeypatch.setattr("custom_components.vivosun_growhub.mqtt_client.websockets.connect", connect_stub)
+    client = MQTTClient(
+        websocket_url="wss://example/mqtt",
+        thing="thing-1",
+        topic_prefix="",
+        subscribe_required_topics=False,
+    )
+    await client.connect()
+    assert client.is_connected
+    assert len(ws.sent) == 1
+    assert ws.sent[0][0] == 0x10
+    await client.disconnect()
+
+
 async def test_connect_uses_explicit_client_id_when_provided() -> None:
     ws = _MockWebSocket()
     for packet in [_connack_packet(), build_suback_packet(1, [1, 1, 1, 1, 1])]:

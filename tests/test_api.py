@@ -91,6 +91,49 @@ async def test_login_success_returns_auth_tokens(caplog: pytest.LogCaptureFixtur
     assert "refresh-123" not in caplog.text
 
 
+async def test_discovery_retains_safe_capture_routing_when_scene_is_missing() -> None:
+    entries = [
+        {
+            "name": "VSeed S40",
+            "deviceId": "seed-device",
+            "clientId": "vivosun-VSSBS40-account-seed",
+            "topicPrefix": "vivosun/seed",
+            "setting": {"password": "never-copy"},
+        },
+        {"name": "No routing", "deviceId": "unrouted"},
+        {"name": "Invalid routing", "clientId": "other/+/thing"},
+        {
+            "name": "GrowCam C4",
+            "clientId": "camera-thing",
+            "deviceId": "cam",
+            "setting": {"jf": {"devUser": "camera-user", "devPass": "camera-secret"}},
+        },
+    ]
+    session = cast(
+        "aiohttp.ClientSession",
+        _MockSession(
+            responses=[
+                _MockResponse(
+                    status=200,
+                    payload={"success": True, "message": "success", "data": {"deviceGroup": {"STORE": entries}}},
+                )
+            ]
+        ),
+    )
+    api = VivosunApiClient(session)
+
+    devices = await api.get_devices(_valid_tokens())
+
+    assert not any(device.name == "VSeed S40" for device in devices)
+    candidates = api.capture_devices
+    assert len(candidates) == 1
+    assert candidates[0].client_id == "vivosun-VSSBS40-account-seed"
+    assert candidates[0].missing_fields == ("sceneId",)
+    assert candidates[0].topic_prefix == "vivosun/seed"
+    assert "never-copy" not in repr(candidates)
+    assert "camera-secret" not in repr(candidates)
+
+
 async def test_login_auth_failure_message_raises_auth_error() -> None:
     """login() should classify auth-style envelope failures as VivosunAuthError."""
     payload = {
@@ -440,6 +483,7 @@ async def test_get_point_log_returns_latest_sensor_snapshot() -> None:
                     "outVpd": 105,
                     "coreTemp": 3839,
                     "rssi": -35,
+                    "waterT": -6666,
                     "time": 200,
                 },
             ]
@@ -482,6 +526,108 @@ async def test_get_point_log_returns_latest_sensor_snapshot() -> None:
         "coreTemp": 3839,
         "rssi": -35,
     }
+
+
+@pytest.mark.parametrize("capture_active", [False, True])
+async def test_get_point_log_support_capture_keeps_telemetry_without_changing_sensor_parsing(
+    capture_active: bool,
+) -> None:
+    from custom_components.vivosun_growhub.models import DeviceInfo
+    from custom_components.vivosun_growhub.support_capture import SupportCaptureManager
+
+    payload = {
+        "code": 0,
+        "success": True,
+        "message": "success",
+        "data": {
+            "iotDataLogList": [{"inTemp": 1000, "oldOnly": 9876}, {
+                "inTemp": 2250,
+                "usb1.mode": 2,
+                "usb1.lv": 40,
+                "usb1.inPlan": 0,
+                "waterLv": 7500,
+                "futureSensor": 42.5,
+                "probe": {"wet": True, "reading": None, "userId": 91234567},
+                "deviceId": "raw-device-id",
+                "sceneId": 66078,
+                "mode": "automatic",
+                "futureStringReading": "42.5",
+                "accessToken": "must-not-appear",
+            }],
+        },
+    }
+    session = cast("aiohttp.ClientSession", _MockSession(responses=[_MockResponse(status=200, payload=payload)]))
+    client = VivosunApiClient(session)
+    capture = SupportCaptureManager()
+    client.set_support_capture(capture)
+    device = DeviceInfo(
+        device_id="dwc-1",
+        client_id="vivosun-VSCTLY18-account-device-1",
+        topic_prefix="topic/1",
+        name="VGrow",
+        online=True,
+        scene_id=66078,
+    )
+    if capture_active:
+        capture.start(max_events=10, devices=[], subscription_topics=[])
+
+    snapshot = await client.get_point_log(_valid_tokens(), device, start_time=100, end_time=200)
+
+    assert snapshot["inTemp"] == 2250
+    assert snapshot["waterLv"] == 7500
+    assert "usb1.mode" not in snapshot
+    assert "accessToken" not in snapshot
+    assert "futureSensor" not in snapshot
+    events = capture.snapshot()["events"]
+    if not capture_active:
+        assert events == []
+        assert capture.snapshot()["rest_telemetry_results"] == []
+        assert capture.snapshot()["rest_samples"] == []
+        return
+    assert len(events) == 1
+    assert events[0]["kind"] == "rest_point_log"
+    assert events[0]["data"]["model_token"] == "VSCTLY18"
+    telemetry = events[0]["data"]["telemetry"]
+    assert telemetry["usb1.mode"] == 2
+    assert telemetry["usb1.lv"] == 40
+    assert telemetry["usb1.inPlan"] == 0
+    assert telemetry["waterLv"] == 7500
+    assert telemetry["futureSensor"] == 42.5
+    assert telemetry["probe"] == {"wet": True, "reading": None, "userId": "***"}
+    assert telemetry["sceneId"] == 66078
+    assert telemetry["deviceId"] == "raw-device-id"
+    assert telemetry["mode"] == "automatic"
+    assert telemetry["futureStringReading"] == "42.5"
+    assert "oldOnly" not in telemetry
+    assert events[0]["data"]["telemetry_truncated"] is False
+    assert capture.snapshot()["rest_telemetry_results"][0]["telemetry"] == telemetry
+    assert "must-not-appear" not in str(capture.snapshot())
+    assert capture.snapshot()["rest_telemetry_results"][0]["device_id"] == device.device_id
+    samples = capture.snapshot()["rest_samples"][0]["samples"]
+    assert [row["telemetry"]["inTemp"] for row in samples] == [1000, 2250]
+    assert samples[0]["telemetry"]["oldOnly"] == 9876
+    assert "must-not-appear" not in str(samples)
+
+
+async def test_get_point_log_capture_records_empty_response_without_stale_telemetry() -> None:
+    from custom_components.vivosun_growhub.models import DeviceInfo
+    from custom_components.vivosun_growhub.support_capture import SupportCaptureManager
+
+    payload = {"success": True, "message": "success", "data": {"iotDataLogList": []}}
+    session = cast("aiohttp.ClientSession", _MockSession(responses=[_MockResponse(status=200, payload=payload)]))
+    client = VivosunApiClient(session)
+    capture = SupportCaptureManager()
+    capture.start(max_events=10, devices=[], subscription_topics=[])
+    client.set_support_capture(capture)
+    device = DeviceInfo("device-1", "vivosun-VSCTLE42A-account-device", "topic/1", "GrowHub", True, 66078)
+    capture.record_rest_telemetry_result(device.device_id, {"status": "captured", "telemetry": {"inTemp": 2200}})
+
+    assert await client.get_point_log(_valid_tokens(), device, start_time=100, end_time=200) == {}
+
+    result = capture.snapshot()["rest_telemetry_results"][0]
+    assert result["status"] == "empty"
+    assert result["model_token"] == "VSCTLE42A"
+    assert "telemetry" not in result
 
 
 async def test_get_point_log_returns_e42a_plus_sensor_keys() -> None:
