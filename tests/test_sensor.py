@@ -25,11 +25,11 @@ _DEV_ID = "dev-1"
 
 
 class _StubCoordinator:
-    def __init__(self, *, device_type: str = "controller") -> None:
+    def __init__(self, *, device_type: str = "controller", client_id: str = "vivosun-VSCTLE42A-acc-dev-1") -> None:
         self.data: dict[str, object] = {}
         self._device = DeviceInfo(
             device_id=_DEV_ID,
-            client_id="vivosun-VSCTLE42A-acc-dev-1",
+            client_id=client_id,
             topic_prefix="prefix",
             name="GrowHub",
             online=True,
@@ -686,3 +686,78 @@ async def test_sensor_water_level_scales_raw_value(hass: HomeAssistant) -> None:
     water_level = next(e for e in added if e.unique_id.endswith("_waterLv"))
     assert water_level.native_value == 20.0
     assert water_level.native_unit_of_measurement == PERCENTAGE
+
+
+_VGROW_CLIENT_ID = "vivosun-VSCTLY18-acc-dev-1"
+
+
+async def _setup_entities(hass: HomeAssistant, coordinator: _StubCoordinator) -> list[VivosunChannelSensorEntity]:
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
+    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+    added: list[VivosunChannelSensorEntity] = []
+
+    def _add(entities: list[VivosunChannelSensorEntity]) -> None:
+        added.extend(entities)
+
+    await async_setup_entry(hass, entry, _add)
+    return added
+
+
+async def test_sensor_setup_adds_water_sensors_for_vgrow(hass: HomeAssistant) -> None:
+    added = await _setup_entities(hass, _StubCoordinator(client_id=_VGROW_CLIENT_ID))
+
+    unique_ids = {entity.unique_id for entity in added}
+    assert f"vivosun_growhub_{_DEV_ID}_waterLv" in unique_ids
+    assert f"vivosun_growhub_{_DEV_ID}_waterT" in unique_ids
+    assert len(added) == 19
+
+
+async def test_sensor_setup_skips_water_sensors_for_other_controllers(hass: HomeAssistant) -> None:
+    added = await _setup_entities(hass, _StubCoordinator())
+
+    unique_ids = {entity.unique_id for entity in added}
+    assert f"vivosun_growhub_{_DEV_ID}_waterLv" not in unique_ids
+    assert f"vivosun_growhub_{_DEV_ID}_waterT" not in unique_ids
+
+
+async def test_sensor_vgrow_water_values_scale_from_point_log(hass: HomeAssistant) -> None:
+    # Real VGrow + DWC kit sample: the app showed 11 L of a 15 L tank and 22.2 °C.
+    coordinator = _StubCoordinator(client_id=_VGROW_CLIENT_ID)
+    coordinator.data = {"sensors": {_DEV_ID: {"waterLv": 7500, "waterT": 2226}}}
+    added = await _setup_entities(hass, coordinator)
+
+    water_level = next(e for e in added if e.unique_id.endswith("_waterLv"))
+    water_temp = next(e for e in added if e.unique_id.endswith("_waterT"))
+    assert water_level.native_value == 75.0
+    assert water_level.native_unit_of_measurement == PERCENTAGE
+    assert water_temp.native_value == 22.26
+    assert water_temp.native_unit_of_measurement == UnitOfTemperature.CELSIUS
+
+    # Same box after topping up to the 15 L mark.
+    coordinator.data = {"sensors": {_DEV_ID: {"waterLv": 10000, "waterT": 2220}}}
+    assert water_level.native_value == 100.0
+    assert water_temp.native_value == 22.2
+
+
+async def test_sensor_vgrow_water_values_unknown_without_dwc_sensor(hass: HomeAssistant) -> None:
+    coordinator = _StubCoordinator(client_id=_VGROW_CLIENT_ID)
+    coordinator.data = {"sensors": {_DEV_ID: {"pTemp": 2669}}}
+    added = await _setup_entities(hass, coordinator)
+
+    assert next(e for e in added if e.unique_id.endswith("_waterLv")).native_value is None
+    assert next(e for e in added if e.unique_id.endswith("_waterT")).native_value is None
+
+
+async def test_sensor_vgrow_water_values_preserve_zero_and_ignore_sentinels(hass: HomeAssistant) -> None:
+    coordinator = _StubCoordinator(client_id=_VGROW_CLIENT_ID)
+    coordinator.data = {"sensors": {_DEV_ID: {"waterLv": 0, "waterT": 0}}}
+    added = await _setup_entities(hass, coordinator)
+    water_level = next(e for e in added if e.unique_id.endswith("_waterLv"))
+    water_temp = next(e for e in added if e.unique_id.endswith("_waterT"))
+    assert water_level.native_value == 0.0
+    assert water_temp.native_value == 0.0
+
+    coordinator.data = {"sensors": {_DEV_ID: {"waterLv": -6666, "waterT": -6666}}}
+    assert water_level.native_value is None
+    assert water_temp.native_value is None

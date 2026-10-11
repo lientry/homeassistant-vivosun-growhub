@@ -9,6 +9,8 @@ from .const import (
     CFAN_LEVEL_MAP,
     CFAN_NATURAL_WIND_VALUE,
     DFAN_LEVEL_MAP,
+    H09_MODE_AUTO,
+    H09_MODE_MANUAL,
     LIGHT_MIN_BRIGHTNESS,
     MODE_AUTO,
     SENSOR_UNAVAILABLE_SENTINEL,
@@ -425,6 +427,24 @@ def build_hmdf_target_payload(target_humidity: int) -> dict[str, object]:
     return _build_desired_payload(SHADOW_KEY_HUMIDIFIER, {"targetHumi": target_humidity})
 
 
+def build_h09_manual_payload(level: int) -> dict[str, object]:
+    """Set the H09 manual mist output, including zero to stop."""
+    if not 0 <= level <= 100:
+        raise ValueError("H09 manual mist level must be in range 0..100")
+    return _build_desired_payload(
+        SHADOW_KEY_HUMIDIFIER,
+        {SHADOW_KEY_MODE: H09_MODE_MANUAL, SHADOW_KEY_MANU: {SHADOW_KEY_LEVEL: level}},
+    )
+
+
+def build_h09_auto_payload(target_humidity: int | None = None) -> dict[str, object]:
+    """Engage H09 automatic humidity control, optionally setting its target."""
+    hmdf: dict[str, object] = {SHADOW_KEY_MODE: H09_MODE_AUTO}
+    if target_humidity is not None:
+        hmdf[SHADOW_KEY_AUTO] = {"tHumi": target_humidity}
+    return _build_desired_payload(SHADOW_KEY_HUMIDIFIER, hmdf)
+
+
 def build_heat_on_payload(on: bool) -> dict[str, object]:
     """Build desired heater on/off payload."""
     return _build_desired_payload(SHADOW_KEY_HEATER, {"on": int(on)})
@@ -582,13 +602,24 @@ def _parse_hmdf_state(hmdf: dict[str, object]) -> HumidifierState:
     if level is None:
         level = manual_level
 
-    return HumidifierState(
-        on=_as_bool(hmdf.get("on")),
-        level=level,
-        mode=_as_int(hmdf.get(SHADOW_KEY_MODE)),
-        water_warning=_as_bool(hmdf.get("waterWarn")),
-        target_humidity=_normalize_sentinel_int(_as_int(hmdf.get("targetHumi"))),
-    )
+    result: HumidifierState = {}
+    if "on" in hmdf:
+        result["on"] = _as_bool(hmdf["on"])
+    if SHADOW_KEY_LEVEL in hmdf or manual_level is not None:
+        result["level"] = level
+    if SHADOW_KEY_MODE in hmdf:
+        result["mode"] = _as_int(hmdf[SHADOW_KEY_MODE])
+    if "waterWarn" in hmdf:
+        result["water_warning"] = _as_bool(hmdf["waterWarn"])
+
+    if "targetHumi" in hmdf:
+        result["target_humidity"] = _normalize_sentinel_int(_as_int(hmdf["targetHumi"]))
+    auto = _as_dict(hmdf.get(SHADOW_KEY_AUTO))
+    if auto is not None and "tHumi" in auto:
+        nested_target = _normalize_sentinel_int(_as_int(auto["tHumi"]))
+        if result.get("target_humidity") is None:
+            result["target_humidity"] = nested_target
+    return result
 
 
 

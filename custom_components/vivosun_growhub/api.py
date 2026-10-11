@@ -36,6 +36,7 @@ from .const import (
     SENSOR_KEY_PROBE_VPD,
     SENSOR_KEY_RSSI,
     SENSOR_KEY_WATER_LEVEL,
+    SENSOR_KEY_WATER_TEMP,
     SENSOR_UNAVAILABLE_SENTINEL,
     SERVER_PLATFORM,
 )
@@ -288,6 +289,7 @@ class VivosunApiClient:
             SENSOR_KEY_PROBE_HUMI,
             SENSOR_KEY_PROBE_VPD,
             SENSOR_KEY_WATER_LEVEL,
+            SENSOR_KEY_WATER_TEMP,
             SENSOR_KEY_CORE_TEMP,
             SENSOR_KEY_RSSI,
         ):
