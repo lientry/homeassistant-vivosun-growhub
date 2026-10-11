@@ -192,31 +192,24 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     ),
 )
 
-# Sensors only some models have, keyed by the model token in the client id.
-_MODEL_SENSOR_DESCRIPTIONS: dict[str, tuple[VivosunSensorDescription, ...]] = {
-    # VGrow Smart Grow Box: the DWC kit's water sensor plugs into the AUX port and its readings
-    # arrive in the point log only.
-    "VSCTLY18": (
-        VivosunSensorDescription(
-            key="water_level",
-            name="Water Level",
-            channel_key="waterLv",
-            quantity="water_level",
-            scale_factor=DWC_WATER_LEVEL_SCALE_FACTOR,
-            icon="mdi:waves-arrow-up",
-            native_unit_of_measurement=PERCENTAGE,
-            state_class=SensorStateClass.MEASUREMENT,
-        ),
-        VivosunSensorDescription(
-            key="water_temperature",
-            name="Water Temperature",
-            channel_key="waterT",
-            quantity="temperature",
-            device_class=SensorDeviceClass.TEMPERATURE,
-            state_class=SensorStateClass.MEASUREMENT,
-        ),
+_VGROW_DWC_SENSORS: tuple[VivosunSensorDescription, ...] = (
+    VivosunSensorDescription(
+        key="water_level",
+        name="Water Level",
+        channel_key="waterLv",
+        quantity="water_level",
+        scale_factor=DWC_WATER_LEVEL_SCALE_FACTOR,
+        icon="mdi:waves-arrow-up",
+        native_unit_of_measurement=PERCENTAGE,
     ),
-}
+    VivosunSensorDescription(
+        key="water_temperature",
+        name="Water Temperature",
+        channel_key="waterT",
+        quantity="temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+    ),
+)
 
 _DEVICE_TYPE_SENSORS: dict[str, frozenset[str]] = {
     "controller": frozenset({"inTemp", "inHumi", "inVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
@@ -250,8 +243,9 @@ async def async_setup_entry(
                 entities.append(
                     VivosunChannelSensorEntity(coordinator, entry, description, device.device_id)
                 )
-        for description in _MODEL_SENSOR_DESCRIPTIONS.get(client_model_token(device.client_id), ()):
-            entities.append(VivosunChannelSensorEntity(coordinator, entry, description, device.device_id))
+        if client_model_token(device.client_id) == "VSCTLY18":
+            for description in _VGROW_DWC_SENSORS:
+                entities.append(VivosunChannelSensorEntity(coordinator, entry, description, device.device_id))
         if device.device_type == "controller":
             entities.append(VivosunPlanStageSensor(coordinator, entry, device.device_id))
             entities.append(VivosunPlanLightSensor(coordinator, entry, device.device_id))
@@ -335,7 +329,11 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
     def extra_state_attributes(self) -> dict[str, str] | None:
         """Return extra attributes for non-standard quantities."""
         if self.entity_description.quantity == "vpd":
-            source = "reported" if self._raw_channel_value() is not None else "computed"
+            source = (
+                "reported" if self._raw_channel_value() is not None
+                else "computed" if self._computed_vpd() is not None
+                else "unavailable"
+            )
             return {"quantity": "vpd", "source": source}
         return None
 
@@ -350,29 +348,25 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
         return None
 
     def _computed_vpd(self) -> float | None:
-        """Compute air VPD (kPa) from the sibling temperature/humidity channels.
-
-        Some devices (e.g. the original GrowHub E42 / VSCTL001) never publish a
-        VPD value even though they report temperature and humidity, so the VPD
-        entity would otherwise stay unknown forever.
-        """
+        """Compute air VPD in kPa from matching temperature/RH channels (FAO-56)."""
         sensors = sensor_slice(self.coordinator, self._device_id)
         for vpd_key in self.entity_description.channel_key_lookup:
-            if not vpd_key.endswith("Vpd"):
+            prefix = vpd_key.removesuffix("Vpd")
+            temp = sensors.get(f"{prefix}Temp")
+            humidity = sensors.get(f"{prefix}Humi")
+            if (
+                type(temp) is not int
+                or type(humidity) is not int
+                or temp == SENSOR_UNAVAILABLE_SENTINEL
+                or humidity == SENSOR_UNAVAILABLE_SENTINEL
+                or not 0 <= humidity <= 100 * TEMP_SCALE_FACTOR
+            ):
                 continue
-            prefix = vpd_key[: -len("Vpd")]
-            temp_raw = sensors.get(f"{prefix}Temp")
-            humi_raw = sensors.get(f"{prefix}Humi")
-            if isinstance(temp_raw, bool) or isinstance(humi_raw, bool):
+            temp_c = temp / TEMP_SCALE_FACTOR
+            if temp_c <= -237.3:
                 continue
-            if not isinstance(temp_raw, int) or not isinstance(humi_raw, int):
-                continue
-            temp_c = temp_raw / TEMP_SCALE_FACTOR
-            humidity = humi_raw / TEMP_SCALE_FACTOR
-            if not 0 <= humidity <= 100:
-                continue
-            saturation_kpa = 0.6108 * math.exp(17.27 * temp_c / (temp_c + 237.3))
-            return round(saturation_kpa * (1 - humidity / 100), 2)
+            saturation = 0.6108 * math.exp(17.27 * temp_c / (temp_c + 237.3))
+            return round(saturation * (1 - humidity / (100 * TEMP_SCALE_FACTOR)), 2)
         return None
 
     def _temp_unit(self) -> str:

@@ -109,7 +109,7 @@ class CirculatorFanState(TypedDict):
     night_mode: bool
 
 
-class DuctFanAutoState(TypedDict):
+class DuctFanAutoState(TypedDict, total=False):
     """Normalized dFan auto block from shadow.reported.dFan.auto."""
 
     lvMin: int | None
@@ -126,7 +126,7 @@ class DuctFanAutoState(TypedDict):
     exChk: int | None
 
 
-class DuctFanState(TypedDict):
+class DuctFanState(TypedDict, total=False):
     """Normalized duct fan state slice from shadow.reported."""
 
     mode: int | None
@@ -168,16 +168,15 @@ class HeaterState(TypedDict, total=False):
 
 
 class AirConditionerState(TypedDict, total=False):
-    """Normalized air conditioner state slice from shadow.reported (aircd)."""
+    """Reported aircd fields from the AeroLush C08."""
 
     state: int | None
-    mode: int | None
     pause: int | None
     func: int | None
     wind_level: int | None
     target_temp: int | None
-    target_humidity: int | None
     min_target_temp: int | None
+    target_humidity: int | None
 
 
 class ConnectionState(TypedDict):
@@ -235,13 +234,15 @@ class ChannelSensorState(TypedDict, total=False):
     rssi: int | None
 
 
-def parse_shadow_document(document: dict[str, object]) -> ShadowV1State:
+def parse_shadow_document(document: dict[str, object], *, dfan_auto_mode: int = MODE_AUTO) -> ShadowV1State:
     """Parse a full shadow payload (`get/accepted` or `update/documents`)."""
     reported = _extract_reported(document)
-    return parse_reported_fragment(reported)
+    return parse_reported_fragment(reported, dfan_auto_mode=dfan_auto_mode)
 
 
-def parse_reported_fragment(reported_fragment: dict[str, object]) -> ShadowV1State:
+def parse_reported_fragment(
+    reported_fragment: dict[str, object], *, dfan_auto_mode: int = MODE_AUTO
+) -> ShadowV1State:
     """Parse partial/full reported-like fragments into normalized v1 state."""
     parsed: ShadowV1State = {
         "reported_supported": {
@@ -259,7 +260,7 @@ def parse_reported_fragment(reported_fragment: dict[str, object]) -> ShadowV1Sta
 
     dfan_raw = _as_dict(reported_fragment.get(SHADOW_KEY_DUCT_FAN))
     if dfan_raw is not None:
-        parsed["dFan"] = _parse_dfan_state(dfan_raw)
+        parsed["dFan"] = _parse_dfan_state(dfan_raw, auto_mode=dfan_auto_mode)
 
     hmdf_raw = _as_dict(reported_fragment.get(SHADOW_KEY_HUMIDIFIER))
     if hmdf_raw is not None:
@@ -389,9 +390,9 @@ def build_cfan_night_mode_payload(enabled: bool) -> dict[str, object]:
     return _build_desired_payload(SHADOW_KEY_CIRCULATOR_FAN, {SHADOW_KEY_NW: int(enabled)})
 
 
-def build_dfan_auto_mode_payload(enabled: bool) -> dict[str, object]:
-    """Build desired dFan mode payload for `desired.dFan.mode` (0/1)."""
-    return _build_desired_payload(SHADOW_KEY_DUCT_FAN, {SHADOW_KEY_MODE: MODE_AUTO if enabled else 0})
+def build_dfan_auto_mode_payload(enabled: bool, *, auto_mode: int = MODE_AUTO) -> dict[str, object]:
+    """Build desired dFan mode payload with the device's Auto value."""
+    return _build_desired_payload(SHADOW_KEY_DUCT_FAN, {SHADOW_KEY_MODE: auto_mode if enabled else 0})
 
 
 def build_dfan_auto_threshold_payload(field: str, value: int | None) -> dict[str, object]:
@@ -471,25 +472,18 @@ def build_heat_target_payload(target_temp: int) -> dict[str, object]:
 
 
 def build_aircd_on_payload(on: bool) -> dict[str, object]:
-    """Build desired air conditioner on/off payload (aircd.state)."""
+    """Set the C08 power state."""
     return _build_desired_payload(SHADOW_KEY_AIRCON, {"state": int(on)})
 
 
 def build_aircd_func_payload(func: int) -> dict[str, object]:
-    """Build desired air conditioner function payload, turning the unit on."""
+    """Turn the C08 on with a selected function."""
     return _build_desired_payload(SHADOW_KEY_AIRCON, {"state": 1, "func": func})
 
 
 def build_aircd_target_temp_payload(target_temp: int) -> dict[str, object]:
-    """Build desired air conditioner target temperature (raw, scaled by 100)."""
+    """Set the C08 target temperature in centi-degrees Celsius."""
     return _build_desired_payload(SHADOW_KEY_AIRCON, {"tTemp": target_temp})
-
-
-def build_aircd_wind_payload(level: int) -> dict[str, object]:
-    """Build desired air conditioner wind/fan level payload (0..100)."""
-    if level < 0 or level > 100:
-        raise ValueError("Wind level must be in range 0..100")
-    return _build_desired_payload(SHADOW_KEY_AIRCON, {"wdLv": level})
 
 
 def build_dhmdf_target_payload(target_humidity: int) -> dict[str, object]:
@@ -562,37 +556,32 @@ def _parse_cfan_state(cfan: dict[str, object]) -> CirculatorFanState:
     )
 
 
-def _parse_dfan_state(dfan: dict[str, object]) -> DuctFanState:
-    mode = _as_int(dfan.get(SHADOW_KEY_MODE))
+def _parse_dfan_state(dfan: dict[str, object], *, auto_mode: int) -> DuctFanState:
+    """Keep absent fields out of partial reported updates."""
+    result: DuctFanState = {}
+    if SHADOW_KEY_MODE in dfan:
+        mode = _as_int(dfan[SHADOW_KEY_MODE])
+        result["mode"] = mode
+        result["auto_enabled"] = mode == auto_mode
     manu = _as_dict(dfan.get(SHADOW_KEY_MANU))
-    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
-    level = _as_int(dfan.get(SHADOW_KEY_LEVEL))
-    if level is None:
-        level = manual_level
-    auto = _as_dict(dfan.get(SHADOW_KEY_AUTO)) or {}
+    if manu is not None and SHADOW_KEY_LEVEL in manu:
+        result["manual_level"] = _as_int(manu[SHADOW_KEY_LEVEL])
+    if SHADOW_KEY_LEVEL in dfan:
+        result["level"] = _as_int(dfan[SHADOW_KEY_LEVEL])
+    elif "manual_level" in result:
+        result["level"] = result["manual_level"]
 
-    auto_state = DuctFanAutoState(
-        lvMin=_normalize_sentinel_int(_as_int(auto.get("lvMin"))),
-        lvMax=_normalize_sentinel_int(_as_int(auto.get("lvMax"))),
-        tMax=_normalize_sentinel_int(_as_int(auto.get("tMax"))),
-        tMin=_normalize_sentinel_int(_as_int(auto.get("tMin"))),
-        hMax=_normalize_sentinel_int(_as_int(auto.get("hMax"))),
-        hMin=_normalize_sentinel_int(_as_int(auto.get("hMin"))),
-        vpdMax=_normalize_sentinel_int(_as_int(auto.get("vpdMax"))),
-        vpdMin=_normalize_sentinel_int(_as_int(auto.get("vpdMin"))),
-        tStep=_normalize_sentinel_int(_as_int(auto.get("tStep"))),
-        hStep=_normalize_sentinel_int(_as_int(auto.get("hStep"))),
-        vpdStep=_normalize_sentinel_int(_as_int(auto.get("vpdStep"))),
-        exChk=_normalize_sentinel_int(_as_int(auto.get("exChk"))),
-    )
-
-    return DuctFanState(
-        mode=mode,
-        level=level,
-        manual_level=manual_level,
-        auto_enabled=(mode == MODE_AUTO),
-        auto=auto_state,
-    )
+    auto = _as_dict(dfan.get(SHADOW_KEY_AUTO))
+    if auto is not None:
+        result["auto"] = cast(
+            "DuctFanAutoState",
+            {
+                field: _normalize_sentinel_int(_as_int(auto[field]))
+                for field in _DFAN_AUTO_FIELDS
+                if field in auto
+            },
+        )
+    return result
 
 
 def _parse_hmdf_state(hmdf: dict[str, object]) -> HumidifierState:
@@ -664,15 +653,23 @@ def _parse_heat_state(heat: dict[str, object]) -> HeaterState:
 
 
 def _parse_aircd_state(aircd: dict[str, object]) -> AirConditionerState:
-    return AirConditionerState(
-        state=_as_int(aircd.get("state")),
-        mode=_as_int(aircd.get(SHADOW_KEY_MODE)),
-        pause=_as_int(aircd.get("pause")),
-        func=_as_int(aircd.get("func")),
-        wind_level=_as_int(aircd.get("wdLv")),
-        target_temp=_normalize_sentinel_int(_as_int(aircd.get("tTemp"))),
-        target_humidity=_normalize_sentinel_int(_as_int(aircd.get("tHumi"))),
-        min_target_temp=_normalize_sentinel_int(_as_int(aircd.get("tMin"))),
+    """Only emit fields present in a reported fragment."""
+    keys = {
+        "state": "state",
+        "pause": "pause",
+        "func": "func",
+        "wdLv": "wind_level",
+        "tTemp": "target_temp",
+        "tMin": "min_target_temp",
+        "tHumi": "target_humidity",
+    }
+    return cast(
+        "AirConditionerState",
+        {
+            target: _normalize_sentinel_int(_as_int(aircd[source]))
+            for source, target in keys.items()
+            if source in aircd
+        },
     )
 
 

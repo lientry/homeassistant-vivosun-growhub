@@ -16,6 +16,8 @@ from .api import VivosunApiClient
 from .aws_auth import AWS_CREDENTIAL_REFRESH_SKEW, AwsAuthClient, AwsCredentials
 from .const import (
     DOMAIN,
+    E42A_DFAN_AUTO_MODE,
+    MODE_AUTO,
     TOPIC_CHANNEL_APP,
     TOPIC_SHADOW_GET,
     TOPIC_SHADOW_GET_ACCEPTED,
@@ -26,6 +28,7 @@ from .const import (
 )
 from .exceptions import VivosunAuthError, VivosunResponseError
 from .model_metadata import support_capture_model_metadata
+from .models import CaptureDevice, client_model_token
 from .mqtt_client import MQTTClient, MQTTConnectionError
 from .redaction import redact_identifier
 from .shadow import (
@@ -35,7 +38,12 @@ from .shadow import (
     parse_channel_sensor_payload,
     parse_shadow_document,
 )
-from .support_capture import SupportCaptureManager, summarize_support_capture_payload
+from .support_capture import (
+    SUPPORT_CAPTURE_MAX_DEVICES,
+    SUPPORT_CAPTURE_MAX_PAYLOAD_BYTES,
+    SupportCaptureManager,
+    summarize_support_capture_payload,
+)
 
 if TYPE_CHECKING:
     import aiohttp
@@ -49,6 +57,7 @@ _RECONNECT_BACKOFF_MAX = 60.0
 _RECONNECT_HEALTH_CHECK_SECONDS = 2.0
 _POINT_LOG_WINDOW_SECONDS = 300
 _SHADOW_REFRESH_INTERVAL_SECONDS = 30.0
+_SUPPORT_SHADOW_READ_TIMEOUT = 10.0
 
 
 class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ignore[misc]
@@ -82,9 +91,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._aws_credentials: AwsCredentials | None = None
         self._devices: list[DeviceInfo] = []
         self._camera_devices: list[DeviceInfo] = []
+        self._capture_devices: list[CaptureDevice] = []
+        self._support_shadow_waiters: dict[tuple[str, str], asyncio.Future[dict[str, object]]] = {}
+        self._support_capture_task: asyncio.Task[None] | None = None
         self._mqtt_client: MQTTClient | None = None
         self._support_capture_probe_client: MQTTClient | None = None
         self._support_capture = SupportCaptureManager()
+        attach_capture = getattr(self._api, "set_support_capture", None)
+        if callable(attach_capture):
+            attach_capture(self._support_capture)
 
         # Per-device state keyed by device_id
         self._shadow_states: dict[str, dict[str, object]] = {}
@@ -150,9 +165,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         await self._refresh_point_log()
         await self._async_refresh_stale_shadow_states()
         await self._refresh_plan_stages()
-        snapshot = self._build_state_snapshot()
-        self.async_set_updated_data(snapshot)
-        return snapshot
+        return self._build_state_snapshot()
 
     async def async_start(self) -> None:
         """Bootstrap cloud chain and launch lifecycle workers."""
@@ -163,14 +176,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._shutdown_event.clear()
             self._reconnect_event.clear()
             await self._bootstrap_chain()
-            self._refresh_task = asyncio.create_task(
-                self._credentials_refresh_loop(),
-                name="vivosun_credentials_refresh",
-            )
-            self._reconnect_task = asyncio.create_task(
-                self._reconnect_supervisor_loop(),
-                name="vivosun_reconnect_supervisor",
-            )
+            if self._devices:
+                self._refresh_task = asyncio.create_task(
+                    self._credentials_refresh_loop(),
+                    name="vivosun_credentials_refresh",
+                )
+                self._reconnect_task = asyncio.create_task(
+                    self._reconnect_supervisor_loop(),
+                    name="vivosun_reconnect_supervisor",
+                )
             self._started = True
             await self._refresh_point_log()
             self.async_set_updated_data(self._build_state_snapshot())
@@ -190,6 +204,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._refresh_task = None
             self._reconnect_task = None
 
+            await self._cancel_support_capture_task()
             await self._disconnect_support_capture_probe_client()
             await self._disconnect_mqtt_client()
 
@@ -256,9 +271,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._logger.info("Starting Vivosun coordinator bootstrap")
         self._tokens = await self._api.login(self._email, self._password)
         all_devices = await self._api.get_devices(self._tokens)
+        self._capture_devices = list({device.client_id: device for device in self._api.capture_devices}.values())
         self._camera_devices = [device for device in all_devices if device.device_type == "camera"]
         self._devices = self._select_devices(all_devices)
         self._build_topic_maps()
+        if not self._devices:
+            self._logger.info("No entity-capable MQTT devices; retaining discovery diagnostics without MQTT setup")
+            return
         self._aws_identity = await self._api.get_aws_identity(self._tokens)
         self._aws_credentials = await self._aws_auth.get_credentials_for_identity(self._aws_identity)
         await self._connect_mqtt()
@@ -290,9 +309,11 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     def _select_devices(self, devices: list[DeviceInfo]) -> list[DeviceInfo]:
         """Select all MQTT-capable devices (filter out cameras without client_id)."""
         if not devices:
+            if self._capture_devices or self.skipped_devices_snapshot():
+                return []
             raise VivosunResponseError("No devices found for this account")
         selected = [d for d in devices if d.client_id and d.device_type != "camera"]
-        if not selected:
+        if not selected and not self._camera_devices:
             raise VivosunResponseError("No controllable devices found for this account")
         selected.sort(key=lambda item: (item.device_id, item.client_id, item.topic_prefix))
         for d in selected:
@@ -310,9 +331,12 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
     async def _connect_mqtt(self) -> None:
         """Establish MQTT session and subscribe topics for all devices."""
+        if not self._devices:
+            return
         primary = self.device
         websocket_url = self._mqtt_websocket_url()
 
+        await self._cancel_support_capture_task()
         await self._disconnect_support_capture_probe_client()
         await self._disconnect_mqtt_client()
 
@@ -342,7 +366,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._logger.debug("Subscribed to MQTT topics for %s", device.name)
 
         if self._support_capture.active:
-            await self._async_start_support_capture_probe()
+            self._schedule_support_capture_initialization()
 
         self._logger.info("Connected MQTT session for %d devices", len(self._devices))
 
@@ -356,6 +380,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             await mqtt_client.disconnect()
 
     async def _disconnect_support_capture_probe_client(self) -> None:
+        for waiter in self._support_shadow_waiters.values():
+            if not waiter.done():
+                waiter.set_result({"status": "disconnected"})
         probe_client = self._support_capture_probe_client
         self._support_capture_probe_client = None
         if probe_client is not None:
@@ -390,7 +417,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     or "/update/documents" in topic
                 ):
                     document = self._parse_json_object(payload)
-                    parsed_shadow = parse_shadow_document(document)
+                    device = self.get_device(device_id)
+                    auto_mode = (
+                        E42A_DFAN_AUTO_MODE
+                        if device and client_model_token(device.client_id) == "VSCTLE42A"
+                        else MODE_AUTO
+                    )
+                    parsed_shadow = parse_shadow_document(document, dfan_auto_mode=auto_mode)
                     self._merge_shadow_state(device_id, parsed_shadow)
                     if "plan" in parsed_shadow:
                         await self._refresh_plan_stages(force_refresh_active=True)
@@ -419,7 +452,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
         if updated:
             await self._refresh_plan_stages()
-            self.async_set_updated_data(self._build_state_snapshot())
+            # MQTT pushes must not restart Home Assistant's REST poll timer.
+            self.data = self._build_state_snapshot()
+            self.async_update_listeners()
 
     def _route_topic_to_device(self, topic: str) -> str | None:
         """Extract device_id from an MQTT topic by matching client_id or topic_prefix."""
@@ -436,7 +471,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         return None
 
     async def async_start_support_capture(self, *, max_events: int) -> None:
-        """Start support capture and subscribe extra diagnostics topics when connected."""
+        """Start bounded read-only capture independently of entity discovery."""
+        await self._cancel_support_capture_task()
+        await self._disconnect_support_capture_probe_client()
         self._support_capture.start(
             max_events=max_events,
             devices=[
@@ -446,68 +483,138 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     "client_id": device.client_id,
                     "topic_prefix": device.topic_prefix,
                     "name": device.name,
+                    "model_token": client_model_token(device.client_id),
+                    "missing_fields": list(device.missing_fields),
                 }
-                for device in self._devices
+                for device in self._capture_devices[:SUPPORT_CAPTURE_MAX_DEVICES]
             ],
             subscription_topics=self._support_capture_topic_names(),
         )
         self._support_capture.record(
             "capture_started",
-            data={"mqtt_connected": self.is_mqtt_connected, "device_count": len(self._devices)},
+            data={
+                "mqtt_connected": self.is_mqtt_connected,
+                "device_count": len(self._devices),
+                "capture_candidate_count": len(self._capture_devices),
+                "omitted_candidate_count": max(0, len(self._capture_devices) - SUPPORT_CAPTURE_MAX_DEVICES),
+            },
         )
+        skipped = self.skipped_devices_snapshot()
+        if skipped:
+            self._support_capture.record(
+                "skipped_discovery",
+                data={
+                    "devices": [
+                        {
+                            "device_group": item.get("device_group"),
+                            "model_token": item.get("model_token"),
+                            "available_keys": item.get("available_keys"),
+                            "missing_fields": item.get("missing_fields"),
+                        }
+                        for item in skipped[:25]
+                    ]
+                },
+            )
         self._record_support_capture_model_metadata_results()
-        if self.is_mqtt_connected:
-            await self._async_start_support_capture_probe()
+        self._schedule_support_capture_initialization()
+
+    def _schedule_support_capture_initialization(self) -> None:
+        """Keep slow capture-only broker operations out of HA setup and reconnect."""
+        previous = self._support_capture_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        self._support_capture_task = asyncio.create_task(
+            self._initialize_support_capture(), name="vivosun_support_capture_initialization"
+        )
+
+    async def _initialize_support_capture(self) -> None:
+        """Collect available evidence without a deadline on the entire capture."""
+        self._support_capture.record("capture_initializing")
+        try:
+            if self._capture_devices:
+                await self._async_start_support_capture_probe()
+            # Bootstrap fetched point-log data before capture was enabled.
+            await self._refresh_point_log()
+        except asyncio.CancelledError:
+            await self._disconnect_support_capture_probe_client()
+            raise
+        except Exception:
+            self._logger.debug("Support capture initialization failed", exc_info=True)
+            self._support_capture.record("capture_initialization_failed")
+        else:
+            self._support_capture.record("capture_initialized")
+
+    async def _cancel_support_capture_task(self) -> None:
+        task = self._support_capture_task
+        self._support_capture_task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def async_stop_support_capture(self) -> None:
         """Stop support capture."""
         self._support_capture.record("capture_stopping", data={"mqtt_connected": self.is_mqtt_connected})
+        await self._cancel_support_capture_task()
         await self._disconnect_support_capture_probe_client()
         self._support_capture.stop()
 
     def _support_capture_topic_names(self) -> list[str]:
-        """Return device-scoped recon subscriptions used only during support capture."""
+        """Return exact, account-discovered topics without wildcard probes."""
+        return self._support_capture_classic_topic_names()
+
+    def _support_capture_classic_topic_names(self) -> list[str]:
+        """Return only classic snapshot and transition topics for discovered things."""
         topics: list[str] = []
-        for device in self._devices:
-            if device.client_id:
-                topics.extend(
-                    [
-                        f"$aws/things/{device.client_id}/shadow/get/rejected",
-                        f"$aws/things/{device.client_id}/shadow/update/rejected",
-                        f"$aws/things/{device.client_id}/shadow/name/+/get/accepted",
-                        f"$aws/things/{device.client_id}/shadow/name/+/get/rejected",
-                        f"$aws/things/{device.client_id}/shadow/name/+/update/accepted",
-                        f"$aws/things/{device.client_id}/shadow/name/+/update/rejected",
-                        f"$aws/things/{device.client_id}/shadow/name/+/update/documents",
-                        f"$aws/things/{device.client_id}/shadow/name/+/update/delta",
-                    ]
+        for device in self._capture_devices[:SUPPORT_CAPTURE_MAX_DEVICES]:
+            topics.extend(
+                f"$aws/things/{device.client_id}/shadow/{suffix}"
+                for suffix in (
+                    "get/accepted",
+                    "get/rejected",
+                    "update/accepted",
+                    "update/rejected",
+                    "update/documents",
+                    "update/delta",
                 )
+            )
             if device.topic_prefix:
-                topics.append(f"{device.topic_prefix}/#")
+                topics.append(f"{device.topic_prefix}/channel/app")
         return sorted(set(topics))
 
-    def _record_support_capture_subscription_deferred(self) -> None:
+    def _record_support_capture_subscription_deferred(self, reason: str = "probe_disconnected") -> None:
         """Record that extra support subscriptions will be retried after reconnect."""
         self._support_capture.record(
             "support_topics_subscription_deferred",
-            data={"reason": "mqtt_disconnected"},
+            data={"reason": reason, "primary_mqtt_connected": self.is_mqtt_connected},
         )
 
     async def _async_subscribe_support_capture_topics(self) -> None:
-        """Subscribe extra diagnostics topics used only while support capture is active."""
-        mqtt_client = self._support_capture_probe_client
+        """Subscribe to known topics and collect exact classic snapshots."""
+        classic_topics = self._support_capture_classic_topic_names()
+        probe_client = self._support_capture_probe_client
+        accepted = await self._async_subscribe_capture_filters(classic_topics, probe_client)
+        await asyncio.gather(
+            *(
+                self._async_capture_shadow(device, accepted)
+                for device in self._capture_devices[:SUPPORT_CAPTURE_MAX_DEVICES]
+            )
+        )
+
+    async def _async_subscribe_capture_filters(self, topics: list[str], mqtt_client: MQTTClient | None) -> set[str]:
+        """Record per-filter broker outcomes on the isolated capture connection."""
         if mqtt_client is None or not mqtt_client.is_connected:
-            return
-        topics = self._support_capture_topic_names()
+            for topic in topics:
+                self._support_capture.record_subscription_result(topic, status="deferred", reason="probe_disconnected")
+            return set()
         if not topics:
-            return
-        accepted_count = 0
+            return set()
+        accepted: set[str] = set()
         rejected_count = 0
         for index, topic in enumerate(topics):
             try:
                 await mqtt_client.subscribe([(topic, 1)])
-            except MQTTConnectionError as err:
-                if "rejected one or more topic subscriptions" in str(err):
+            except Exception as err:
+                if isinstance(err, MQTTConnectionError) and "rejected one or more topic subscriptions" in str(err):
                     rejected_count += 1
                     self._support_capture.record_subscription_result(
                         topic,
@@ -520,55 +627,115 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     self._support_capture.record_subscription_result(
                         deferred_topic,
                         status="deferred",
-                        reason="mqtt_disconnected",
+                        reason="subscription_timeout" if isinstance(err, TimeoutError) else "probe_disconnected",
                     )
                 self._record_support_capture_subscription_deferred()
-                await self._disconnect_support_capture_probe_client()
-                return
+                await mqtt_client.disconnect()
+                return accepted
 
-            accepted_count += 1
+            accepted.add(topic)
             self._support_capture.record_subscription_result(topic, status="accepted")
 
         self._support_capture.record(
             "support_topics_subscribed",
             data={
                 "topic_count": len(topics),
-                "accepted_topic_count": accepted_count,
+                "accepted_topic_count": len(accepted),
                 "rejected_topic_count": rejected_count,
             },
         )
+        return accepted
+
+    async def _async_capture_shadow(self, device: CaptureDevice, accepted_topics: set[str]) -> None:
+        """Request one classic snapshot and correlate its response without changing entities."""
+        model = {"model_token": client_model_token(device.client_id)}
+        mqtt_client = self._support_capture_probe_client
+        response_topic = f"$aws/things/{device.client_id}/shadow/get/accepted"
+        if mqtt_client is None or not mqtt_client.is_connected:
+            self._support_capture.record_shadow_read_result(
+                device.client_id, {**model, "status": "deferred", "reason": "probe_disconnected"}
+            )
+            return
+        if response_topic not in accepted_topics:
+            self._support_capture.record_shadow_read_result(
+                device.client_id, {**model, "status": "subscription_rejected"}
+            )
+            return
+        token = uuid4().hex
+        key = (device.client_id, token)
+        waiter: asyncio.Future[dict[str, object]] = asyncio.get_running_loop().create_future()
+        self._support_shadow_waiters[key] = waiter
+        self._support_capture.record_shadow_read_result(device.client_id, {**model, "status": "pending"})
+        try:
+            async with asyncio.timeout(_SUPPORT_SHADOW_READ_TIMEOUT):
+                await mqtt_client.publish(
+                    f"$aws/things/{device.client_id}/shadow/get", json.dumps({"clientToken": token}).encode(), qos=1
+                )
+                result = await waiter
+        except TimeoutError:
+            result = {"status": "timeout" if mqtt_client.is_connected else "disconnected"}
+        except Exception:
+            result = {"status": "publish_failed"}
+        finally:
+            self._support_shadow_waiters.pop(key, None)
+            if not waiter.done():
+                waiter.cancel()
+        self._support_capture.record_shadow_read_result(device.client_id, {**model, **result})
 
     async def _async_start_support_capture_probe(self) -> None:
         """Start or refresh a dedicated probe MQTT client for recon subscriptions."""
-        if not self._support_capture.active:
+        if not self._support_capture.active or not self._capture_devices:
             return
-
-        primary = self.device
-        probe_client = MQTTClient(
-            websocket_url=self._mqtt_websocket_url(),
-            thing=primary.client_id,
-            topic_prefix=primary.topic_prefix,
-            client_id=f"ha-vivosun-probe-{primary.device_id[:12]}-{uuid4().hex[:8]}",
-            label="support-capture-probe",
-        )
-
         await self._disconnect_support_capture_probe_client()
-
+        primary = self._capture_devices[0]
+        probe_client: MQTTClient | None = None
+        stage = "aws_identity"
         try:
-            await probe_client.connect()
-        except Exception:
+            if self._aws_credentials is None or self._aws_auth.credentials_need_refresh(self._aws_credentials):
+                if self._tokens is None:
+                    raise VivosunAuthError("Account bootstrap unavailable")
+                self._aws_identity = await self._api.get_aws_identity(self._tokens)
+                stage = "cognito_credentials"
+                self._aws_credentials = await self._aws_auth.get_credentials_for_identity(self._aws_identity)
+            stage = "mqtt_connect"
+            probe_client = MQTTClient(
+                websocket_url=self._mqtt_websocket_url(),
+                thing=primary.client_id,
+                topic_prefix=primary.topic_prefix,
+                client_id=f"ha-vivosun-probe-{uuid4().hex[:12]}",
+                label="support-capture-probe",
+                subscribe_required_topics=False,
+            )
+            probe_client.add_message_callback(self._handle_support_capture_probe_publish)
+            async with asyncio.timeout(30):
+                await probe_client.connect()
+        except asyncio.CancelledError:
+            if probe_client is not None:
+                await probe_client.disconnect()
+            raise
+        except Exception as err:
             self._logger.debug("Support capture probe connection failed", exc_info=True)
-            self._record_support_capture_subscription_deferred()
+            self._record_support_capture_subscription_deferred("probe_connection_failed")
             for topic in self._support_capture_topic_names():
                 self._support_capture.record_subscription_result(
                     topic,
                     status="deferred",
-                    reason="mqtt_disconnected",
+                    reason="probe_connection_failed",
                 )
-            await probe_client.disconnect()
+            for device in self._capture_devices[:SUPPORT_CAPTURE_MAX_DEVICES]:
+                self._support_capture.record_shadow_read_result(
+                    device.client_id,
+                    {
+                        "model_token": client_model_token(device.client_id),
+                        "status": "deferred",
+                        "reason": "probe_connection_failed",
+                        "stage": stage,
+                        "error_type": type(err).__name__,
+                    },
+                )
+            if probe_client is not None:
+                await probe_client.disconnect()
             return
-
-        probe_client.add_message_callback(self._handle_support_capture_probe_publish)
         self._support_capture_probe_client = probe_client
         try:
             await self._async_subscribe_support_capture_topics()
@@ -579,29 +746,76 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 self._support_capture.record_subscription_result(
                     topic,
                     status="deferred",
-                    reason="mqtt_disconnected",
+                    reason="probe_disconnected",
                 )
             await self._disconnect_support_capture_probe_client()
 
     async def _handle_support_capture_probe_publish(self, topic: str, payload: bytes, qos: int) -> None:
         """Record probe-only MQTT messages without affecting entity state."""
-        if not self._devices:
+        if not self._support_capture.active:
             return
-
-        device_id = self._route_topic_to_device(topic)
-        self._support_capture.record(
-            "support_probe_mqtt_publish",
-            data={
-                "device_id": device_id or "",
-                "topic": topic,
-                "qos": qos,
-                **summarize_support_capture_payload(payload),
-            },
+        device = next(
+            (
+                device
+                for device in self._capture_devices[:SUPPORT_CAPTURE_MAX_DEVICES]
+                if topic.startswith(f"$aws/things/{device.client_id}/shadow/")
+                or (device.topic_prefix and topic.startswith(device.topic_prefix + "/"))
+            ),
+            None,
         )
+        if device is None:
+            return
+        summary = None
+        if not self._primary_captures_topic(device, topic):
+            summary = summarize_support_capture_payload(payload)
+            self._support_capture.record(
+                "support_probe_mqtt_publish",
+                data={
+                    "device_id": device.device_id,
+                    "model_token": client_model_token(device.client_id),
+                    "topic": topic,
+                    "qos": qos,
+                    **summary,
+                },
+            )
+        if len(payload) > SUPPORT_CAPTURE_MAX_PAYLOAD_BYTES or topic not in {
+            f"$aws/things/{device.client_id}/shadow/get/accepted",
+            f"$aws/things/{device.client_id}/shadow/get/rejected",
+        }:
+            return
+        try:
+            document = json.loads(payload)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return
+        if not isinstance(document, dict) or not isinstance(document.get("clientToken"), str):
+            return
+        waiter = self._support_shadow_waiters.get((device.client_id, document["clientToken"]))
+        if waiter is not None and not waiter.done():
+            if summary is None:
+                summary = summarize_support_capture_payload(payload)
+            result: dict[str, object] = {
+                "status": "accepted" if topic.endswith("/accepted") else "rejected",
+                **summary,
+            }
+            if type(document.get("code")) is int:
+                result["code"] = document["code"]
+            waiter.set_result(result)
+
+    def _primary_captures_topic(self, device: CaptureDevice, topic: str) -> bool:
+        """Use primary capture for its subscribed topics, including all supported devices."""
+        if not self.is_mqtt_connected or device.client_id not in self._client_id_to_device_id:
+            return False
+        return topic in {
+            TOPIC_SHADOW_GET_ACCEPTED.format(thing=device.client_id),
+            TOPIC_SHADOW_UPDATE_ACCEPTED.format(thing=device.client_id),
+            TOPIC_SHADOW_UPDATE_DOCUMENTS.format(thing=device.client_id),
+            TOPIC_SHADOW_UPDATE_DELTA.format(thing=device.client_id),
+            TOPIC_CHANNEL_APP.format(topic_prefix=device.topic_prefix),
+        }
 
     def _record_support_capture_model_metadata_results(self) -> None:
         """Record bundled model metadata for each discovered device."""
-        for device in self._devices:
+        for device in self._capture_devices[:SUPPORT_CAPTURE_MAX_DEVICES]:
             self._support_capture.record_model_metadata_result(
                 {
                     "device_id": device.device_id,
@@ -828,7 +1042,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         """Return the signed websocket URL for a new MQTT session."""
         aws_identity = self._aws_identity
         aws_credentials = self._aws_credentials
-        if aws_identity is None or aws_credentials is None or not self._devices:
+        if aws_identity is None or aws_credentials is None:
             raise RuntimeError("Coordinator is missing bootstrap state required for MQTT connect")
         return self._aws_auth.sigv4_sign_mqtt_url(
             endpoint=aws_identity.aws_host,

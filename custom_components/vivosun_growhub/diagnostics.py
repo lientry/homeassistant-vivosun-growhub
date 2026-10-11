@@ -10,7 +10,7 @@ from homeassistant.components.diagnostics import async_redact_data
 
 from .camera_config import camera_ips_from_options
 from .const import CONF_CAMERA_IP, CONF_CAMERA_IPS, DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
-from .redaction import redact_identifier, sanitize_mapping_for_debug
+from .redaction import redact_identifier, sanitize_mapping_for_capture, sanitize_mapping_for_debug
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -121,7 +121,6 @@ async def async_get_config_entry_diagnostics(
         "skipped_devices": skipped_devices,
         "camera_configuration": camera_configuration,
         "identifier_collisions": identifier_collisions,
-        "support_capture": coordinator.support_capture_snapshot(),
         "coordinator": {
             "mqtt_connected": mqtt_connected,
             "support_capture_enabled": bool(config_entry.options.get(OPTION_SUPPORT_CAPTURE_ENABLED, False)),
@@ -134,6 +133,10 @@ async def async_get_config_entry_diagnostics(
     }
     redacted_diagnostics = async_redact_data(diagnostics_payload, _DIAGNOSTICS_REDACT)
     sanitized_diagnostics = sanitize_mapping_for_debug(redacted_diagnostics)
+    # Apply the opted-in evidence policy separately so device IDs survive export.
+    sanitized_diagnostics["support_capture"] = sanitize_mapping_for_capture(
+        async_redact_data(coordinator.support_capture_snapshot(), _DIAGNOSTICS_REDACT)
+    )
     return cast("dict[str, Any]", _json_safe_value(sanitized_diagnostics))
 
 

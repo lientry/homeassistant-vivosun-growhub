@@ -11,6 +11,11 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.vivosun_growhub.const import CONF_CAMERA_IPS, DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
 from custom_components.vivosun_growhub.diagnostics import async_get_config_entry_diagnostics
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
+from custom_components.vivosun_growhub.support_capture import (
+    SupportCaptureManager,
+    summarize_rest_telemetry,
+    summarize_support_capture_payload,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -158,6 +163,56 @@ async def test_diagnostics_redacts_sensitive_values(
     assert coordinator_result["sensor_keys"] == ["inHumi", "inTemp"]
     assert coordinator_result["last_update_success_time"] == "2026-03-05T12:00:00+00:00"
     json.dumps(result)
+
+
+async def test_diagnostics_preserves_opted_in_capture_evidence_without_exposing_private_fields(
+    hass: HomeAssistant,
+    enable_custom_integrations: None,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="user@example.com",
+        data={"email": "user@example.com", "password": "super-secret"},
+    )
+    entry.add_to_hass(hass)
+    coordinator = _CoordinatorStub()
+    capture = SupportCaptureManager()
+    capture.start(max_events=5, devices=[{"device_id": "capture-device"}], subscription_topics=[])
+    row = {
+        "deviceId": "capture-device", "sceneId": 1234, "programId": "program-42",
+        "mode": "automatic", "target": "55.0",
+        "accountId": "private-account", "authHeader": "private-auth",
+        "probe": {"userId": 98765432, "gpsLat": 12.3, "ipAddr": "10.1.2.3"},
+    }
+    capture.record_rest_telemetry_result("capture-device", summarize_rest_telemetry(row))
+    capture.record("mqtt_publish", data=summarize_support_capture_payload(json.dumps(row).encode()))
+    capture.record_shadow_read_result("thing-with-account", summarize_support_capture_payload(json.dumps(row).encode()))
+    coordinator.support_capture_snapshot = capture.snapshot  # type: ignore[method-assign]
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry_id=entry.entry_id, coordinator=cast("object", coordinator),
+    )
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    support = result["support_capture"]
+    assert support["devices"][0]["device_id"] == "capture-device"
+    assert support["rest_telemetry_results"][0]["device_id"] == "capture-device"
+    for retained in (
+        support["rest_telemetry_results"][0]["telemetry"],
+        support["events"][1]["data"]["payload"],
+        support["shadow_read_results"][0]["payload"],
+    ):
+        assert retained["deviceId"] == "capture-device"
+        assert retained["sceneId"] == 1234
+        assert retained["programId"] == "program-42"
+        assert retained["mode"] == "automatic"
+        assert retained["target"] == "55.0"
+        assert retained["probe"] == {"userId": "***", "gpsLat": "***", "ipAddr": "***"}
+    encoded = json.dumps(result)
+    for private in ("private-account", "private-auth", "98765432", "10.1.2.3", "user@example.com", "super-secret"):
+        assert private not in encoded
+    # Normal diagnostics retain their stricter routing/identifier policy.
+    assert result["device"]["device_id"] != coordinator.device.device_id
 
 
 async def test_diagnostics_reports_identifier_collisions(

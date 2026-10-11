@@ -7,10 +7,10 @@ Unofficial Home Assistant integration for Vivosun GrowHub lighting, fans, humidi
 ![Status](https://img.shields.io/badge/Status-Working-green)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-Custom%20Integration-blue)
 ![Runtime](https://img.shields.io/badge/Runtime-Hybrid%20MQTT%20%2B%20REST-4c8bf5)
-![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
+![Python](https://img.shields.io/badge/Python-Home%20Assistant%20managed-blue)
 [![HACS](https://img.shields.io/badge/HACS-Default-orange.svg)](https://hacs.xyz)
 
-<a href="#why-this-integration">Why This Integration?</a>
+<a href="#overview">Overview</a>
 ◆ <a href="#quick-start">Quick Start</a>
 ◆ <a href="#installation">Installation</a>
 ◆ <a href="#what-it-exposes">What It Exposes</a>
@@ -19,7 +19,7 @@ Unofficial Home Assistant integration for Vivosun GrowHub lighting, fans, humidi
 
 </div>
 
-## Why This Integration?
+## Overview
 
 This integration connects a Vivosun GrowHub account to Home Assistant and exposes supported devices as native `light`, `fan`, `humidifier`, `climate`, `camera`, `sensor`, and `binary_sensor` entities.
 
@@ -31,12 +31,16 @@ What is working:
 - Circulation fan control with 10-step mapping and `natural_wind` preset
 - Duct fan control with 10-step mapping and auto-threshold service
 - AeroStream humidifier support
+- AeroStream H09 power, mode, and humidity-target handling
 - AeroFlux heater support
+- AeroLush C08 cooling and target-temperature controls
 - GrowCam camera support with optional LAN IP setup
+- VGrow DWC kit water level and water temperature sensors
 - VCure C80 support with curing telemetry, built-in mode selection, privacy glass, interior light, and door lock controls
 - Climate telemetry polling for inside/outside temperature, humidity, and VPD
 - Grow plan sensors: active stage name, light schedule, and read-only recipe schedules for fan, humidifier, dehumidifier, drip irrigation, heater, and air conditioner
 - Redacted diagnostics export
+- Opt-in support capture for investigating additional device models and controls
 
 What this integration is not:
 
@@ -61,6 +65,9 @@ Supported Home Assistant version:
 
 Notes:
 
+- VGrow DWC water sensors apply to VGrow (VSCTLY18). USB 1 accessories still need investigation.
+- AeroLush C08 (VSACA08) offers power and cooling controls. Other operating modes still need verification.
+- H09 (VSHUMH09) uses different humidifier shadow keys from older AeroStream models.
 - The E42A+ controller publishes its built-in box and external probe telemetry under `bTemp/bHumi/bVpd` and `pTemp/pHumi/pVpd` instead of the older `inTemp/outTemp` keys; the integration accepts both shapes
 - GrowCam devices are detected even when the cloud payload omits `clientId`/`topicPrefix` or the user renamed the camera to a short name like `Cam`. After detection, set the camera's LAN IP via the integration options to enable the RTSP stream
 - The integration has been tested against current Home Assistant releases, not older 2024-era builds
@@ -98,7 +105,7 @@ Then add `Vivosun GrowHub` via `Settings -> Devices & Services -> Add Integratio
 ### Requirements
 
 - Home Assistant with support for custom integrations
-- A Vivosun account with at least one GrowHub device
+- A Vivosun account with at least one supported device, including standalone VCure or GrowCam devices
 - Outbound internet access from Home Assistant to the Vivosun API and AWS IoT endpoints
 
 ### Configuration
