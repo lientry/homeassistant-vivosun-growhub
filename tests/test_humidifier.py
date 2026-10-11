@@ -241,3 +241,63 @@ async def test_humidifier_invalid_mode_does_not_publish() -> None:
     await entity.async_set_mode("invalid")
 
     coordinator.async_publish_shadow_update.assert_not_awaited()
+
+
+async def test_h09_controls_use_captured_protocol_without_changing_legacy(
+    hass: HomeAssistant,
+) -> None:
+    h09 = DeviceInfo(
+        device_id=_HUMIDIFIER_DEV_ID,
+        client_id="vivosun-VSHUMH09-acc-humidifier-1",
+        topic_prefix="prefix/humidifier",
+        name="AeroStream H09",
+        online=True,
+        scene_id=66078,
+        device_type="humidifier",
+    )
+    coordinator = _StubCoordinator([h09])
+    coordinator.data = {
+        "shadows": {
+            _HUMIDIFIER_DEV_ID: {
+                "hmdf": {"mode": 1, "level": 0, "target_humidity": 5959},
+            }
+        }
+    }
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry_id=entry.entry_id,
+        coordinator=cast("VivosunCoordinator", coordinator),
+    )
+    added: list[Entity] = []
+    await async_setup_entry(hass, entry, added.extend)
+    entity = cast("VivosunHumidifierEntity", added[0])
+
+    assert entity.is_on is False
+    assert entity.target_humidity == 59.59
+
+    await entity.async_turn_on()
+    coordinator.async_publish_shadow_update.assert_awaited_with(
+        {"state": {"desired": {"hmdf": {"mode": 2}}}},
+        device_id=_HUMIDIFIER_DEV_ID,
+    )
+    coordinator.async_publish_shadow_update.reset_mock()
+
+    await entity.async_set_humidity(70)
+    coordinator.async_publish_shadow_update.assert_awaited_with(
+        {"state": {"desired": {"hmdf": {"mode": 2, "auto": {"tHumi": 7000}}}}},
+        device_id=_HUMIDIFIER_DEV_ID,
+    )
+    coordinator.async_publish_shadow_update.reset_mock()
+
+    await entity.async_turn_off()
+    coordinator.async_publish_shadow_update.assert_awaited_with(
+        {"state": {"desired": {"hmdf": {"mode": 1, "manu": {"lv": 0}}}}},
+        device_id=_HUMIDIFIER_DEV_ID,
+    )
+    coordinator.async_publish_shadow_update.reset_mock()
+
+    await entity.async_set_mode("manual")
+    coordinator.async_publish_shadow_update.assert_awaited_with(
+        {"state": {"desired": {"hmdf": {"mode": 1, "manu": {"lv": 50}}}}},
+        device_id=_HUMIDIFIER_DEV_ID,
+    )

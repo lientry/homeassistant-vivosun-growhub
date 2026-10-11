@@ -11,12 +11,15 @@ from homeassistant.components.humidifier import (
 from homeassistant.components.humidifier.const import HumidifierEntityFeature
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, MODE_AUTO, MODE_MANUAL, TEMP_SCALE_FACTOR
+from .const import DOMAIN, H09_MODE_AUTO, H09_MODE_MANUAL, MODE_AUTO, MODE_MANUAL, TEMP_SCALE_FACTOR
 from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, sensor_slice, shadow_slice
+from .models import client_model_token
 from .shadow import (
     build_dhmdf_on_payload,
     build_dhmdf_target_payload,
+    build_h09_auto_payload,
+    build_h09_manual_payload,
     build_hmdf_mode_payload,
     build_hmdf_on_payload,
     build_hmdf_target_payload,
@@ -55,8 +58,13 @@ async def async_setup_entry(
 
     entities: list[Entity] = []
     humidifiers = [d for d in coordinator.devices if d.device_type == "humidifier"]
-    if humidifiers:
-        entities.extend([VivosunHumidifierEntity(coordinator, d.device_id) for d in humidifiers])
+    for device in humidifiers:
+        entity_type = (
+            VivosunH09HumidifierEntity
+            if client_model_token(device.client_id) == "VSHUMH09"
+            else VivosunHumidifierEntity
+        )
+        entities.append(entity_type(coordinator, device.device_id))
     dehumidifiers = [d for d in coordinator.devices if d.device_type == "dehumidifier"]
     if dehumidifiers:
         entities.extend([VivosunDehumidifierEntity(coordinator, d.device_id) for d in dehumidifiers])
@@ -176,6 +184,56 @@ class VivosunHumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierE
 
     def _hmdf_state(self) -> Mapping[str, object]:
         return shadow_slice(self.coordinator, self._device_id, "hmdf")
+
+
+class VivosunH09HumidifierEntity(VivosunHumidifierEntity):
+    """H09 controls use mode and nested setpoints instead of the older on/targetHumi fields."""
+
+    @property
+    def is_on(self) -> bool | None:
+        hmdf = self._hmdf_state()
+        if hmdf.get("mode") == H09_MODE_AUTO:
+            return True
+        if hmdf.get("mode") == H09_MODE_MANUAL:
+            level = hmdf.get("level")
+            return level > 0 if isinstance(level, int) else None
+        return None
+
+    @property
+    def mode(self) -> str | None:
+        hmdf = self._hmdf_state()
+        if hmdf.get("mode") == H09_MODE_AUTO:
+            return "auto"
+        if hmdf.get("mode") == H09_MODE_MANUAL and self.is_on:
+            return "manual"
+        return None
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        _ = kwargs
+        await self.coordinator.async_publish_shadow_update(
+            build_h09_auto_payload(), device_id=self._device_id
+        )
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        _ = kwargs
+        await self.coordinator.async_publish_shadow_update(
+            build_h09_manual_payload(0), device_id=self._device_id
+        )
+
+    async def async_set_humidity(self, humidity: int) -> None:
+        await self.coordinator.async_publish_shadow_update(
+            build_h09_auto_payload(int(humidity * TEMP_SCALE_FACTOR)),
+            device_id=self._device_id,
+        )
+
+    async def async_set_mode(self, mode: str) -> None:
+        if mode == "auto":
+            payload = build_h09_auto_payload()
+        elif mode == "manual":
+            payload = build_h09_manual_payload(50)
+        else:
+            return
+        await self.coordinator.async_publish_shadow_update(payload, device_id=self._device_id)
 
 
 class VivosunDehumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierEntity):  # type: ignore[misc]

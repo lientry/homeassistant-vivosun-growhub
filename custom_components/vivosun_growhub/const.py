@@ -111,6 +111,10 @@ MODE_AUTO = 1
 MODE_CYCLE = 1
 MODE_PLAN = 2
 
+# H09 uses a different mode enum from older AeroStream humidifiers.
+H09_MODE_MANUAL = 1
+H09_MODE_AUTO = 2
+
 SHADOW_ROOT_STATE = "state"
 SHADOW_ROOT_DESIRED = "desired"
 SHADOW_ROOT_REPORTED = "reported"
