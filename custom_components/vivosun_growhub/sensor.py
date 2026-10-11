@@ -20,12 +20,14 @@ from .const import (
     DEFAULT_TEMP_UNIT,
     DFAN_LEVEL_MAP,
     DOMAIN,
+    DWC_WATER_LEVEL_SCALE_FACTOR,
     SENSOR_UNAVAILABLE_SENTINEL,
     TEMP_SCALE_FACTOR,
     WATER_LEVEL_SCALE_FACTOR,
 )
 from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, plan_slice, plan_stage_cache, sensor_slice
+from .models import client_model_token
 from .shadow import cfan_shadow_to_percentage, dfan_shadow_to_percentage
 
 if TYPE_CHECKING:
@@ -66,6 +68,7 @@ class VivosunSensorDescription(SensorEntityDescription):  # type: ignore[misc]
     channel_key_aliases: tuple[str, ...] = ()
     quantity: str
     state_class: SensorStateClass = SensorStateClass.MEASUREMENT
+    scale_factor: int | None = None
 
     @property
     def channel_key_lookup(self) -> tuple[str, ...]:
@@ -188,6 +191,32 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     ),
 )
 
+# Sensors only some models have, keyed by the model token in the client id.
+_MODEL_SENSOR_DESCRIPTIONS: dict[str, tuple[VivosunSensorDescription, ...]] = {
+    # VGrow Smart Grow Box: the DWC kit's water sensor plugs into the AUX port and its readings
+    # arrive in the point log only.
+    "VSCTLY18": (
+        VivosunSensorDescription(
+            key="water_level",
+            name="Water Level",
+            channel_key="waterLv",
+            quantity="water_level",
+            scale_factor=DWC_WATER_LEVEL_SCALE_FACTOR,
+            icon="mdi:waves-arrow-up",
+            native_unit_of_measurement=PERCENTAGE,
+            state_class=SensorStateClass.MEASUREMENT,
+        ),
+        VivosunSensorDescription(
+            key="water_temperature",
+            name="Water Temperature",
+            channel_key="waterT",
+            quantity="temperature",
+            device_class=SensorDeviceClass.TEMPERATURE,
+            state_class=SensorStateClass.MEASUREMENT,
+        ),
+    ),
+}
+
 _DEVICE_TYPE_SENSORS: dict[str, frozenset[str]] = {
     "controller": frozenset({"inTemp", "inHumi", "inVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
     "dehumidifier": frozenset({"pTemp", "pHumi", "pVpd"}),
@@ -219,6 +248,8 @@ async def async_setup_entry(
                 entities.append(
                     VivosunChannelSensorEntity(coordinator, entry, description, device.device_id)
                 )
+        for description in _MODEL_SENSOR_DESCRIPTIONS.get(client_model_token(device.client_id), ()):
+            entities.append(VivosunChannelSensorEntity(coordinator, entry, description, device.device_id))
         if device.device_type == "controller":
             entities.append(VivosunPlanStageSensor(coordinator, entry, device.device_id))
             entities.append(VivosunPlanLightSensor(coordinator, entry, device.device_id))
@@ -290,8 +321,8 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
         if self.entity_description.quantity == "signal_strength":
             return float(raw_value)
         if self.entity_description.quantity == "water_level":
-            return raw_value / WATER_LEVEL_SCALE_FACTOR
-        value = raw_value / TEMP_SCALE_FACTOR
+            return raw_value / (self.entity_description.scale_factor or WATER_LEVEL_SCALE_FACTOR)
+        value = raw_value / (self.entity_description.scale_factor or TEMP_SCALE_FACTOR)
         if self.entity_description.quantity == "temperature" and self._temp_unit() == _UNIT_FAHRENHEIT:
             return (value * 9 / 5) + 32
         return value
@@ -309,7 +340,7 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
             value = sensors.get(key)
             if isinstance(value, bool):
                 continue
-            if isinstance(value, int):
+            if isinstance(value, int) and value != SENSOR_UNAVAILABLE_SENTINEL:
                 return value
         return None
 

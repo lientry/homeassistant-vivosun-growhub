@@ -35,6 +35,7 @@ from custom_components.vivosun_growhub.const import (
     SENSOR_KEY_PROBE_VPD,
     SENSOR_KEY_RSSI,
     SENSOR_KEY_WATER_LEVEL,
+    SENSOR_KEY_WATER_TEMP,
     SENSOR_UNAVAILABLE_SENTINEL,
     SHADOW_NAME,
     TOPIC_CHANNEL_APP,
@@ -93,8 +94,9 @@ async def test_constants_match_wp1_spec() -> None:
         SENSOR_KEY_PROBE_HUMI,
         SENSOR_KEY_PROBE_VPD,
         SENSOR_KEY_WATER_LEVEL,
+        SENSOR_KEY_WATER_TEMP,
     )
-    assert len(SENSOR_CHANNEL_KEYS) == 15
+    assert len(SENSOR_CHANNEL_KEYS) == 16
     assert SENSOR_UNAVAILABLE_SENTINEL == -6666
 
     assert MODE_MANUAL == 0
