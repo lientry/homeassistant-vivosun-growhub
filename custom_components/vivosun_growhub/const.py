@@ -119,7 +119,6 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
     Platform.LIGHT,
     Platform.FAN,
-    Platform.NUMBER,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
     Platform.HUMIDIFIER,

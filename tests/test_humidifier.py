@@ -151,20 +151,6 @@ async def test_humidifier_state_mapping_and_availability() -> None:
     assert entity.available is False
 
 
-async def test_humidifier_is_on_derives_from_level_when_on_absent() -> None:
-    # The H09 reports no on/off flag; is_on falls back to the mist level.
-    coordinator = _StubCoordinator()
-    coordinator.data = {"shadows": {_HUMIDIFIER_DEV_ID: {"hmdf": {"manual_level": 70}}}}
-    entity = _make_entity(coordinator)
-    assert entity.is_on is True
-
-    coordinator.data = {"shadows": {_HUMIDIFIER_DEV_ID: {"hmdf": {"manual_level": 0}}}}
-    assert entity.is_on is False
-
-    coordinator.data = {"shadows": {_HUMIDIFIER_DEV_ID: {"hmdf": {}}}}
-    assert entity.is_on is None
-
-
 async def test_humidifier_commands_publish_expected_shadow_payloads() -> None:
     coordinator = _StubCoordinator()
     entity = _make_entity(coordinator)

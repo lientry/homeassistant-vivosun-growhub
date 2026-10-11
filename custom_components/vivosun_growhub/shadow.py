@@ -87,7 +87,7 @@ class ShadowParseError(ValueError):
     """Raised when inbound shadow/channel payloads cannot be parsed."""
 
 
-class LightState(TypedDict, total=False):
+class LightState(TypedDict):
     """Normalized light state slice from shadow.reported."""
 
     mode: int | None
@@ -97,7 +97,7 @@ class LightState(TypedDict, total=False):
     in_plan: bool
 
 
-class CirculatorFanState(TypedDict, total=False):
+class CirculatorFanState(TypedDict):
     """Normalized circulator fan state slice from shadow.reported."""
 
     mode: int | None
@@ -107,7 +107,7 @@ class CirculatorFanState(TypedDict, total=False):
     night_mode: bool
 
 
-class DuctFanAutoState(TypedDict, total=False):
+class DuctFanAutoState(TypedDict):
     """Normalized dFan auto block from shadow.reported.dFan.auto."""
 
     lvMin: int | None
@@ -124,7 +124,7 @@ class DuctFanAutoState(TypedDict, total=False):
     exChk: int | None
 
 
-class DuctFanState(TypedDict, total=False):
+class DuctFanState(TypedDict):
     """Normalized duct fan state slice from shadow.reported."""
 
     mode: int | None
@@ -139,7 +139,6 @@ class HumidifierState(TypedDict, total=False):
 
     on: bool
     level: int | None
-    manual_level: int | None
     mode: int | None
     water_warning: bool
     target_humidity: int | None
@@ -406,43 +405,10 @@ def build_hmdf_on_payload(on: bool) -> dict[str, object]:
     return _build_desired_payload(SHADOW_KEY_HUMIDIFIER, {"on": int(on)})
 
 
-HMDF_LEVEL_MAP: tuple[int, ...] = (0, 35, 50, 70, 85, 100)
-"""App mist-level step (index 0=OFF, 1-5) -> device manual level (`manu.lv`, 0-100).
-
-The AeroStream H09's `manu.lv` is a 0-100 value (mirrored in reported `hmdf.lv`);
-the app exposes it as an OFF/1-5 slider mapping onto these non-linear values.
-"""
-
-
-def hmdf_step_to_lv(step: int) -> int:
-    """Map an app mist-level step (0-5) to the device `manu.lv` value (0-100)."""
-    return HMDF_LEVEL_MAP[max(0, min(len(HMDF_LEVEL_MAP) - 1, step))]
-
-
-def hmdf_lv_to_step(lv: int | None) -> int | None:
-    """Map a device `manu.lv` value (0-100) to the nearest app step (0-5)."""
-    if lv is None:
-        return None
-    best_step = 0
-    best_diff = abs(HMDF_LEVEL_MAP[0] - lv)
-    for step in range(1, len(HMDF_LEVEL_MAP)):
-        diff = abs(HMDF_LEVEL_MAP[step] - lv)
-        if diff < best_diff:
-            best_diff = diff
-            best_step = step
-    return best_step
-
-
 def build_hmdf_level_payload(level: int) -> dict[str, object]:
-    """Build desired humidifier manual level payload (manual mode, `manu.lv` 0-100).
-
-    The H09 mists on its manual level, not the on/off flag, so this is the
-    effective run/stop control: 0 stops misting, higher runs it harder. `level`
-    is the raw device value (0-100); use `hmdf_step_to_lv` to convert an app
-    OFF/1-5 step to the value the app would send.
-    """
-    if level < 0 or level > 100:
-        raise ValueError("Humidifier level must be in range 0..100")
+    """Build desired humidifier manual level payload."""
+    if level < 0 or level > 10:
+        raise ValueError("Humidifier level must be in range 0..10")
     return _build_desired_payload(
         SHADOW_KEY_HUMIDIFIER,
         {SHADOW_KEY_MODE: 0, SHADOW_KEY_MANU: {SHADOW_KEY_LEVEL: level}},
@@ -469,8 +435,7 @@ def build_heat_level_payload(level: int) -> dict[str, object]:
     if level < 0 or level > 10:
         raise ValueError("Heater level must be in range 0..10")
     return _build_desired_payload(
-        SHADOW_KEY_AIRCON,
-    SHADOW_KEY_HEATER,
+        SHADOW_KEY_HEATER,
         {SHADOW_KEY_MODE: 0, SHADOW_KEY_MANU: {SHADOW_KEY_LEVEL: level}},
     )
 
@@ -541,122 +506,89 @@ def _extract_reported(document: dict[str, object]) -> dict[str, object]:
 
 
 def _parse_light_state(light: dict[str, object]) -> LightState:
-    # Sparse: emit only fields present in the fragment so partial heartbeats
-    # can't clobber unrelated fields via _deep_merge_mapping.
-    result: LightState = {}
+    mode = _as_int(light.get(SHADOW_KEY_MODE))
     manu = _as_dict(light.get(SHADOW_KEY_MANU))
-    has_manu_level = manu is not None and SHADOW_KEY_LEVEL in manu
+    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
+    level = _as_int(light.get(SHADOW_KEY_LEVEL))
+    if level is None:
+        level = manual_level
 
-    if SHADOW_KEY_MODE in light:
-        result["mode"] = _as_int(light.get(SHADOW_KEY_MODE))
-    if has_manu_level:
-        result["manual_level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
-    if SHADOW_KEY_LEVEL in light:
-        result["level"] = _as_int(light.get(SHADOW_KEY_LEVEL))
-    elif has_manu_level:
-        result["level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
-    if "spec" in light:
-        result["spectrum"] = _normalize_sentinel_int(_as_int(light.get("spec")))
-    elif manu is not None and "spec" in manu:
-        result["spectrum"] = _normalize_sentinel_int(_as_int(manu.get("spec")))
-    if "inPlan" in light:
-        result["in_plan"] = _as_bool(light.get("inPlan"))
+    spectrum = _as_int(light.get("spec"))
+    if spectrum is None and manu is not None:
+        spectrum = _as_int(manu.get("spec"))
 
-    return result
+    return LightState(
+        mode=mode,
+        level=level,
+        manual_level=manual_level,
+        spectrum=_normalize_sentinel_int(spectrum),
+        in_plan=_as_bool(light.get("inPlan")),
+    )
 
 
 def _parse_cfan_state(cfan: dict[str, object]) -> CirculatorFanState:
-    # Sparse: emit only fields present in the fragment (see _parse_light_state).
-    result: CirculatorFanState = {}
     manu = _as_dict(cfan.get(SHADOW_KEY_MANU))
-    has_manu_level = manu is not None and SHADOW_KEY_LEVEL in manu
+    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
+    level = _as_int(cfan.get(SHADOW_KEY_LEVEL))
+    if level is None:
+        level = manual_level
 
-    if SHADOW_KEY_MODE in cfan:
-        result["mode"] = _as_int(cfan.get(SHADOW_KEY_MODE))
-    if has_manu_level:
-        result["manual_level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
-    if SHADOW_KEY_LEVEL in cfan:
-        result["level"] = _as_int(cfan.get(SHADOW_KEY_LEVEL))
-    elif has_manu_level:
-        result["level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
-    if SHADOW_KEY_OSC in cfan:
-        result["oscillating"] = _as_bool(cfan.get(SHADOW_KEY_OSC))
-    if SHADOW_KEY_NW in cfan:
-        result["night_mode"] = _as_bool(cfan.get(SHADOW_KEY_NW))
-
-    return result
-
-
-_DFAN_AUTO_ORDERED_FIELDS: tuple[str, ...] = (
-    "lvMin", "lvMax", "tMax", "tMin", "hMax", "hMin",
-    "vpdMax", "vpdMin", "tStep", "hStep", "vpdStep", "exChk",
-)
-
-
-def _parse_dfan_auto_state(auto: dict[str, object]) -> DuctFanAutoState:
-    # Sparse: only emit thresholds present in the fragment so a partial
-    # dFan.auto update doesn't clobber the other thresholds.
-    return cast(
-        "DuctFanAutoState",
-        {
-            field: _normalize_sentinel_int(_as_int(auto.get(field)))
-            for field in _DFAN_AUTO_ORDERED_FIELDS
-            if field in auto
-        },
+    return CirculatorFanState(
+        mode=_as_int(cfan.get(SHADOW_KEY_MODE)),
+        level=level,
+        manual_level=manual_level,
+        oscillating=_as_bool(cfan.get(SHADOW_KEY_OSC)),
+        night_mode=_as_bool(cfan.get(SHADOW_KEY_NW)),
     )
 
 
 def _parse_dfan_state(dfan: dict[str, object]) -> DuctFanState:
-    # Sparse: emit only fields present in the fragment (see _parse_light_state).
-    # auto_enabled is derived from mode, so it is only emitted when mode is present.
-    result: DuctFanState = {}
+    mode = _as_int(dfan.get(SHADOW_KEY_MODE))
     manu = _as_dict(dfan.get(SHADOW_KEY_MANU))
-    has_manu_level = manu is not None and SHADOW_KEY_LEVEL in manu
+    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
+    level = _as_int(dfan.get(SHADOW_KEY_LEVEL))
+    if level is None:
+        level = manual_level
+    auto = _as_dict(dfan.get(SHADOW_KEY_AUTO)) or {}
 
-    if SHADOW_KEY_MODE in dfan:
-        mode = _as_int(dfan.get(SHADOW_KEY_MODE))
-        result["mode"] = mode
-        result["auto_enabled"] = mode == MODE_AUTO
-    if has_manu_level:
-        result["manual_level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
-    if SHADOW_KEY_LEVEL in dfan:
-        result["level"] = _as_int(dfan.get(SHADOW_KEY_LEVEL))
-    elif has_manu_level:
-        result["level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
+    auto_state = DuctFanAutoState(
+        lvMin=_normalize_sentinel_int(_as_int(auto.get("lvMin"))),
+        lvMax=_normalize_sentinel_int(_as_int(auto.get("lvMax"))),
+        tMax=_normalize_sentinel_int(_as_int(auto.get("tMax"))),
+        tMin=_normalize_sentinel_int(_as_int(auto.get("tMin"))),
+        hMax=_normalize_sentinel_int(_as_int(auto.get("hMax"))),
+        hMin=_normalize_sentinel_int(_as_int(auto.get("hMin"))),
+        vpdMax=_normalize_sentinel_int(_as_int(auto.get("vpdMax"))),
+        vpdMin=_normalize_sentinel_int(_as_int(auto.get("vpdMin"))),
+        tStep=_normalize_sentinel_int(_as_int(auto.get("tStep"))),
+        hStep=_normalize_sentinel_int(_as_int(auto.get("hStep"))),
+        vpdStep=_normalize_sentinel_int(_as_int(auto.get("vpdStep"))),
+        exChk=_normalize_sentinel_int(_as_int(auto.get("exChk"))),
+    )
 
-    auto_raw = _as_dict(dfan.get(SHADOW_KEY_AUTO))
-    if auto_raw is not None:
-        result["auto"] = _parse_dfan_auto_state(auto_raw)
-
-    return result
+    return DuctFanState(
+        mode=mode,
+        level=level,
+        manual_level=manual_level,
+        auto_enabled=(mode == MODE_AUTO),
+        auto=auto_state,
+    )
 
 
 def _parse_hmdf_state(hmdf: dict[str, object]) -> HumidifierState:
-    # Build a sparse result so that partial update/accepted messages (e.g. a
-    # routine heartbeat carrying only "waterWarn" or "manu") don't clobber
-    # unrelated fields (on/mode/target_humidity) back to defaults via
-    # _deep_merge_mapping. Only emit fields actually present in the fragment.
-    result: HumidifierState = {}
-
-    if "on" in hmdf:
-        result["on"] = _as_bool(hmdf.get("on"))
-    if SHADOW_KEY_MODE in hmdf:
-        result["mode"] = _as_int(hmdf.get(SHADOW_KEY_MODE))
-    if "waterWarn" in hmdf:
-        result["water_warning"] = _as_bool(hmdf.get("waterWarn"))
-    if "targetHumi" in hmdf:
-        result["target_humidity"] = _normalize_sentinel_int(_as_int(hmdf.get("targetHumi")))
-
     manu = _as_dict(hmdf.get(SHADOW_KEY_MANU))
-    manu_has_level = manu is not None and SHADOW_KEY_LEVEL in manu
-    if manu_has_level:
-        result["manual_level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
-    if SHADOW_KEY_LEVEL in hmdf:
-        result["level"] = _as_int(hmdf.get(SHADOW_KEY_LEVEL))
-    elif manu_has_level:
-        result["level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
+    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
+    level = _as_int(hmdf.get(SHADOW_KEY_LEVEL))
+    if level is None:
+        level = manual_level
 
-    return result
+    return HumidifierState(
+        on=_as_bool(hmdf.get("on")),
+        level=level,
+        mode=_as_int(hmdf.get(SHADOW_KEY_MODE)),
+        water_warning=_as_bool(hmdf.get("waterWarn")),
+        target_humidity=_normalize_sentinel_int(_as_int(hmdf.get("targetHumi"))),
+    )
 
 
 
@@ -685,50 +617,32 @@ def _parse_dhmdf_state(dhmdf: dict[str, object]) -> DehumidifierState:
 
 
 def _parse_heat_state(heat: dict[str, object]) -> HeaterState:
-    # Sparse: emit only fields present in the fragment (see _parse_light_state).
-    result: HeaterState = {}
     manu = _as_dict(heat.get(SHADOW_KEY_MANU))
-    has_manu_level = manu is not None and SHADOW_KEY_LEVEL in manu
+    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
+    level = _as_int(heat.get(SHADOW_KEY_LEVEL))
+    if level is None:
+        level = manual_level
 
-    if "on" in heat:
-        result["on"] = _as_bool(heat.get("on"))
-    if SHADOW_KEY_MODE in heat:
-        result["mode"] = _as_int(heat.get(SHADOW_KEY_MODE))
-    if "state" in heat:
-        result["state"] = _as_int(heat.get("state"))
-    if "targetTemp" in heat:
-        result["target_temp"] = _normalize_sentinel_int(_as_int(heat.get("targetTemp")))
-    if SHADOW_KEY_LEVEL in heat:
-        result["level"] = _as_int(heat.get(SHADOW_KEY_LEVEL))
-    elif has_manu_level:
-        result["level"] = _as_int(manu.get(SHADOW_KEY_LEVEL))  # type: ignore[union-attr]
-
-    return result
+    return HeaterState(
+        on=_as_bool(heat.get("on")),
+        level=level,
+        mode=_as_int(heat.get(SHADOW_KEY_MODE)),
+        state=_as_int(heat.get("state")),
+        target_temp=_normalize_sentinel_int(_as_int(heat.get("targetTemp"))),
+    )
 
 
 def _parse_aircd_state(aircd: dict[str, object]) -> AirConditionerState:
-    # Sparse: emit only fields present in the fragment so a partial aircd
-    # heartbeat doesn't clobber unrelated fields (state/mode/target/func) via
-    # _deep_merge_mapping.
-    result: AirConditionerState = {}
-    if "state" in aircd:
-        result["state"] = _as_int(aircd.get("state"))
-    if SHADOW_KEY_MODE in aircd:
-        result["mode"] = _as_int(aircd.get(SHADOW_KEY_MODE))
-    if "pause" in aircd:
-        result["pause"] = _as_int(aircd.get("pause"))
-    if "func" in aircd:
-        result["func"] = _as_int(aircd.get("func"))
-    if "wdLv" in aircd:
-        result["wind_level"] = _as_int(aircd.get("wdLv"))
-    if "tTemp" in aircd:
-        result["target_temp"] = _normalize_sentinel_int(_as_int(aircd.get("tTemp")))
-    if "tHumi" in aircd:
-        result["target_humidity"] = _normalize_sentinel_int(_as_int(aircd.get("tHumi")))
-    if "tMin" in aircd:
-        result["min_target_temp"] = _normalize_sentinel_int(_as_int(aircd.get("tMin")))
-
-    return result
+    return AirConditionerState(
+        state=_as_int(aircd.get("state")),
+        mode=_as_int(aircd.get(SHADOW_KEY_MODE)),
+        pause=_as_int(aircd.get("pause")),
+        func=_as_int(aircd.get("func")),
+        wind_level=_as_int(aircd.get("wdLv")),
+        target_temp=_normalize_sentinel_int(_as_int(aircd.get("tTemp"))),
+        target_humidity=_normalize_sentinel_int(_as_int(aircd.get("tHumi"))),
+        min_target_temp=_normalize_sentinel_int(_as_int(aircd.get("tMin"))),
+    )
 
 
 def _parse_plan_state(plan: dict[str, object]) -> PlanState:

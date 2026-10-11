@@ -83,20 +83,11 @@ class VivosunHumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierE
 
     @property
     def is_on(self) -> bool | None:
-        """Return whether the humidifier is misting.
-
-        The AeroStream H09 does not report an on/off flag, so fall back to the
-        mist level: it mists whenever its manual level is greater than zero.
-        """
+        """Return whether the humidifier is on."""
         hmdf = self._hmdf_state()
         on = hmdf.get("on")
         if isinstance(on, bool):
             return on
-        level = hmdf.get("manual_level")
-        if not isinstance(level, int) or isinstance(level, bool):
-            level = hmdf.get("level")
-        if isinstance(level, int) and not isinstance(level, bool):
-            return level > 0
         return None
 
     @property

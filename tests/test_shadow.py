@@ -22,7 +22,6 @@ from custom_components.vivosun_growhub.shadow import (
     build_dfan_level_payload,
     build_dhmdf_on_payload,
     build_dhmdf_target_payload,
-    build_hmdf_level_payload,
     build_light_level_payload,
     build_light_mode_payload,
     build_light_spectrum_payload,
@@ -31,8 +30,6 @@ from custom_components.vivosun_growhub.shadow import (
     clamp_light_level,
     dfan_percentage_to_shadow,
     dfan_shadow_to_percentage,
-    hmdf_lv_to_step,
-    hmdf_step_to_lv,
     parse_channel_publish,
     parse_channel_sensor_payload,
     parse_reported_fragment,
@@ -158,10 +155,11 @@ def test_parse_shadow_document_falls_back_to_desired_when_reported_missing() -> 
     }
 
     parsed = parse_shadow_document(payload)
-    # Sparse: only fields present in the fragment are emitted, so a partial
-    # payload cannot clobber unrelated fields when deep-merged.
     assert parsed["hmdf"] == {
         "on": True,
+        "level": None,
+        "mode": None,
+        "water_warning": False,
         "target_humidity": 5500,
     }
 
@@ -351,76 +349,6 @@ def test_light_level_clamp_enforces_minimum() -> None:
     assert clamp_light_level(24) == 25
     assert clamp_light_level(25) == 25
     assert clamp_light_level(80) == 80
-
-
-def test_parse_reported_fragment_humidifier_sparse_state() -> None:
-    # A routine partial heartbeat carrying only manual level + water flag must
-    # NOT emit on/mode/target_humidity, so deep-merging it cannot reset a
-    # previously-commanded on/mode/target back to defaults.
-    fragment: dict[str, object] = {
-        "hmdf": {
-            "manu": {"lv": 5},
-            "waterWarn": False,
-        }
-    }
-
-    parsed = parse_reported_fragment(fragment)
-
-    assert parsed["hmdf"] == {
-        "manual_level": 5,
-        "level": 5,
-        "water_warning": False,
-    }
-
-
-def test_build_hmdf_level_payload() -> None:
-    assert build_hmdf_level_payload(0) == {"state": {"desired": {"hmdf": {"mode": 0, "manu": {"lv": 0}}}}}
-    assert build_hmdf_level_payload(50) == {"state": {"desired": {"hmdf": {"mode": 0, "manu": {"lv": 50}}}}}
-    assert build_hmdf_level_payload(100) == {"state": {"desired": {"hmdf": {"mode": 0, "manu": {"lv": 100}}}}}
-
-
-def test_build_hmdf_level_payload_rejects_out_of_range() -> None:
-    with pytest.raises(ValueError, match=r"0\.\.100"):
-        build_hmdf_level_payload(101)
-    with pytest.raises(ValueError, match=r"0\.\.100"):
-        build_hmdf_level_payload(-1)
-
-
-def test_hmdf_level_step_mapping() -> None:
-    # App OFF/1-5 slider <-> device manu.lv (0-100).
-    assert hmdf_step_to_lv(0) == 0
-    assert hmdf_step_to_lv(1) == 35
-    assert hmdf_step_to_lv(3) == 70
-    assert hmdf_step_to_lv(5) == 100
-    assert hmdf_step_to_lv(9) == 100  # clamps to max step
-    assert hmdf_lv_to_step(0) == 0
-    assert hmdf_lv_to_step(35) == 1
-    assert hmdf_lv_to_step(70) == 3
-    assert hmdf_lv_to_step(100) == 5
-    assert hmdf_lv_to_step(42) == 1  # nearest step (35)
-    assert hmdf_lv_to_step(None) is None
-
-
-def test_parse_reported_fragment_actuators_sparse_partial_updates() -> None:
-    # Every actuator parser must emit ONLY the fields carried by a partial
-    # heartbeat, so deep-merging it cannot reset previously-known state.
-    fragment: dict[str, object] = {
-        "light": {"manu": {"lv": 40}},
-        "cFan": {"osc": 1},
-        "dFan": {"auto": {"tMax": 2800}},
-        "heat": {"state": 1},
-        "aircd": {"wdLv": 50},
-    }
-
-    parsed = parse_reported_fragment(fragment)
-
-    assert parsed["light"] == {"manual_level": 40, "level": 40}
-    assert parsed["cFan"] == {"oscillating": True}
-    assert parsed["dFan"] == {"auto": {"tMax": 2800}}
-    assert "mode" not in parsed["dFan"]
-    assert "auto_enabled" not in parsed["dFan"]
-    assert parsed["heat"] == {"state": 1}
-    assert parsed["aircd"] == {"wind_level": 50}
 
 
 def test_parse_reported_fragment_dehumidifier_sparse_state() -> None:
