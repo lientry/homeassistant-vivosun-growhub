@@ -28,7 +28,11 @@
         "title": "Integration options",
         "data": {
           "temp_unit": "Temperature unit",
-          "support_capture_enabled": "Enable support capture for diagnostics"
+          "support_capture_enabled": "Enable support capture for diagnostics",
+          "cfan_oscillation_controllers": "Oscillation control"
+        },
+        "data_description": {
+          "cfan_oscillation_controllers": "Enable only if your fan offers oscillation control in the Vivosun app."
         }
       },
       "camera": {
@@ -40,7 +44,21 @@
       }
     },
     "error": {
-      "invalid_ip": "Invalid IP address"
+      "invalid_ip": "Invalid IP address",
+      "invalid_oscillation_controller": "Select only available controllers for oscillation"
+    }
+  },
+  "entity": {
+    "fan": {
+      "circulation_fan": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "natural_wind": "Natural Wind"
+            }
+          }
+        }
+      }
     }
   },
   "selector": {

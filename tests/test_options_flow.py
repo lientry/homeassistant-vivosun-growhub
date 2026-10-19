@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from homeassistant.const import UnitOfTemperature
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.config_flow import VivosunGrowhubOptionsFlow
@@ -15,6 +16,7 @@ from custom_components.vivosun_growhub.const import (
     CONF_CAMERA_IPS,
     CONF_HAS_CAMERA,
     DOMAIN,
+    OPTION_CFAN_OSCILLATION_CONTROLLERS,
     OPTION_SUPPORT_CAPTURE_ENABLED,
 )
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
@@ -53,6 +55,45 @@ class _StubCoordinator:
         if device_id == self._device.device_id:
             return self._device
         return None
+
+
+async def test_oscillation_option_is_per_controller_and_removable(
+    hass: HomeAssistant, enable_custom_integrations: None,
+) -> None:
+    coordinator = _StubCoordinator()
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={"unrelated_setting": "keep"})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry.entry_id, cast("object", coordinator),
+    )
+    with patch.object(hass.config_entries, "async_reload", AsyncMock(return_value=True)):
+        form = await hass.config_entries.options.async_init(entry.entry_id)
+        assert form["type"] is FlowResultType.FORM
+        assert OPTION_CFAN_OSCILLATION_CONTROLLERS in {m.schema for m in form["data_schema"].schema}
+        assert OPTION_CFAN_OSCILLATION_CONTROLLERS not in entry.options
+        with pytest.raises(InvalidData):
+            await hass.config_entries.options.async_configure(
+                form["flow_id"],
+                user_input={"temp_unit": "celsius", OPTION_CFAN_OSCILLATION_CONTROLLERS: ["camera-1"]},
+            )
+        saved = await hass.config_entries.options.async_configure(
+            form["flow_id"],
+            user_input={"temp_unit": "celsius", OPTION_CFAN_OSCILLATION_CONTROLLERS: [_DEV_ID]},
+        )
+        assert saved["type"] is FlowResultType.CREATE_ENTRY
+        await hass.async_block_till_done()
+        assert entry.options[OPTION_CFAN_OSCILLATION_CONTROLLERS] == [_DEV_ID]
+        assert entry.options["unrelated_setting"] == "keep"
+
+        form = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.config_entries.options.async_configure(
+            form["flow_id"], user_input={
+                "temp_unit": "celsius", OPTION_CFAN_OSCILLATION_CONTROLLERS: [],
+            },
+        )
+        await hass.async_block_till_done()
+    assert OPTION_CFAN_OSCILLATION_CONTROLLERS not in entry.options
+    assert entry.options["unrelated_setting"] == "keep"
 
 
 async def test_options_flow_updates_temp_unit_and_sensor_unit(

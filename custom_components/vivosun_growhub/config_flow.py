@@ -20,6 +20,7 @@ from .const import (
     CONF_PASSWORD,
     DEFAULT_TEMP_UNIT,
     DOMAIN,
+    OPTION_CFAN_OSCILLATION_CONTROLLERS,
     OPTION_SUPPORT_CAPTURE_ENABLED,
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
@@ -165,9 +166,25 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         errors: dict[str, str] = {}
         if user_input is not None:
             normalized_input = self._normalize_options(user_input)
+            eligible = {device.device_id for device in self._get_controller_devices(entry)}
+            selected = normalized_input.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
+            if not isinstance(selected, list) or any(
+                not isinstance(device_id, str) or device_id not in eligible for device_id in selected
+            ):
+                errors["base"] = "invalid_oscillation_controller"
             if not errors:
+                normalized_input = {**entry.options, **normalized_input}
+                if OPTION_SUPPORT_CAPTURE_ENABLED not in user_input or not user_input[OPTION_SUPPORT_CAPTURE_ENABLED]:
+                    normalized_input.pop(OPTION_SUPPORT_CAPTURE_ENABLED, None)
+                if (
+                    OPTION_CFAN_OSCILLATION_CONTROLLERS in user_input
+                    and not user_input[OPTION_CFAN_OSCILLATION_CONTROLLERS]
+                ):
+                    normalized_input.pop(OPTION_CFAN_OSCILLATION_CONTROLLERS, None)
                 self._camera_devices = self._get_camera_devices(entry)
                 if self._camera_devices:
+                    normalized_input.pop(CONF_CAMERA_IPS, None)
+                    normalized_input.pop(CONF_CAMERA_IP, None)
                     self._pending_options = normalized_input
                     self._camera_ips = camera_ips_from_options(entry.options, self._camera_devices)
                     return await self.async_step_camera()
@@ -190,6 +207,19 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                 default=bool(entry.options.get(OPTION_SUPPORT_CAPTURE_ENABLED, False)),
             ): selector.BooleanSelector(),
         }
+        controllers = self._get_controller_devices(entry)
+        if controllers:
+            saved = entry.options.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
+            schema_fields[vol.Optional(
+                OPTION_CFAN_OSCILLATION_CONTROLLERS,
+                default=[device_id for device_id in saved if device_id in {d.device_id for d in controllers}]
+                if isinstance(saved, list) else [],
+            )] = selector.SelectSelector(selector.SelectSelectorConfig(
+                options=[selector.SelectOptionDict(value=device.device_id, label=device.name)
+                         for device in controllers],
+                multiple=True,
+                mode=selector.SelectSelectorMode.LIST,
+            ))
         schema = vol.Schema(schema_fields)
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
@@ -248,6 +278,13 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         if not isinstance(camera_devices, list):
             return []
         return [device for device in camera_devices if isinstance(device, DeviceInfo)]
+
+    def _get_controller_devices(self, entry: config_entries.ConfigEntry) -> list[DeviceInfo]:
+        """Return discovered controller IDs for opt-in options."""
+        runtime = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        coordinator = getattr(runtime, "coordinator", None)
+        devices = getattr(coordinator, "devices", [])
+        return [device for device in devices if isinstance(device, DeviceInfo) and device.device_type == "controller"]
 
     def _finish_options(self, options: dict[str, object]) -> config_entries.ConfigFlowResult:
         """Save normalized options and reload when they changed."""

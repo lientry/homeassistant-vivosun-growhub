@@ -26,7 +26,6 @@ from .const import (
     SHADOW_KEY_LIGHT,
     SHADOW_KEY_MANU,
     SHADOW_KEY_MODE,
-    SHADOW_KEY_NW,
     SHADOW_KEY_OSC,
     SHADOW_KEY_PLAN,
     SHADOW_ROOT_REPORTED,
@@ -89,7 +88,7 @@ class ShadowParseError(ValueError):
     """Raised when inbound shadow/channel payloads cannot be parsed."""
 
 
-class LightState(TypedDict):
+class LightState(TypedDict, total=False):
     """Normalized light state slice from shadow.reported."""
 
     mode: int | None
@@ -99,14 +98,13 @@ class LightState(TypedDict):
     in_plan: bool
 
 
-class CirculatorFanState(TypedDict):
+class CirculatorFanState(TypedDict, total=False):
     """Normalized circulator fan state slice from shadow.reported."""
 
     mode: int | None
     level: int | None
     manual_level: int | None
     oscillating: bool
-    night_mode: bool
 
 
 class DuctFanAutoState(TypedDict, total=False):
@@ -238,6 +236,65 @@ def parse_shadow_document(document: dict[str, object], *, dfan_auto_mode: int = 
     """Parse a full shadow payload (`get/accepted` or `update/documents`)."""
     reported = _extract_reported(document)
     return parse_reported_fragment(reported, dfan_auto_mode=dfan_auto_mode)
+
+
+def extract_shadow_reported(document: dict[str, object]) -> dict[str, object] | None:
+    """Return genuine reported state, excluding desired-only cloud acknowledgements."""
+    state = _as_dict(document.get(SHADOW_ROOT_STATE))
+    if state is not None:
+        reported = _as_dict(state.get(SHADOW_ROOT_REPORTED))
+        if reported is not None:
+            return reported
+    current = _as_dict(document.get("current"))
+    if current is not None:
+        current_state = _as_dict(current.get(SHADOW_ROOT_STATE))
+        if current_state is not None:
+            return _as_dict(current_state.get(SHADOW_ROOT_REPORTED))
+    return None
+
+
+def reported_light_level_timestamp(document: dict[str, object]) -> int | None:
+    """Return AWS metadata for the reported leaf used by light.level normalization."""
+    current = _as_dict(document.get("current"))
+    body = current if current is not None else document
+    reported = extract_shadow_reported(body)
+    light = _as_dict(reported.get("light")) if reported is not None else None
+    if light is None:
+        return None
+    manual = _as_dict(light.get(SHADOW_KEY_MANU))
+    path: tuple[str, ...]
+    if SHADOW_KEY_LEVEL in light and (
+        _as_int(light[SHADOW_KEY_LEVEL]) is not None
+        or manual is None
+        or SHADOW_KEY_LEVEL not in manual
+    ):
+        path = (SHADOW_KEY_LEVEL,)
+    elif manual is not None and SHADOW_KEY_LEVEL in manual:
+        path = (SHADOW_KEY_MANU, SHADOW_KEY_LEVEL)
+    else:
+        return None
+    metadata = _as_dict(body.get("metadata"))
+    reported_meta = _as_dict(metadata.get("reported")) if metadata is not None else None
+    light_meta = _as_dict(reported_meta.get("light")) if reported_meta is not None else None
+    leaf = light_meta
+    for key in path:
+        leaf = _as_dict(leaf.get(key)) if leaf is not None else None
+    value = leaf.get("timestamp") if leaf is not None else None
+    return value if type(value) is int and value >= 0 else None
+
+
+def accepted_desired_light_level_timestamp(document: dict[str, object]) -> int | None:
+    """Return cloud acceptance time for our desired manual light level."""
+    metadata = _as_dict(document.get("metadata"))
+    desired = _as_dict(metadata.get("desired")) if metadata is not None else None
+    light = _as_dict(desired.get("light")) if desired is not None else None
+    manual = _as_dict(light.get(SHADOW_KEY_MANU)) if light is not None else None
+    leaf = _as_dict(manual.get(SHADOW_KEY_LEVEL)) if manual is not None else None
+    timestamp = leaf.get("timestamp") if leaf is not None else None
+    if type(timestamp) is int and timestamp >= 0:
+        return timestamp
+    response_timestamp = document.get("timestamp")
+    return response_timestamp if type(response_timestamp) is int and response_timestamp >= 0 else None
 
 
 def parse_reported_fragment(
@@ -385,11 +442,6 @@ def build_cfan_oscillate_payload(enabled: bool) -> dict[str, object]:
     return _build_desired_payload(SHADOW_KEY_CIRCULATOR_FAN, {SHADOW_KEY_OSC: int(enabled)})
 
 
-def build_cfan_night_mode_payload(enabled: bool) -> dict[str, object]:
-    """Build desired night-mode payload for `desired.cFan.nw`."""
-    return _build_desired_payload(SHADOW_KEY_CIRCULATOR_FAN, {SHADOW_KEY_NW: int(enabled)})
-
-
 def build_dfan_auto_mode_payload(enabled: bool, *, auto_mode: int = MODE_AUTO) -> dict[str, object]:
     """Build desired dFan mode payload with the device's Auto value."""
     return _build_desired_payload(SHADOW_KEY_DUCT_FAN, {SHADOW_KEY_MODE: auto_mode if enabled else 0})
@@ -520,40 +572,43 @@ def _extract_reported(document: dict[str, object]) -> dict[str, object]:
 
 
 def _parse_light_state(light: dict[str, object]) -> LightState:
-    mode = _as_int(light.get(SHADOW_KEY_MODE))
+    result: LightState = {}
+    if SHADOW_KEY_MODE in light:
+        result["mode"] = _as_int(light[SHADOW_KEY_MODE])
     manu = _as_dict(light.get(SHADOW_KEY_MANU))
-    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
-    level = _as_int(light.get(SHADOW_KEY_LEVEL))
-    if level is None:
-        level = manual_level
+    if manu is not None and SHADOW_KEY_LEVEL in manu:
+        result["manual_level"] = _as_int(manu[SHADOW_KEY_LEVEL])
+    if SHADOW_KEY_LEVEL in light:
+        level = _as_int(light[SHADOW_KEY_LEVEL])
+        result["level"] = level if level is not None else result.get("manual_level")
+    elif "manual_level" in result:
+        result["level"] = result["manual_level"]
 
-    spectrum = _as_int(light.get("spec"))
-    if spectrum is None and manu is not None:
-        spectrum = _as_int(manu.get("spec"))
-
-    return LightState(
-        mode=mode,
-        level=level,
-        manual_level=manual_level,
-        spectrum=_normalize_sentinel_int(spectrum),
-        in_plan=_as_bool(light.get("inPlan")),
-    )
+    if "spec" in light or (manu is not None and "spec" in manu):
+        spectrum = _as_int(light["spec"]) if "spec" in light else None
+        if spectrum is None and manu is not None and "spec" in manu:
+            spectrum = _as_int(manu["spec"])
+        result["spectrum"] = _normalize_sentinel_int(spectrum)
+    if "inPlan" in light:
+        result["in_plan"] = _as_bool(light["inPlan"])
+    return result
 
 
 def _parse_cfan_state(cfan: dict[str, object]) -> CirculatorFanState:
+    result: CirculatorFanState = {}
     manu = _as_dict(cfan.get(SHADOW_KEY_MANU))
-    manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
-    level = _as_int(cfan.get(SHADOW_KEY_LEVEL))
-    if level is None:
-        level = manual_level
-
-    return CirculatorFanState(
-        mode=_as_int(cfan.get(SHADOW_KEY_MODE)),
-        level=level,
-        manual_level=manual_level,
-        oscillating=_as_bool(cfan.get(SHADOW_KEY_OSC)),
-        night_mode=_as_bool(cfan.get(SHADOW_KEY_NW)),
-    )
+    if SHADOW_KEY_MODE in cfan:
+        result["mode"] = _as_int(cfan[SHADOW_KEY_MODE])
+    if manu is not None and SHADOW_KEY_LEVEL in manu:
+        result["manual_level"] = _as_int(manu[SHADOW_KEY_LEVEL])
+    if SHADOW_KEY_LEVEL in cfan:
+        level = _as_int(cfan[SHADOW_KEY_LEVEL])
+        result["level"] = level if level is not None else result.get("manual_level")
+    elif "manual_level" in result:
+        result["level"] = result["manual_level"]
+    if SHADOW_KEY_OSC in cfan:
+        result["oscillating"] = _as_bool(cfan[SHADOW_KEY_OSC])
+    return result
 
 
 def _parse_dfan_state(dfan: dict[str, object], *, auto_mode: int) -> DuctFanState:
@@ -637,19 +692,23 @@ def _parse_dhmdf_state(dhmdf: dict[str, object]) -> DehumidifierState:
 
 
 def _parse_heat_state(heat: dict[str, object]) -> HeaterState:
+    result: HeaterState = {}
     manu = _as_dict(heat.get(SHADOW_KEY_MANU))
     manual_level = _as_int(manu.get(SHADOW_KEY_LEVEL)) if manu is not None else None
-    level = _as_int(heat.get(SHADOW_KEY_LEVEL))
-    if level is None:
-        level = manual_level
-
-    return HeaterState(
-        on=_as_bool(heat.get("on")),
-        level=level,
-        mode=_as_int(heat.get(SHADOW_KEY_MODE)),
-        state=_as_int(heat.get("state")),
-        target_temp=_normalize_sentinel_int(_as_int(heat.get("targetTemp"))),
-    )
+    if "on" in heat:
+        result["on"] = _as_bool(heat["on"])
+    if SHADOW_KEY_LEVEL in heat:
+        level = _as_int(heat[SHADOW_KEY_LEVEL])
+        result["level"] = level if level is not None else manual_level
+    elif manu is not None and SHADOW_KEY_LEVEL in manu:
+        result["level"] = manual_level
+    if SHADOW_KEY_MODE in heat:
+        result["mode"] = _as_int(heat[SHADOW_KEY_MODE])
+    if "state" in heat:
+        result["state"] = _as_int(heat["state"])
+    if "targetTemp" in heat:
+        result["target_temp"] = _normalize_sentinel_int(_as_int(heat["targetTemp"]))
+    return result
 
 
 def _parse_aircd_state(aircd: dict[str, object]) -> AirConditionerState:

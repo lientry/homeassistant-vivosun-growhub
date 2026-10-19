@@ -6,8 +6,9 @@ import asyncio
 import json
 import logging
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 from uuid import uuid4
 
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -15,6 +16,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .api import VivosunApiClient
 from .aws_auth import AWS_CREDENTIAL_REFRESH_SKEW, AwsAuthClient, AwsCredentials
 from .const import (
+    CFAN_LEVEL_MAP,
+    DFAN_LEVEL_MAP,
     DOMAIN,
     E42A_DFAN_AUTO_MODE,
     MODE_AUTO,
@@ -25,18 +28,24 @@ from .const import (
     TOPIC_SHADOW_UPDATE_ACCEPTED,
     TOPIC_SHADOW_UPDATE_DELTA,
     TOPIC_SHADOW_UPDATE_DOCUMENTS,
+    TOPIC_SHADOW_UPDATE_REJECTED,
 )
 from .exceptions import VivosunAuthError, VivosunResponseError
 from .model_metadata import support_capture_model_metadata
 from .models import CaptureDevice, client_model_token
-from .mqtt_client import MQTTClient, MQTTConnectionError
+from .mqtt_client import MQTTClient, MQTTConnectionError, MQTTError
 from .redaction import redact_identifier
 from .shadow import (
     ChannelSensorState,
     ShadowParseError,
     ShadowV1State,
+    accepted_desired_light_level_timestamp,
+    build_light_level_payload,
+    extract_shadow_reported,
     parse_channel_sensor_payload,
+    parse_reported_fragment,
     parse_shadow_document,
+    reported_light_level_timestamp,
 )
 from .support_capture import (
     SUPPORT_CAPTURE_MAX_DEVICES,
@@ -58,6 +67,45 @@ _RECONNECT_HEALTH_CHECK_SECONDS = 2.0
 _POINT_LOG_WINDOW_SECONDS = 300
 _SHADOW_REFRESH_INTERVAL_SECONDS = 30.0
 _SUPPORT_SHADOW_READ_TIMEOUT = 10.0
+_FIELD_CONFIRMATION_TIMEOUT = 15.0
+
+_Channel: TypeAlias = Literal["light", "cFan", "dFan"]
+_Field: TypeAlias = Literal["level", "mode"]
+_FieldKey: TypeAlias = tuple[str, _Channel, _Field]
+_CONTROLLER_CHANNELS: tuple[_Channel, ...] = ("light", "cFan", "dFan")
+
+
+@dataclass(slots=True)
+class _PendingField:
+    """One requested shadow field, kept separate from actual device reports."""
+
+    generation: int
+    token: str
+    value: int
+    baseline: int | None
+    baseline_version: int | None
+    baseline_timestamp: int | None
+    superseded_values: frozenset[int]
+    timeout: asyncio.TimerHandle
+    accepted_version: int | None = None
+    accepted_timestamp: int | None = None
+
+
+@dataclass(slots=True)
+class _ConfirmedCommandReceipt:
+    """A request already at the device-reported level, kept for rejection logging."""
+
+    device_id: str
+    channel: str
+    timeout: asyncio.TimerHandle
+
+
+@dataclass(frozen=True, slots=True)
+class _ReportedFieldProvenance:
+    """Shadow version and leaf timestamp for one genuinely reported field."""
+
+    version: int | None
+    timestamp: int | None
 
 
 class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ignore[misc]
@@ -103,6 +151,12 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
         # Per-device state keyed by device_id
         self._shadow_states: dict[str, dict[str, object]] = {}
+        self._pending_fields: dict[_FieldKey, _PendingField] = {}
+        self._reported_fields: dict[_FieldKey, _ReportedFieldProvenance] = {}
+        self._has_reported_fields: set[_FieldKey] = set()
+        self._locally_commanded_fields: set[_FieldKey] = set()
+        self._already_confirmed_tokens: dict[str, _ConfirmedCommandReceipt] = {}
+        self._field_generation = 0
         self._sensor_states: dict[str, dict[str, object]] = {}
         self._plan_stage_cache: dict[str, object] = {}  # stage_id -> PlanStageInfo
 
@@ -215,6 +269,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._devices.clear()
             self._camera_devices.clear()
             self._shadow_states.clear()
+            for pending in self._pending_fields.values():
+                pending.timeout.cancel()
+            self._pending_fields.clear()
+            self._reported_fields.clear()
+            self._has_reported_fields.clear()
+            self._locally_commanded_fields.clear()
+            for receipt in self._already_confirmed_tokens.values():
+                receipt.timeout.cancel()
+            self._already_confirmed_tokens.clear()
             self._sensor_states.clear()
             self._plan_stage_cache.clear()
             self._client_id_to_device_id.clear()
@@ -245,8 +308,49 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             encoded = payload
 
         target_device = self._resolve_device(device_id)
+        command_token: str | None = None
+        if isinstance(payload, dict) and target_device.device_type == "controller":
+            state = payload.get("state")
+            desired = state.get("desired") if isinstance(state, dict) else None
+            requested: list[tuple[_FieldKey, int]] = []
+            for channel in _CONTROLLER_CHANNELS:
+                part = desired.get(channel) if isinstance(desired, dict) else None
+                # Light's explicit entity publisher supplies its own token.
+                # Raw shadow updates remain byte-for-byte compatible.
+                if channel == "light" and not isinstance(payload.get("clientToken"), str):
+                    continue
+                manual = part.get("manu") if isinstance(part, dict) else None
+                raw_level = manual.get("lv") if isinstance(manual, dict) else None
+                if channel == "dFan" and isinstance(part, dict):
+                    raw_mode = part.get("mode")
+                    auto_mode = (
+                        E42A_DFAN_AUTO_MODE
+                        if client_model_token(target_device.client_id) == "VSCTLE42A" else MODE_AUTO
+                    )
+                    if type(raw_mode) is int and raw_mode in (0, auto_mode):
+                        requested.append(((target_device.device_id, "dFan", "mode"), raw_mode))
+                valid_levels = (
+                    range(101) if channel == "light"
+                    else (*CFAN_LEVEL_MAP, 200) if channel == "cFan" else DFAN_LEVEL_MAP
+                )
+                if type(raw_level) is int and raw_level in valid_levels:
+                    requested.append(((target_device.device_id, channel, "level"), raw_level))
+            if requested:
+                token = payload.get("clientToken")
+                if not isinstance(token, str):
+                    token = uuid4().hex
+                    payload = {**payload, "clientToken": token}
+                command_token = token
+                self._begin_requested_fields(requested, token)
+            encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         topic = TOPIC_SHADOW_UPDATE.format(thing=target_device.client_id)
-        await mqtt_client.publish(topic, encoded, qos=qos)
+        try:
+            await mqtt_client.publish(topic, encoded, qos=qos)
+        except BaseException:
+            if command_token is not None:
+                self._clear_pending_token(target_device.device_id, command_token)
+                self._forget_confirmed_receipt(target_device.device_id, command_token)
+            raise
         self._support_capture.record(
             "shadow_update_request",
             data={
@@ -256,6 +360,234 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 **summarize_support_capture_payload(encoded),
             },
         )
+
+    async def async_publish_light_level(self, level: int, *, device_id: str) -> None:
+        """Send a local controller light command with immediate provisional feedback."""
+        if not self.is_mqtt_connected:
+            raise MQTTConnectionError("Cannot publish shadow update while MQTT is disconnected")
+        device = self._resolve_device(device_id)
+        if device.device_type != "controller":
+            raise VivosunResponseError("Light level commands require a controller")
+        payload: dict[str, object] = {**build_light_level_payload(level), "clientToken": uuid4().hex}
+        await self.async_publish_shadow_update(payload, device_id=device_id)
+
+    def _stage_confirmed_receipt(self, device_id: str, channel: str, token: str) -> None:
+        """Keep a short rejection receipt without claiming the output changed."""
+        timeout = asyncio.get_running_loop().call_later(
+            _FIELD_CONFIRMATION_TIMEOUT, self._forget_confirmed_receipt, device_id, token,
+        )
+        self._already_confirmed_tokens[token] = _ConfirmedCommandReceipt(device_id, channel, timeout)
+
+    def _forget_confirmed_receipt(self, device_id: str, token: str) -> str | None:
+        receipt = self._already_confirmed_tokens.get(token)
+        if receipt is None or receipt.device_id != device_id:
+            return None
+        receipt.timeout.cancel()
+        del self._already_confirmed_tokens[token]
+        return receipt.channel
+
+    def _begin_requested_fields(self, requested: list[tuple[_FieldKey, int]], token: str) -> None:
+        """Stage one local command atomically without changing reported cache."""
+        changed = False
+        confirmed_receipt: tuple[str, str] | None = None
+        requested_keys = {key for key, _ in requested}
+        for device_id, channel, field in requested_keys:
+            if channel == "dFan" and field == "mode":
+                level_key: _FieldKey = (device_id, "dFan", "level")
+                if level_key not in requested_keys:
+                    # A later mode-only preset leaves actual output in charge.
+                    # An older manual speed request is no longer local intent.
+                    old_level = self._pending_fields.pop(level_key, None)
+                    if old_level is not None:
+                        old_level.timeout.cancel()
+                        changed = True
+        for key, value in requested:
+            device_id, channel, field = key
+            self._locally_commanded_fields.add(key)
+            confirmed = self._shadow_states.get(device_id, {}).get(channel)
+            current = confirmed.get(field) if isinstance(confirmed, dict) else None
+            if key in self._has_reported_fields and key not in self._pending_fields and current == value:
+                confirmed_receipt = (device_id, channel)
+                continue
+            # Desired-only startup fallback is not confirmed physical readback.
+            if key not in self._has_reported_fields and isinstance(confirmed, dict):
+                confirmed.pop(field, None)
+                if field == "level":
+                    confirmed.pop("manual_level", None)
+                elif channel == "dFan":
+                    confirmed.pop("auto_enabled", None)
+            previous = self._pending_fields.pop(key, None)
+            superseded: frozenset[int] = frozenset()
+            if previous is not None:
+                previous.timeout.cancel()
+                superseded = previous.superseded_values | {previous.value}
+            self._field_generation += 1
+            generation = self._field_generation
+            baseline = confirmed.get(field) if isinstance(confirmed, dict) else None
+            provenance = self._reported_fields.get(key)
+            timeout = asyncio.get_running_loop().call_later(
+                _FIELD_CONFIRMATION_TIMEOUT, self._expire_pending_field, key, generation,
+            )
+            self._pending_fields[key] = _PendingField(
+                generation, token, value, baseline if type(baseline) is int else None,
+                provenance.version if provenance else None,
+                provenance.timestamp if provenance else None, superseded, timeout,
+            )
+            changed = True
+        if confirmed_receipt is not None:
+            self._stage_confirmed_receipt(*confirmed_receipt, token)
+        if changed:
+            self._notify_shadow_changed()
+
+    def _clear_pending_field(self, key: _FieldKey, token: str, *, notify: bool = True) -> bool:
+        pending = self._pending_fields.get(key)
+        if pending is None or pending.token != token:
+            return False
+        pending.timeout.cancel()
+        del self._pending_fields[key]
+        if notify:
+            self._notify_shadow_changed()
+        return True
+
+    def _clear_pending_token(self, device_id: str, token: str) -> set[str]:
+        """Drop only matching in-flight fields, keeping newer local intent."""
+        cleared: set[str] = set()
+        for key, pending in tuple(self._pending_fields.items()):
+            if key[0] == device_id and pending.token == token:
+                self._clear_pending_field(key, token, notify=False)
+                cleared.add(key[1])
+        if cleared:
+            self._notify_shadow_changed()
+        return cleared
+
+    def _expire_pending_field(self, key: _FieldKey, generation: int) -> None:
+        pending = self._pending_fields.get(key)
+        if pending is None or pending.generation != generation:
+            return
+        command = "Light command" if key[1] == "light" else f"{key[1]} {key[2]} command"
+        self._logger.warning(
+            "%s remains unconfirmed after %s seconds", command, _FIELD_CONFIRMATION_TIMEOUT,
+        )
+        self._clear_pending_field(key, pending.token)
+
+    def _reconcile_pending_field(
+        self, key: _FieldKey, value: object, version: int | None, timestamp: int | None,
+        *, reported_change: bool,
+    ) -> None:
+        pending = self._pending_fields.get(key)
+        if pending is None:
+            return
+        if (
+            _fresh_field_report(pending, version, timestamp, reported_change=reported_change)
+            and (value == pending.value or value not in pending.superseded_values)
+        ):
+            self._clear_pending_field(key, pending.token, notify=False)
+
+    def _accept_pending_fields(self, device_id: str, document: dict[str, object]) -> None:
+        """Cloud desired ACK establishes ordering, never physical confirmation."""
+        token = document.get("clientToken")
+        raw_version = document.get("version")
+        if not isinstance(token, str) or type(raw_version) is not int:
+            return
+        state = document.get("state")
+        desired = state.get("desired") if isinstance(state, dict) else None
+        for key, pending in self._pending_fields.items():
+            if key[0] != device_id or pending.token != token:
+                continue
+            _, channel, field = key
+            component = desired.get(channel) if isinstance(desired, dict) else None
+            if not isinstance(component, dict):
+                continue
+            if field == "mode":
+                requested = component.get("mode")
+            else:
+                manual = component.get("manu")
+                requested = manual.get("lv") if isinstance(manual, dict) else None
+            if requested != pending.value:
+                continue
+            pending.accepted_version = raw_version
+            pending.accepted_timestamp = _desired_field_timestamp(document, channel, field)
+
+    def _reconcile_reported_fields(
+        self, device_id: str, document: dict[str, object], parsed: ShadowV1State, topic: str,
+    ) -> None:
+        """One readback/freshness path for supported controller fields."""
+        body = document.get("current", document)
+        if not isinstance(body, dict):
+            return
+        raw_version = body.get("version")
+        version = raw_version if type(raw_version) is int else None
+        reported = extract_shadow_reported(document)
+        for channel in _CONTROLLER_CHANNELS:
+            component = reported.get(channel) if isinstance(reported, dict) else None
+            if not isinstance(component, dict):
+                # Legacy desired-only startup values remain visible until
+                # a real report or local command establishes the boundary.
+                if any(
+                    key[0] == device_id and key[1] == channel
+                    for key in self._has_reported_fields | self._locally_commanded_fields
+                ):
+                    cast("dict[str, object]", parsed).pop(channel, None)
+                continue
+            projected = parsed.get(channel)
+            if not isinstance(projected, dict):
+                continue
+            # Retain the original light rule for an older whole-shadow version.
+            light_provenance = self._reported_fields.get((device_id, "light", "level"))
+            if (
+                channel == "light" and light_provenance is not None
+                and version is not None and light_provenance.version is not None
+                and version < light_provenance.version
+            ):
+                cast("dict[str, object]", parsed).pop("light", None)
+                continue
+            fields: tuple[_Field, ...] = ("level", "mode") if channel == "dFan" else ("level",)
+            for field in fields:
+                if field not in projected:
+                    continue
+                key = (device_id, channel, field)
+                value = projected[field]
+                timestamp = _reported_field_timestamp(body, channel, field)
+                last = self._reported_fields.get(key)
+                confirmed = self._shadow_states.get(device_id, {}).get(channel)
+                previous_value = confirmed.get(field) if isinstance(confirmed, dict) else None
+                pending = self._pending_fields.get(key)
+                reported_change = topic.endswith("/update/accepted") or (
+                    topic.endswith("/update/documents")
+                    and _documents_changed_reported_field(document, channel, field, value, timestamp)
+                )
+                ambiguous_get = pending is not None and topic.endswith("/get/accepted") and (
+                    timestamp is None or (
+                        pending.accepted_version is not None and version is not None
+                        and version <= pending.accepted_version
+                    )
+                )
+                stale = last is not None and (
+                    (version is not None and last.version is not None and version < last.version)
+                    or (timestamp is not None and last.timestamp is not None and (
+                        timestamp < last.timestamp or (
+                            timestamp == last.timestamp and value != previous_value and not reported_change
+                        )
+                    ))
+                )
+                if ambiguous_get or stale:
+                    cast("dict[str, object]", projected).pop(field, None)
+                    if field == "level":
+                        cast("dict[str, object]", projected).pop("manual_level", None)
+                    elif channel == "dFan":
+                        cast("dict[str, object]", projected).pop("auto_enabled", None)
+                    continue
+                # Missing metadata cannot erase previously known leaf ordering.
+                self._reported_fields[key] = _ReportedFieldProvenance(
+                    version if version is not None else last.version if last else None,
+                    timestamp if timestamp is not None else last.timestamp if last else None,
+                )
+                self._has_reported_fields.add(key)
+                self._reconcile_pending_field(key, value, version, timestamp, reported_change=reported_change)
+
+    def _notify_shadow_changed(self) -> None:
+        self.data = self._build_state_snapshot()
+        self.async_update_listeners()
 
     def _resolve_device(self, device_id: str | None) -> DeviceInfo:
         """Resolve a device_id to DeviceInfo, defaulting to primary."""
@@ -365,6 +697,16 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             await mqtt_client.subscribe(extra_topics)
             self._logger.debug("Subscribed to MQTT topics for %s", device.name)
 
+        # Rejection monitoring is optional. Missing cloud permissions must not
+        # prevent ordinary shadow subscriptions or control.
+        for device in self._devices:
+            if device.device_type != "controller":
+                continue
+            try:
+                await mqtt_client.subscribe([(TOPIC_SHADOW_UPDATE_REJECTED.format(thing=device.client_id), 1)])
+            except (MQTTError, TimeoutError):
+                self._logger.warning("Cloud command rejection subscription unavailable; timeout remains active")
+
         if self._support_capture.active:
             self._schedule_support_capture_initialization()
 
@@ -376,6 +718,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     async def _disconnect_mqtt_client(self) -> None:
         mqtt_client = self._mqtt_client
         self._mqtt_client = None
+        had_pending = bool(self._pending_fields)
+        for pending in self._pending_fields.values():
+            pending.timeout.cancel()
+        self._pending_fields.clear()
+        for receipt in self._already_confirmed_tokens.values():
+            receipt.timeout.cancel()
+        self._already_confirmed_tokens.clear()
+        if had_pending:
+            self._notify_shadow_changed()
         if mqtt_client is not None:
             await mqtt_client.disconnect()
 
@@ -411,7 +762,19 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         try:
             # Shadow topics: $aws/things/{client_id}/shadow/...
             if "/shadow/" in topic:
-                if (
+                if topic.endswith("/update/rejected"):
+                    document = self._parse_json_object(payload)
+                    token = document.get("clientToken")
+                    if isinstance(token, str):
+                        rejected_channels = self._clear_pending_token(device_id, token)
+                        receipt_channel = self._forget_confirmed_receipt(device_id, token)
+                        if receipt_channel is not None:
+                            rejected_channels.add(receipt_channel)
+                        for channel in rejected_channels:
+                            self._logger.warning(
+                                "Cloud rejected %s command (code=%s)", channel, document.get("code"),
+                            )
+                elif (
                     topic.endswith("/get/accepted")
                     or topic.endswith("/update/accepted")
                     or "/update/documents" in topic
@@ -424,6 +787,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                         else MODE_AUTO
                     )
                     parsed_shadow = parse_shadow_document(document, dfan_auto_mode=auto_mode)
+                    if device is not None and device.device_type == "controller":
+                        self._reconcile_reported_fields(device_id, document, parsed_shadow, topic)
+                        if topic.endswith("/update/accepted"):
+                            self._accept_pending_fields(device_id, document)
+                            response_token = document.get("clientToken")
+                            if isinstance(response_token, str):
+                                self._forget_confirmed_receipt(device_id, response_token)
                     self._merge_shadow_state(device_id, parsed_shadow)
                     if "plan" in parsed_shadow:
                         await self._refresh_plan_stages(force_refresh_active=True)
@@ -453,8 +823,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         if updated:
             await self._refresh_plan_stages()
             # MQTT pushes must not restart Home Assistant's REST poll timer.
-            self.data = self._build_state_snapshot()
-            self.async_update_listeners()
+            self._notify_shadow_changed()
 
     def _route_topic_to_device(self, topic: str) -> str | None:
         """Extract device_id from an MQTT topic by matching client_id or topic_prefix."""
@@ -888,6 +1257,20 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             "plan_stages": dict(self._plan_stage_cache),
             "mqtt_connected": self.is_mqtt_connected,
         }
+        shadows = cast("dict[str, dict[str, object]]", snapshot["shadows"])
+        for (device_id, channel, field), pending in self._pending_fields.items():
+            component = shadows.setdefault(device_id, {}).setdefault(channel, {})
+            if not isinstance(component, dict):
+                continue
+            component[field] = pending.value
+            if channel == "dFan" and field == "mode":
+                device = self.get_device(device_id)
+                auto_mode = (
+                    E42A_DFAN_AUTO_MODE
+                    if device is not None and client_model_token(device.client_id) == "VSCTLE42A"
+                    else MODE_AUTO
+                )
+                component["auto_enabled"] = pending.value == auto_mode
         return snapshot
 
     async def _async_refresh_stale_shadow_states(self) -> None:
@@ -1064,3 +1447,111 @@ def _deep_merge_mapping(target: dict[str, object], source: dict[str, object]) ->
             )
             continue
         target[key] = deepcopy(value)
+
+
+def _fan_level_timestamp(document: dict[str, object], channel: str, *, reported: bool) -> int | None:
+    """Read per-leaf fan level metadata from the matching shadow projection."""
+    state = document.get("state")
+    state_root = state.get("reported" if reported else "desired") if isinstance(state, dict) else None
+    raw_component = state_root.get(channel) if isinstance(state_root, dict) else None
+    raw_manual = raw_component.get("manu") if isinstance(raw_component, dict) else None
+    # Duct fan treats any present root lv (including explicit null) as final.
+    # Circulation fan falls back to manu.lv when root lv is invalid.
+    use_direct = reported and isinstance(raw_component, dict) and "lv" in raw_component and (
+        channel == "dFan"
+        or type(raw_component["lv"]) is int
+        or not isinstance(raw_manual, dict)
+        or "lv" not in raw_manual
+    )
+    metadata = document.get("metadata")
+    root = metadata.get("reported" if reported else "desired") if isinstance(metadata, dict) else None
+    component = root.get(channel) if isinstance(root, dict) else None
+    manual = component.get("manu") if isinstance(component, dict) else None
+    leaf = component.get("lv") if use_direct and isinstance(component, dict) else (
+        manual.get("lv") if isinstance(manual, dict) else None
+    )
+    value = leaf.get("timestamp") if isinstance(leaf, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
+def _mode_timestamp(document: dict[str, object], channel: str, *, reported: bool) -> int | None:
+    metadata = document.get("metadata")
+    state_metadata = metadata.get("reported" if reported else "desired") if isinstance(metadata, dict) else None
+    component = state_metadata.get(channel) if isinstance(state_metadata, dict) else None
+    leaf = component.get("mode") if isinstance(component, dict) else None
+    timestamp = leaf.get("timestamp") if isinstance(leaf, dict) else None
+    return timestamp if type(timestamp) is int and timestamp >= 0 else None
+
+
+def _reported_field_timestamp(document: dict[str, object], channel: _Channel, field: _Field) -> int | None:
+    if field == "mode":
+        return _mode_timestamp(document, channel, reported=True)
+    if channel == "light":
+        return reported_light_level_timestamp(document)
+    return _fan_level_timestamp(document, channel, reported=True)
+
+
+def _desired_field_timestamp(document: dict[str, object], channel: _Channel, field: _Field) -> int | None:
+    if field == "mode":
+        return _mode_timestamp(document, channel, reported=False)
+    if channel == "light":
+        return accepted_desired_light_level_timestamp(document)
+    return _fan_level_timestamp(document, channel, reported=False)
+
+
+def _documents_changed_reported_field(
+    document: dict[str, object], channel: _Channel, field: _Field,
+    current_value: object, current_timestamp: int | None,
+) -> bool:
+    """Only changes to this reported leaf establish device-write evidence."""
+    previous = document.get("previous")
+    if not isinstance(previous, dict):
+        return False
+    previous_reported = extract_shadow_reported(previous)
+    if previous_reported is None:
+        return True
+    previous_timestamp = _reported_field_timestamp(previous, channel, field)
+    if previous_timestamp is not None and current_timestamp is not None and current_timestamp > previous_timestamp:
+        return True
+    old = cast("dict[str, object]", parse_reported_fragment(previous_reported)).get(channel)
+    return not isinstance(old, dict) or field not in old or old[field] != current_value
+
+
+def _fresh_field_report(
+    pending: _PendingField, version: int | None, timestamp: int | None, *, reported_change: bool,
+) -> bool:
+    """Require reported-leaf freshness or a demonstrably later reported write.
+
+    Shadow versions alone are not field timestamps. An accepted desired request
+    gives cloud ordering evidence, but is never device confirmation itself.
+    """
+    if version is not None and pending.baseline_version is not None and version <= pending.baseline_version:
+        return False
+    if version is not None and pending.accepted_version is not None and version <= pending.accepted_version:
+        return False
+    if timestamp is not None and pending.baseline_timestamp is not None and timestamp < pending.baseline_timestamp:
+        return False
+
+    if pending.accepted_timestamp is not None:
+        if timestamp is not None and timestamp > pending.accepted_timestamp:
+            return pending.baseline_timestamp is None or timestamp > pending.baseline_timestamp
+        if timestamp is not None and timestamp < pending.accepted_timestamp:
+            return False
+        # Equal-second timestamps cannot order reports. A direct reported write
+        # *after* the cloud accepted the command can, using the version order.
+        return (
+            reported_change and pending.accepted_version is not None and version is not None
+            and version > pending.accepted_version
+        )
+
+    if pending.accepted_version is not None:
+        return reported_change and version is not None and version > pending.accepted_version
+
+    # The cloud ACK may be absent or delayed. A write to reported, not a GET
+    # snapshot or a newer desired-only document, can still supersede the
+    # locally displayed request based on field change relative to baseline.
+    if not reported_change:
+        return False
+    if timestamp is not None and pending.baseline_timestamp is not None:
+        return timestamp > pending.baseline_timestamp
+    return version is not None and pending.baseline_version is not None and version > pending.baseline_version
