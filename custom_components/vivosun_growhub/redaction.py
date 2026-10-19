@@ -38,6 +38,7 @@ _PARTIAL_IDENTIFIER_MARKERS = (
 _DEBUG_PRESERVED_LENGTH = 3
 _HASH_LENGTH = 8
 _CAPTURE_PROGRAM_ID_FIELDS = frozenset({"userplanid", "userplanstageid"})
+_HARDWARE_ID_FIELDS = frozenset({"hwid", "hardwareid"})
 _PRIVATE_CAPTURE_FIELDS = frozenset({
     "account", "accountid", "owner", "ownerid", "tenant", "tenantid", "user", "userid", "username", "email",
     "identity", "identityid", "devuser",
@@ -99,6 +100,8 @@ def is_sensitive_capture_key(key: str) -> bool:
     """Recognize private fields without treating device, scene or program identifiers as secrets."""
     for part in key.split("."):
         normalized = part.lower().replace("_", "").replace("-", "")
+        if normalized in _HARDWARE_ID_FIELDS:
+            return True
         if normalized in _CAPTURE_PROGRAM_ID_FIELDS:
             continue
         words = re.split(r"[_-]|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", part)
@@ -113,6 +116,8 @@ def is_sensitive_capture_key(key: str) -> bool:
 
 
 def _sanitize_value(key: str, value: object, *, capture: bool = False) -> object:
+    if any(part.lower().replace("_", "").replace("-", "") in _HARDWARE_ID_FIELDS for part in key.split(".")):
+        return REDACTED
     if capture and is_sensitive_capture_key(key):
         return REDACTED
     key_lower = key.lower()
