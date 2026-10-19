@@ -182,7 +182,7 @@ async def test_diagnostics_preserves_opted_in_capture_evidence_without_exposing_
         "deviceId": "capture-device", "sceneId": 1234, "programId": "program-42",
         "mode": "automatic", "target": "55.0",
         "accountId": "private-account", "authHeader": "private-auth",
-        "probe": {"userId": 98765432, "gpsLat": 12.3, "ipAddr": "10.1.2.3"},
+        "probe": {"userId": 98765432, "gpsLat": 12.3, "ipAddr": "10.1.2.3", "hwId": "synthetic-hardware-42"},
     }
     capture.record_rest_telemetry_result("capture-device", summarize_rest_telemetry(row))
     capture.record("mqtt_publish", data=summarize_support_capture_payload(json.dumps(row).encode()))
@@ -207,9 +207,12 @@ async def test_diagnostics_preserves_opted_in_capture_evidence_without_exposing_
         assert retained["programId"] == "program-42"
         assert retained["mode"] == "automatic"
         assert retained["target"] == "55.0"
-        assert retained["probe"] == {"userId": "***", "gpsLat": "***", "ipAddr": "***"}
+        assert retained["probe"] == {"userId": "***", "gpsLat": "***", "ipAddr": "***", "hwId": "***"}
     encoded = json.dumps(result)
-    for private in ("private-account", "private-auth", "98765432", "10.1.2.3", "user@example.com", "super-secret"):
+    for private in (
+        "private-account", "private-auth", "98765432", "10.1.2.3", "synthetic-hardware-42",
+        "user@example.com", "super-secret",
+    ):
         assert private not in encoded
     # Normal diagnostics retain their stricter routing/identifier policy.
     assert result["device"]["device_id"] != coordinator.device.device_id
@@ -277,6 +280,7 @@ async def test_diagnostics_includes_redacted_skipped_devices(
                     "deviceId": "raw-device-id",
                     "clientId": "vivosun-VSCTLE42A-account-device-1",
                     "topicPrefix": "vivosun/topic/1",
+                    "settings": [{"hw_id": "synthetic-hardware-skipped"}],
                 },
             }
         ]
@@ -296,6 +300,7 @@ async def test_diagnostics_includes_redacted_skipped_devices(
     assert "raw-device-id" not in serialized
     assert "vivosun-VSCTLE42A-account-device-1" not in serialized
     assert "vivosun/topic/1" not in serialized
+    assert "synthetic-hardware-skipped" not in serialized
 
 
 async def test_diagnostics_handles_missing_runtime(

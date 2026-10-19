@@ -189,9 +189,7 @@ def test_rest_telemetry_preserves_strings_and_device_ids_but_masks_private_field
     assert telemetry["humid"] == 54
     assert telemetry["futureSensor"] == 42.5
     for key in private:
-        if key == "hwId":
-            assert telemetry["probe"][key] == private[key]
-        elif key == "clientId":
+        if key == "clientId":
             assert telemetry["probe"][key] != private[key]
         else:
             assert telemetry["probe"][key] == "***"
@@ -208,7 +206,7 @@ def test_rest_telemetry_preserves_strings_and_device_ids_but_masks_private_field
     assert telemetry["location"] == "***"
     assert summary["telemetry_redacted_values"] > 0
     encoded = json.dumps(summary, allow_nan=False)
-    assert not any(str(value) in encoded for key, value in private.items() if key != "hwId")
+    assert not any(str(value) in encoded for value in private.values() if not isinstance(value, dict))
     assert row["probe"] == private
 
 
