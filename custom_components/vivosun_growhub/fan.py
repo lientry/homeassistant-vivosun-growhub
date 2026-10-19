@@ -8,16 +8,16 @@ from typing import TYPE_CHECKING, cast
 
 import voluptuous as vol
 from homeassistant.components.fan import FanEntity, FanEntityFeature
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import async_get_current_platform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, E42A_DFAN_AUTO_MODE, MODE_AUTO
+from .const import DOMAIN, E42A_DFAN_AUTO_MODE, MODE_AUTO, OPTION_CFAN_OSCILLATION_CONTROLLERS
 from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
 from .shadow import (
     build_cfan_level_payload,
-    build_cfan_night_mode_payload,
     build_cfan_oscillate_payload,
     build_dfan_auto_mode_payload,
     build_dfan_auto_threshold_payload,
@@ -28,7 +28,7 @@ from .shadow import (
     dfan_shadow_to_percentage,
 )
 
-_CIRCULATION_PRESETS = ["normal", "night", "natural_wind"]
+_CIRCULATION_PRESETS = ["natural_wind"]
 _DUCT_PRESETS = ["manual", "auto"]
 _DEFAULT_TURN_ON_PERCENTAGE = 10
 _TURN_ON_FEATURE = getattr(FanEntityFeature, "TURN_ON", FanEntityFeature(0))
@@ -64,7 +64,7 @@ async def async_setup_entry(
             device_id = device.device_id
             async_add_entities(
                 [
-                    VivosunCirculationFanEntity(coordinator, device_id),
+                    VivosunCirculationFanEntity(coordinator, device_id, entry=entry),
                     VivosunDuctFanEntity(coordinator, device_id),
                 ]
             )
@@ -85,6 +85,7 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
 
     _attr_has_entity_name = True
     _attr_speed_count = 10
+    _manual_channel: str
     _enable_turn_on_off_backwards_compatibility = FanEntityFeature(0) == _EXPLICIT_TURN_FEATURES
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
@@ -120,20 +121,30 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
             raw_preset = kwargs.get("preset_mode")
             if isinstance(raw_preset, str):
                 requested_preset = raw_preset
-        if requested_preset is not None:
-            await self.async_set_preset_mode(requested_preset)
-
         requested_percentage = percentage
         if requested_percentage is None:
             raw_percentage = kwargs.get("percentage")
             if isinstance(raw_percentage, int):
                 requested_percentage = raw_percentage
 
-        # Auto selects its own speed; a manual level would cancel it.
-        if requested_preset == "auto" and requested_percentage is None:
+        if requested_preset is not None:
+            if requested_percentage is None:
+                await self.async_set_preset_mode(requested_preset)
+            elif requested_preset not in (self.preset_modes or []):
+                raise ValueError(f"Unsupported {self._manual_channel} preset: {requested_preset}")
+
+        # The device chooses speed in these modes. Do not overwrite the selection.
+        if requested_preset in ("auto", "natural_wind") and requested_percentage is None:
             return
 
-        # Presets such as natural_wind intentionally do not expose a percentage.
+        if (
+            self._manual_channel == "cFan"
+            and requested_preset is None
+            and requested_percentage is None
+            and self.preset_mode == "natural_wind"
+        ):
+            return
+
         if requested_preset is not None and requested_percentage is None and self.percentage is None:
             return
 
@@ -190,18 +201,38 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
     """Representation of the circulation fan (cFan)."""
 
     _attr_name = "Circulation Fan"
+    _attr_translation_key = "circulation_fan"
     _attr_supported_features = (
         _EXPLICIT_TURN_FEATURES
         | FanEntityFeature.SET_SPEED
-        | FanEntityFeature.OSCILLATE
         | FanEntityFeature.PRESET_MODE
     )
     _attr_preset_modes = _CIRCULATION_PRESETS
+    _manual_channel = "cFan"
 
-    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
+    def __init__(
+        self, coordinator: VivosunCoordinator, device_id: str, *, entry: ConfigEntry | None = None,
+    ) -> None:
         """Initialize the circulation fan entity."""
         super().__init__(coordinator, device_id)
+        self._config_entry = entry
         self._attr_unique_id = f"vivosun_growhub_{device_id}_cfan"
+
+    @property
+    def _oscillation_enabled(self) -> bool:
+        """A controller must be opted in before exposing an oscillation control."""
+        entry = self._config_entry
+        if entry is None:
+            return False
+        selected = entry.options.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
+        return isinstance(selected, list) and self._device_id in selected
+
+    @property
+    def supported_features(self) -> FanEntityFeature:
+        """Expose native oscillation only for opted-in controllers."""
+        if self._oscillation_enabled:
+            return self._attr_supported_features | FanEntityFeature.OSCILLATE
+        return self._attr_supported_features
 
     @property
     def percentage(self) -> int | None:
@@ -211,6 +242,8 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
     @property
     def oscillating(self) -> bool | None:
         """Return whether oscillation is enabled."""
+        if not self._oscillation_enabled:
+            return None
         oscillating = self._cfan_state().get("oscillating")
         if isinstance(oscillating, bool):
             return oscillating
@@ -221,9 +254,6 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
         """Return current circulation fan preset mode."""
         if _as_int(self._cfan_state().get("level")) == 200:
             return "natural_wind"
-        night_mode = self._cfan_state().get("night_mode")
-        if isinstance(night_mode, bool):
-            return "night" if night_mode else "normal"
         return None
 
     async def async_set_percentage(self, percentage: int) -> None:
@@ -235,6 +265,11 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
 
     async def async_oscillate(self, oscillating: bool) -> None:
         """Set circulation fan oscillation."""
+        if not self._oscillation_enabled:
+            raise ServiceValidationError(
+                "Oscillation control is disabled for this circulation fan. "
+                "Enable it in Vivosun integration options only if the Vivosun app offers this control."
+            )
         await self.coordinator.async_publish_shadow_update(
             build_cfan_oscillate_payload(oscillating), device_id=self._device_id
         )
@@ -244,16 +279,6 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
         if preset_mode == "natural_wind":
             await self.coordinator.async_publish_shadow_update(
                 build_cfan_level_payload(200), device_id=self._device_id
-            )
-            return
-        if preset_mode == "night":
-            await self.coordinator.async_publish_shadow_update(
-                build_cfan_night_mode_payload(True), device_id=self._device_id
-            )
-            return
-        if preset_mode == "normal":
-            await self.coordinator.async_publish_shadow_update(
-                build_cfan_night_mode_payload(False), device_id=self._device_id
             )
             return
         raise ValueError(f"Unsupported circulation fan preset: {preset_mode}")
@@ -272,6 +297,12 @@ class VivosunDuctFanEntity(_VivosunFanBase):
         | FanEntityFeature.PRESET_MODE
     )
     _attr_preset_modes = _DUCT_PRESETS
+    _manual_channel = "dFan"
+
+    @property
+    def is_on(self) -> bool:
+        """Auto is logically enabled even when the current output is zero."""
+        return self.preset_mode == "auto" or super().is_on
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
         """Initialize the duct fan entity."""

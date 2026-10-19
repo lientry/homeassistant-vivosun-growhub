@@ -38,6 +38,7 @@ class _StubCoordinator:
         self._devices = devices or [_controller_device(_DEV_ID)]
         self.is_mqtt_connected = True
         self.async_publish_shadow_update = AsyncMock()
+        self.async_publish_light_level = AsyncMock()
 
     @property
     def device(self) -> DeviceInfo:
@@ -122,30 +123,28 @@ async def test_light_turn_on_and_off_publishes_shadow_payloads() -> None:
     entity = _make_light(coordinator)
 
     await entity.async_turn_on(**{ATTR_BRIGHTNESS: 255})
-    coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_light_level_payload(100), device_id=_DEV_ID
+    coordinator.async_publish_light_level.assert_awaited_once_with(
+        100, device_id=_DEV_ID
     )
 
-    coordinator.async_publish_shadow_update.reset_mock()
+    coordinator.async_publish_light_level.reset_mock()
     coordinator.data = {"shadows": {_DEV_ID: {"light": {"level": 0}}}}
     await entity.async_turn_on()
-    coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_light_level_payload(25), device_id=_DEV_ID
+    coordinator.async_publish_light_level.assert_awaited_once_with(
+        25, device_id=_DEV_ID
     )
 
-    coordinator.async_publish_shadow_update.reset_mock()
+    coordinator.async_publish_light_level.reset_mock()
     await entity.async_turn_on(**{ATTR_BRIGHTNESS: 0, "spectrum": 40})
-    assert coordinator.async_publish_shadow_update.await_count == 2
-    calls = coordinator.async_publish_shadow_update.await_args_list
-    assert calls[0].args[0] == build_light_level_payload(0)
-    assert calls[0].kwargs["device_id"] == _DEV_ID
-    assert calls[1].args[0] == build_light_spectrum_payload(40)
-    assert calls[1].kwargs["device_id"] == _DEV_ID
-
-    coordinator.async_publish_shadow_update.reset_mock()
-    await entity.async_turn_off()
+    coordinator.async_publish_light_level.assert_awaited_once_with(0, device_id=_DEV_ID)
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_light_level_payload(0), device_id=_DEV_ID
+        build_light_spectrum_payload(40), device_id=_DEV_ID,
+    )
+
+    coordinator.async_publish_light_level.reset_mock()
+    await entity.async_turn_off()
+    coordinator.async_publish_light_level.assert_awaited_once_with(
+        0, device_id=_DEV_ID
     )
 
 
@@ -154,9 +153,10 @@ async def test_light_turn_on_clamps_nonzero_levels_to_device_minimum() -> None:
     entity = _make_light(coordinator)
 
     await entity.async_turn_on(**{ATTR_BRIGHTNESS: 10})
-    coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_light_level_payload(25), device_id=_DEV_ID
+    coordinator.async_publish_light_level.assert_awaited_once_with(
+        4, device_id=_DEV_ID
     )
+    assert build_light_level_payload(4) == build_light_level_payload(25)
 
 
 async def test_light_brightness_boundaries() -> None:

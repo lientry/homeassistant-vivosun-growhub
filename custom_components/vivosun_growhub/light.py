@@ -10,7 +10,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN, LIGHT_MIN_BRIGHTNESS
 from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
-from .shadow import build_light_level_payload, build_light_spectrum_payload
+from .shadow import build_light_spectrum_payload
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -105,13 +105,9 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
         brightness = kwargs.get("brightness")
         if isinstance(brightness, int):
             level = round(brightness * 100 / 255)
-            await self.coordinator.async_publish_shadow_update(
-                build_light_level_payload(level), device_id=self._device_id
-            )
+            await self.coordinator.async_publish_light_level(level, device_id=self._device_id)
         elif self._light_level() in (None, 0):
-            await self.coordinator.async_publish_shadow_update(
-                build_light_level_payload(LIGHT_MIN_BRIGHTNESS), device_id=self._device_id
-            )
+            await self.coordinator.async_publish_light_level(LIGHT_MIN_BRIGHTNESS, device_id=self._device_id)
 
         spectrum = kwargs.get("spectrum")
         if isinstance(spectrum, int):
@@ -122,9 +118,7 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
     async def async_turn_off(self, **kwargs: object) -> None:
         """Turn off the light."""
         _ = kwargs
-        await self.coordinator.async_publish_shadow_update(
-            build_light_level_payload(0), device_id=self._device_id
-        )
+        await self.coordinator.async_publish_light_level(0, device_id=self._device_id)
 
     def _light_state(self) -> Mapping[str, object]:
         return shadow_slice(self.coordinator, self._device_id, "light")

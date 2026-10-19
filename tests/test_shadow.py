@@ -14,7 +14,6 @@ from custom_components.vivosun_growhub.shadow import (
     build_aircd_on_payload,
     build_aircd_target_temp_payload,
     build_cfan_level_payload,
-    build_cfan_night_mode_payload,
     build_cfan_oscillate_payload,
     build_dfan_auto_mode_payload,
     build_dfan_auto_threshold_payload,
@@ -99,7 +98,6 @@ def test_parse_shadow_document_full_reported_state() -> None:
         "level": 40,
         "manual_level": 35,
         "oscillating": True,
-        "night_mode": False,
     }
     assert parsed["dFan"]["auto_enabled"] is True
     assert parsed["dFan"]["auto"]["tMin"] is None
@@ -306,7 +304,6 @@ def test_non_level_payload_builders_match_required_structure() -> None:
     assert build_light_mode_payload(2) == {"state": {"desired": {"light": {"mode": 2}}}}
     assert build_light_spectrum_payload(42) == {"state": {"desired": {"light": {"manu": {"spec": 42}}}}}
     assert build_cfan_oscillate_payload(True) == {"state": {"desired": {"cFan": {"osc": 1}}}}
-    assert build_cfan_night_mode_payload(False) == {"state": {"desired": {"cFan": {"nw": 0}}}}
     assert build_dhmdf_on_payload(True) == {"state": {"desired": {"dhmdf": {"pause": 0}}}}
     assert build_dhmdf_on_payload(False) == {"state": {"desired": {"dhmdf": {"pause": 1}}}}
     assert build_dhmdf_target_payload(6000) == {
