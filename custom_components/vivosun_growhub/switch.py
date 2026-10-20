@@ -13,7 +13,7 @@ from .const import DOMAIN
 from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
-from .ports import A22_PORTS, PortReport, build_manual_port_payload, reported_port
+from .ports import PORTS_BY_MODEL, PortReport, build_manual_port_payload, reported_port
 from .vseed import STAGES, command, reported_seed
 
 if TYPE_CHECKING:
@@ -57,9 +57,13 @@ async def async_setup_entry(
 
     entities: list[SwitchEntity] = []
     for device in coordinator.devices:
-        if client_model_token(device.client_id) == "VSPLUGA22":
-            entities.extend(VivosunPortSwitch(coordinator, device.device_id, port) for port in A22_PORTS)
-            continue
+        model = client_model_token(device.client_id)
+        if model in PORTS_BY_MODEL:
+            entities.extend(
+                VivosunPortSwitch(coordinator, device.device_id, port, model) for port in PORTS_BY_MODEL[model]
+            )
+            if model == "VSPLUGA22":
+                continue
         if device.device_type == "vseed":
             entities.append(VivosunSeedIrrigationSwitch(coordinator, device.device_id))
             for phase in (1, 2, 3):
@@ -73,17 +77,18 @@ async def async_setup_entry(
 
 
 class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  # type: ignore[misc]
-    """Physical A22 output with reported status and guarded manual power writes."""
+    """Physical A22 or VGrow output with reported status and guarded manual writes."""
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:power-socket"
 
-    def __init__(self, coordinator: VivosunCoordinator, device_id: str, port: str) -> None:
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str, port: str, model: str) -> None:
         super().__init__(coordinator)
-        if port not in A22_PORTS:
-            raise ValueError("Unsupported A22 port")
+        if port not in PORTS_BY_MODEL.get(model, ()):
+            raise ValueError("Unsupported model/physical port")
         self._device_id = device_id
         self._port = port
+        self._model_name = "GrowHub A22" if model == "VSPLUGA22" else "VGrow"
         self._attr_name = port.upper() if port.startswith("usb") else f"Outlet {port[-1]}"
         self._attr_unique_id = f"vivosun_growhub_{device_id}_{port}"
 
@@ -114,10 +119,10 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
 
     async def _publish(self, on: bool) -> None:
         if not is_entity_available(self.coordinator, self._device_id):
-            raise HomeAssistantError(f"GrowHub A22 {self._attr_name} is unavailable")
+            raise HomeAssistantError(f"{self._model_name} {self._attr_name} is unavailable")
         report = self._report()
         if report.is_on is None:
-            raise HomeAssistantError(f"GrowHub A22 {self._attr_name} has no reported output level")
+            raise HomeAssistantError(f"{self._model_name} {self._attr_name} has no reported output level")
         if not report.can_write:
             raise ServiceValidationError(
                 f"Cannot control {self._attr_name}: manual mode and no active plan must both be reported "
