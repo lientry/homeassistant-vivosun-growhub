@@ -57,6 +57,7 @@ from .support_capture import (
     SupportCaptureManager,
     summarize_support_capture_payload,
 )
+from .vseed import POINT_LOG_KEYS
 
 if TYPE_CHECKING:
     import aiohttp
@@ -775,7 +776,11 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 point_log = await self._api.get_point_log(
                     tokens, device, start_time=start_time, end_time=end_time
                 )
-                if point_log:
+                if device.device_type == "vseed":
+                    self._sensor_states.setdefault(device.device_id, {}).update(
+                        {key: point_log.get(key) for key in POINT_LOG_KEYS}
+                    )
+                elif point_log:
                     self._sensor_states.setdefault(device.device_id, {}).update(
                         cast("dict[str, object]", point_log)
                     )

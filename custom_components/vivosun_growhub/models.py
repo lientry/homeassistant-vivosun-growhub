@@ -59,6 +59,8 @@ def infer_device_type(name: str, client_id: str = "") -> str:
     model_token = client_model_token(client_id)
     if model_token == "VSPLUGA22":
         return "a22"
+    if model_token == "VSSBS40":
+        return "vseed"
     if model_token == "VSACA08":
         return "air_conditioner"
     if model_token.startswith("VSCTL") or "growhub" in combined or "controller" in combined:

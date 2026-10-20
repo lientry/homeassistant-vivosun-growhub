@@ -11,7 +11,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
-from .entity_helpers import build_device_info, shadow_slice
+from .entity_helpers import build_device_info, is_entity_available, shadow_slice
+from .vseed import STAGES, command, reported_seed, stage_name
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -58,8 +59,46 @@ async def async_setup_entry(
             VivosunCureModeSelect(coordinator, device.device_id)
             for device in coordinator.devices
             if device.device_type == "curing_box"
+        ] + [
+            VivosunSeedStageSelect(coordinator, device.device_id)
+            for device in coordinator.devices
+            if device.device_type == "vseed"
         ]
     )
+
+
+class VivosunSeedStageSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]
+    """Select the S40 growth stage; reflect only reported firmware state."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Growth Stage"
+    _attr_icon = "mdi:sprout"
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_options = list(STAGES)
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_seed_stage"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(self.coordinator, self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return is_entity_available(self.coordinator, self._device_id)
+
+    @property
+    def current_option(self) -> str | None:
+        state = reported_seed(self.coordinator, self._device_id).get("state")
+        return stage_name(state) if type(state) is int else None  # type: ignore[arg-type]
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in STAGES:
+            raise ValueError("Unknown VSeed stage")
+        await self.coordinator.async_publish_shadow_update(
+            command(("state",), STAGES.index(option)), device_id=self._device_id, qos=1
+        )
 
 
 class VivosunCureModeSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]

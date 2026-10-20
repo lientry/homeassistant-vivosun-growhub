@@ -54,6 +54,7 @@ from .models import (
 )
 from .redaction import redact_identifier, sanitize_mapping_for_debug
 from .support_capture import summarize_rest_telemetry
+from .vseed import parse_point_log
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 _AUTH_MESSAGE_MARKERS = ("auth", "credential", "forbidden", "invalid", "login", "password", "token", "unauthorized")
 _SP_APP_ID = "com.vivosun.android"
-_NO_SCENE_DEVICE_TYPES = frozenset({"curing_box"})
+_NO_SCENE_DEVICE_TYPES = frozenset({"curing_box", "vseed"})
 
 
 class VivosunApiClient:
@@ -154,6 +155,13 @@ class VivosunApiClient:
         device_type = infer_device_type(name, client_id or "")
         scene_id = self._optional_scene_id(device)
         supports_point_log = scene_id is not None or device_type in _NO_SCENE_DEVICE_TYPES
+        if device_type == "vseed":
+            if client_id is not None and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", client_id) is None:
+                client_id = None
+            if topic_prefix is not None and (
+                len(topic_prefix) > 512 or any(char in topic_prefix for char in ("+", "#", "\x00"))
+            ):
+                topic_prefix = None
         camera_username, camera_password = self._extract_camera_credentials(device)
 
         if device_type == "unknown" and (camera_username is not None or camera_password is not None):
@@ -301,6 +309,8 @@ class VivosunApiClient:
             "orderBy": "asc",
             "timeLevel": "ONE_MINUTE",
         }
+        if device.device_type == "vseed":
+            payload.pop("sceneId")
         data = await self._request_json(
             "POST",
             API_POINT_LOG_PATH,
@@ -313,6 +323,8 @@ class VivosunApiClient:
                 self._support_capture.record_rest_telemetry_result(device.device_id, {
                     "model_token": client_model_token(device.client_id), "status": "empty",
                 })
+            if device.device_type == "vseed":
+                return parse_point_log([], now=end_time)
             return {}
 
         latest = self._expect_mapping_item(entries[-1], "iotDataLogList[-1]")
@@ -329,6 +341,8 @@ class VivosunApiClient:
                     **summarize_rest_telemetry(latest),
                 },
             )
+        if device.device_type == "vseed":
+            return parse_point_log(list(entries), now=end_time)
         snapshot: dict[str, int | None] = {}
         for key in (
             SENSOR_KEY_INSIDE_TEMP,
