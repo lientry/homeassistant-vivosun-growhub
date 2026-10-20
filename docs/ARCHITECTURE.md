@@ -1,202 +1,116 @@
 # Architecture
 
-## Summary
+## Runtime and module boundaries
 
-The integration uses a hybrid runtime model:
+The integration uses REST for account discovery and climate telemetry, and AWS IoT MQTT over WebSocket for device commands and shadow reports. GrowCam uses LAN RTSP for video.
 
-- REST bootstrap for login, device discovery, and AWS identity exchange
-- MQTT over AWS IoT websocket for control and reported shadow state
-- REST polling for climate telemetry
-
-This split exists because control and reported device state are available through the AWS IoT shadow, while current climate readings are retrieved from the point-log API.
-
-## Bootstrap sequence
-
-1. `POST /user/login`
-2. `GET /iot/device/getTotalList`
-3. `POST /iot/user/awsIdentity`
-4. Cognito credential exchange
-5. MQTT websocket connect
-6. Shadow `get`
-7. Initial point-log refresh
-
-The coordinator owns this sequence in [coordinator.py](../custom_components/vivosun_growhub/coordinator.py).
-
-## Device discovery and routing
-
-The integration discovers all supported devices on the account during bootstrap.
-
-Current device classes:
-
-- GrowHub controller
-- AeroStream humidifier
-- AeroFlux heater
-- GrowCam camera
-
-MQTT-capable devices are tracked inside one coordinator and routed by `device_id`, `client_id`, and `topic_prefix`.
-
-Cameras are discovered from the same account payload, but they do not participate in the MQTT/shadow path because they use LAN RTSP streaming instead.
-
-## MQTT path
-
-### Used for
-
-- light state and control
-- circulation fan state and control
-- duct fan state and control
-- humidifier state and control
-- heater state and control
-- connection state
-
-### Topics
-
-The integration uses the classic unnamed shadow:
-
-- `$aws/things/{thing}/shadow/get`
-- `$aws/things/{thing}/shadow/get/accepted`
-- `$aws/things/{thing}/shadow/update`
-- `$aws/things/{thing}/shadow/update/accepted`
-- `$aws/things/{thing}/shadow/update/documents`
-- `$aws/things/{thing}/shadow/update/delta`
-
-### Important behavior
-
-`update/delta` is not surfaced as live entity state.
-
-Reason:
-
-- delta can temporarily reflect desired-versus-reported drift
-- treating delta as live state caused false UI snaps, including light values jumping back to `50`
-
-Only reported, accepted, and documents payloads are merged into the visible state snapshot.
-
-## Support capture
-
-Support capture is local and opt-in. `getTotalList` provides its account-scoped routing inventory independently of entity discovery. Non-camera entries with valid thing names remain capture candidates when fields such as `sceneId` or `topicPrefix` are missing. Capture never creates controls for rejected entries. An account with only skipped entries can load discovery diagnostics and enable capture through the existing options or service.
-
-Capture uses a dedicated MQTT connection for the exact classic shadow responses and transitions, plus `{topicPrefix}/channel/app` when a prefix exists. It requests one fresh classic shadow per candidate with a unique `clientToken` and a 10-second response timeout. Only the matching thing and token complete that read. Named-shadow and prefix wildcard probes have been removed because prior live captures disconnected during those attempts without collecting useful evidence.
-
-For entity-capable devices, the primary MQTT session already receives classic shadow and channel messages. Capture stores those observations once as `mqtt_publish` events. The dedicated connection still correlates its own shadow reads and records `support_probe_mqtt_publish` for skipped devices, rejected-topic responses and messages received while the primary connection is unavailable. Repeated identical messages from one source remain separate observations.
-
-Capture initializes in a background task so slow broker acknowledgements and snapshot requests do not delay Home Assistant setup or primary MQTT reconnection. Each request still has its own generous timeout, and the capture records `capture_initializing`, `capture_initialized`, or `capture_initialization_failed` in its events. A diagnostics download during initialization may contain incomplete snapshots. Stop and unload cancel any unfinished capture task and close the capture connection.
-
-`support_capture.shadow_read_results` retains the latest per-device read outcome and bounded, redacted payload outside the rolling event buffer. Statuses distinguish accepted, rejected, subscription-rejected, deferred, disconnected, publish-failed and timed-out reads. Setup failures include the AWS identity, Cognito credential or MQTT connection stage. `subscription_results` records each exact filter's broker outcome. Starting a new capture clears old evidence; stopping closes its capture connection. Normal primary reconnects refresh active capture connections and snapshots. Capture-only accounts can restart the capture to retry after a disconnect or credential expiry.
-
-Capture processes at most 25 unique things. It records the number of omitted candidates. MQTT payloads are limited to 64 KiB, eight nesting levels, 80 entries per collection, a 1,500-value traversal budget and 256 characters per string. The larger MQTT value budget preserves both sides of typical `update/documents` transitions without losing late device fields. Individual rolling events are limited to 72 KiB, and the rolling event buffer to 4 MiB total. Old events are evicted and counted in `dropped_events`. Truncation is explicit. Oversized, binary, unstructured and scalar bodies retain a size/status summary without their contents.
-
-Opted-in capture preserves ordinary telemetry strings and device, scene and program IDs. Recognized credentials, account identities, network details and location fields are masked recursively, including inside arrays. Account-bearing client IDs and MQTT topic routes remain pseudonymised. Program references such as `userPlanId` and `userPlanStageId` remain readable. Diagnostics applies this evidence policy separately to `support_capture`; ordinary debug logs and the normal device inventory retain their stricter identifier redaction.
-
-Device IDs identify resources; authenticated identities and authorization policies govern access. Keeping an ID does not establish that Vivosun's authorization has no vulnerabilities. Home Assistant's [diagnostics guidance](https://developers.home-assistant.io/docs/core/integration/diagnostics/) requires protecting credentials, location and personal information, and AWS documents [identity-based authorization](https://docs.aws.amazon.com/iot/latest/developerguide/iot-authorization.html). Users should review diagnostics before sharing because unknown vendor fields and free-form text can contain personal data. Removing a public attachment after resolution reduces continued availability but cannot remove existing copies.
-
-### REST telemetry evidence
-
-While capture is active, each successful `getPointLog` poll records the latest row in `rest_point_log` events and `support_capture.rest_telemetry_results`. The latter retains the latest result for up to 25 devices outside the rolling event buffer. `support_capture.rest_samples` also retains up to 20 distinct, bounded rows per device from the existing API responses, at most 16 KiB per row, to preserve intermediate state transitions when they appear in the returned window. An empty response replaces the latest result with `status: empty`; earlier samples remain in the bounded capture history. Starting a new capture clears all buffers. Normal sensor parsing and polling remain unchanged; this does not add API requests.
-
-`telemetry` contains flat or nested numeric, string, boolean and null values in the API's original units, including unknown sensor fields and USB accessory data. Numeric strings remain strings. Device, scene and program IDs remain readable. The REST collector masks recognized credential, account, network and location fields regardless of their value type. These checks cover camelCase, snake_case and dotted names such as `account_id`, `probe.userId`, `gpsLat` and `authHeader`. Arbitrary keys that do not match the bounded field-name format are omitted. Non-finite numbers and integers exceeding 63 magnitude bits are masked. REST retains the original 500-value traversal budget, eight nesting levels, 80 entries per collection, 256 characters per string and 64 KiB serialized-size cap. `telemetry_truncated` reports omissions and `telemetry_redacted_values` counts fully masked values.
-
-`deviceId` and `sceneId` route the REST request. Capture does not include its body, authentication headers or response envelope. The result's device correlation identifier and model token remain readable. Point-log rows normally contain readings and a sample timestamp, but the API has no universal marker separating private data from telemetry. Key-based redaction of recognized private fields does not guarantee anonymisation of unknown fields.
-
-REST evidence requires a device already eligible for point-log polling. A skipped device's MQTT routing alone does not supply its missing REST scene information. The integration polls every 90 seconds and the cloud reports at minute resolution. A quick control sweep can capture MQTT transitions but does not guarantee a REST sample for each intermediate setting. The requester checklist uses one session and one export; separate timed measurements are a device-specific follow-up only when REST transitions are needed.
-
-App-driven changes can reveal reported and desired fields, including accessories in their parent's shadow. Capture does not enumerate arbitrary MQTT topics, retrieve historical broker traffic or intercept proprietary app REST requests. A subscription acknowledgement alone does not prove that messages arrived. Devices without a discovered thing name remain metadata-only. Custom program catalogs and command mappings still require evidence from the relevant device owner.
-
-AWS documents the classic shadow read/response protocol in [Device Shadow MQTT topics](https://docs.aws.amazon.com/iot/latest/developerguide/device-shadow-mqtt.html). HTTPS `GetThingShadow`, named-shadow listing and MQTT topic operations have separate permissions; failure of one does not establish the others' permissions.
-
-## Climate telemetry path
-
-### Used for
-
-- inside temperature, humidity, and VPD
-- outside temperature, humidity, and VPD
-- humidifier probe temperature, humidity, and VPD
-- heater probe temperature, humidity, and VPD
-- humidifier water level
-- optional core temperature and RSSI
-
-### Endpoint
-
-- `POST /iot/data/getPointLog`
-
-### Polling model
-
-- a recent window is requested
-- the newest row from `iotDataLogList` becomes the current sensor snapshot
-- the coordinator refresh interval is 90 seconds
-
-## Device-specific mappings
-
-### Light
-
-- `0` means off
-- `1..24` are clamped to `25`
-- `25..100` pass through unchanged
-
-### Duct fan
-
-Home Assistant exposes a 10-step speed model. The device shadow uses non-linear `manu.lv` values.
-
-| App level | Shadow value |
+| Module | Responsibility |
 | --- | --- |
-| 0 | 0 |
-| 1 | 30 |
-| 2 | 35 |
-| 3 | 40 |
-| 4 | 50 |
-| 5 | 60 |
-| 6 | 70 |
-| 7 | 80 |
-| 8 | 85 |
-| 9 | 90 |
-| 10 | 100 |
+| `api.py`, `aws_auth.py` | Account login, device discovery, REST requests and AWS credential exchange |
+| `mqtt_client.py` | MQTT transport and subscriptions |
+| `coordinator.py` | Per-device routing, reported state, pending commands, telemetry polling and connection lifecycle |
+| `shadow.py`, `ports.py`, `vseed.py` | Model-scoped parsing, normalization and command payloads |
+| Entity platforms | Native Home Assistant controls and readings |
+| `manual_preferences.py` | Persistent Home Assistant manual selections |
+| `support_capture.py`, `redaction.py` | Bounded opt-in evidence collection and privacy filtering |
 
-### Circulation fan
+Bootstrap logs in through `/user/login`, discovers account devices through `/iot/device/getTotalList`, exchanges `/iot/user/awsIdentity` with Cognito, connects MQTT and requests initial shadows and telemetry.
 
-| App level | Shadow value |
-| --- | --- |
-| 0 | 0 |
-| 1 | 44 |
-| 2 | 51 |
-| 3 | 60 |
-| 4 | 64 |
-| 5 | 70 |
-| 6 | 75 |
-| 7 | 80 |
-| 8 | 85 |
-| 9 | 90 |
-| 10 | 100 |
+One coordinator routes devices by their device ID, client ID and topic prefix. Device classification determines entity families, with exact model handling for A22, VGrow, VSeed and other model-specific protocols. Controller identity does not establish which external accessories are physically attached.
 
-Special mode:
+VSeed S40 discovery and point-log requests accept a device without a garden scene. Cameras use account discovery and optional per-camera LAN IP configuration, but remain outside the MQTT device path. RTSP credentials are URL-encoded when building stream URLs.
 
-- `natural_wind` is represented by `lv = 200`
+## State and command contracts
 
-### Humidifier
+The integration uses the classic unnamed AWS shadow: `get`, `get/accepted`, `update`, `update/accepted` and `update/documents`. Controller `update/rejected` subscriptions are best effort: missing permission must not disrupt primary control. `update/delta` is not projected as live state because it describes desired/reported drift.
 
-- represented as a native Home Assistant `humidifier`
-- supports manual and auto mode
-- exposes target humidity and current water level when available
+A desired-only acknowledgement confirms cloud receipt, not device execution. Genuine reported state remains separate from local requests. Light, circulation-fan and heater normalization emits only fields present in a fragment, so deep merge preserves omitted values. Explicit zero, null, invalid and sentinel values retain their field-specific clearing rules.
 
-### Heater
+Controller level/mode projection preserves the legacy desired-only startup fallback until a local command or actual report establishes a different provenance. A first local command discards unconfirmed fallback for its affected field. Other legacy components and standalone devices retain their existing desired fallback. S40 seed values, physical port outputs and the spectrum cache use genuine reports only.
 
-- represented as a native Home Assistant `climate` entity
-- supports manual and auto mode
-- exposes target temperature through the standard climate interface
+### Immediate controller feedback
 
-### Camera
+A single typed lifecycle tracks pending fields by device, channel and field: light level, circulation-fan level, duct-fan level and duct-fan mode. Snapshots overlay the latest local intent on the independent reported cache. Home Assistant automations see this provisional state too.
 
-- represented as a Home Assistant `camera` entity
-- uses a per-device camera IP mapping plus LAN credentials exposed by the account payload
-- RTSP stream URL is derived at runtime and credentials are URL-encoded before use
+- Each command has a generation and cloud `clientToken`. Desired acknowledgements correlate receipt but do not confirm output.
+- Fresh reports settle fields independently. A level-only report cannot confirm a requested mode.
+- Selected-leaf AWS timestamps and versions establish freshness. A higher whole-document version alone does not prove a field changed.
+- GET is a cached snapshot. Settling a request through GET requires the selected reported timestamp to follow both the pre-request field and the accepted desired field, plus a later version.
+- Direct reported writes or demonstrated previous/current field transitions can establish order within the same AWS timestamp second. Unchanged documents and metadata-free GETs cannot.
+- Missing metadata preserves the last known field provenance. Equal-version complementary partials can update different fields.
+- The selected timestamp follows normalization: circulation falls back to `manu.lv` for an invalid root level; duct fan preserves a present root null and its metadata.
+- Independently fresh reports replace provisional state. A report matching a superseded local request remains ambiguous, so the latest request stays visible until confirmation or failure.
+- Matching rejection, send failure, disconnect or a 15-second unconfirmed deadline removes pending state and reveals the last report. Late reports still apply. There are no automatic command retries.
+- Requests already matching confirmed state still publish tokenized commands, but create no false pending timer. Their short-lived rejection receipts expire silently.
 
-## Failure handling
+Mode-only duct commands supersede older pending manual output without inventing a speed. Optimistic state never establishes manual/no-plan permission for guarded operations.
 
-### MQTT reconnect
+AWS field timestamps have one-second precision and identify update order, not command authorship or physical actuation. Bounded optimism can temporarily mask an external change matching a superseded local request.
 
-The coordinator supervises the websocket session and reconnects when:
+Protocol reference: [AWS Device Shadow documents](https://docs.aws.amazon.com/iot/latest/developerguide/device-shadow-document.html).
 
-- the session drops
-- AWS credentials approach expiry
-- a full reauthentication is needed
+## Model-specific boundaries
 
-### Credential refresh
+### Controller lights and fans
 
-AWS credentials are refreshed before expiry using the configured skew window. If refresh fails due to auth expiry, the coordinator performs a full login, identity exchange, and reconnect.
+Light zero means off, and positive brightness is clamped to the device minimum of 25%. Fan percentages use the discrete mappings in `const.py` and `shadow.py`.
+
+Circulation Natural Wind is the sole native preset, at raw level `200`. Numeric speeds, off and unknown state have no active preset. Explicit percentage wins over a simultaneously supplied valid preset. OFF sends zero; bare ON while already in Natural Wind leaves it active. Raw `nw` is retained without assigning Night semantics. The native entity translation maps `natural_wind` to "Natural Wind" without changing its service or stored value.
+
+Duct Auto uses code `2` on E42A and `1` on legacy controllers. Auto is logically on even at zero output, while the actual percentage remains zero. Native power toggle in Auto sends one manual-mode, zero-level OFF command. Plain ON retains its manual/default behavior.
+
+Spectrum and circulation oscillation are separate default-off, per-controller options. Controller model or a reported spectrum value cannot prove lamp compatibility. The Spectrum select offers Seedling, Vegetative and Bloom and writes only `light.manu.spec`, without changing brightness, power, mode or plan. It requires genuine reported `mode=0` and `inPlan=0`; invalid or stale guard fields cannot authorize writes.
+
+Oscillation opt-in exposes the native fan feature and existing Boolean `cFan.osc` command. Disabled controls reject stale service calls before publishing. It does not infer fan generation or translate multilevel oscillation.
+
+### A22 and VGrow ports
+
+A22 has physical `usb1`, `usb2`, `plug1` and `plug2` switches. VGrow `VSCTLY18` has `usb1` and `usb2`. Stable identities follow the physical port, not its accessory selection.
+
+Current output comes from genuine reported root `lv`: exactly zero or 100. The stored manual level may differ during a plan. Output remains readable across modes and partial reports; unknown/nonbinary output makes the switch unavailable.
+
+Writes require an available binary output and explicit reported manual mode with no plan. They change only `manu.lv` to zero or 100, never mode, plan or accessory type. Numeric `dev` is an accessory-code attribute, not a verified accessory name or a speed contract.
+
+### VSeed S40
+
+Exact model `VSSBS40` uses reported `seed` state for Growth Stage, stored stage settings and Quick Irrigation. Desired-only acknowledgements cannot update those facts; partial reports preserve omitted fields.
+
+Quick Irrigation requests the native 600-second manual cycle or zero to stop. Its switch reads reported `waterTime`, not command acceptance. Manual irrigation bypasses the manufacturer's automatic water-temperature checks. The integration adds no speculative interlocks or retries.
+
+Stage settings are recipes, not actuator readings. Light Duration is `lgtOnDur` in seconds, distinct from the daily start-time field `lgtOnTime`. Current light intensity reads `seed.lgtLv`, separately from current/stored recipe levels.
+
+Successful S40 point-log polls replace root/dome temperature, humidity, VPD and signal readings. Missing, invalid, sentinel or empty results clear prior values; invalid VPD does not fall back to a computed value. Network failure follows the coordinator error path rather than claiming an empty successful sample.
+
+## Remembered manual settings
+
+One default-off option enables preferences for controller lights and fans. Storage remains independent per stable device and channel.
+
+Only explicit Home Assistant brightness, fan speed or Natural Wind selections train memory, including scripts and automations. Matching cloud token, desired selection and generation establish acceptance. Rejected, failed, expired, disconnected or out-of-order requests cannot replace a newer accepted choice. Cloud acceptance is not proof of execution.
+
+OFF, bare ON, replayed preferences, app changes and reports do not train memory. A stored selection is replayed on bare ON while off only when the component genuinely reports manual mode and no plan. Unknown, stale or automatic facts prevent replay, not ordinary power-on. The fallback uses existing command behavior, including cold defaults of 25% for lights and 10% for fans, without a memory-specific validation error.
+
+Config entries retain major version 1, minor version 2. One-time option migration maps valid nonempty legacy channel lists to enabled, and missing/empty/malformed selections to disabled. Independent version-2 Home Assistant storage migrates numeric preferences to validated tagged numeric/preset selections. Keeping the ConfigEntry major version preserves older handlers' ability to load entries after rollback.
+
+Storage loads without startup/reconnect actuation. Disabling the option leaves preferences dormant. Persistence is best effort, so a crash or write failure can lose the latest accepted selection.
+
+## Telemetry and support capture
+
+Climate telemetry polls `/iot/data/getPointLog` on a 90-second coordinator interval, using the newest returned row. MQTT controls do not imply a fresh REST measurement.
+
+Support capture is local and opt-in. Account discovery supplies its routing inventory independently of entity eligibility. Skipped devices with valid thing names can supply evidence without receiving controls.
+
+A dedicated MQTT session subscribes to exact classic shadow responses and discovered channel topics, and requests a token-correlated shadow read for each candidate. Primary-session observations are recorded once; the capture session supplies skipped-device or otherwise unavailable observations. Repeated messages from the same source remain separate events.
+
+Capture initializes asynchronously, exposes partial/failure outcomes and stops its connection/tasks on stop or unload. A new session clears old evidence. Reconnect refreshes active capture connections and snapshots; capture-only accounts can restart capture after failure.
+
+Collection is bounded by device count, payload size, nesting, collection length and traversal budgets. The rolling buffer reports eviction and truncation. Latest shadow-read outcomes, REST results/samples and existing stage-info outcomes remain outside that ring under their own caps.
+
+REST and `/iot/plan/stageInfo` capture observes existing requests only. Stage results preserve known stage ID correlation, name, icon and parsed object content, or bounded failure status. It neither adds requests nor edits programs. Known-stage results do not enumerate saved recipes or intercept proprietary app REST calls.
+
+Capture preserves useful telemetry and device/scene/program identifiers. Recognized credentials, account identities, hardware/network identifiers and location fields are masked recursively. Client/topic pseudonyms preserve routing correlation. Normal inventory/debug output uses stricter identifier filtering. Unknown fields and free-form text can still contain personal information, so users must review exports before sharing.
+
+See the [support capture guide](support-capture-recon-checklist.md), [Home Assistant diagnostics guidance](https://developers.home-assistant.io/docs/core/integration/diagnostics/) and [AWS shadow topics](https://docs.aws.amazon.com/iot/latest/developerguide/device-shadow-mqtt.html).
+
+## Connection lifecycle
+
+The coordinator reconnects dropped MQTT sessions and refreshes AWS credentials before expiry. Authentication expiry triggers full login and identity exchange. Reconnection reads current state without replaying commands.
