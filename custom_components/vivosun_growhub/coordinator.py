@@ -197,6 +197,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._has_reported_fields: set[_FieldKey] = set()
         self._locally_commanded_fields: set[_FieldKey] = set()
         self._already_confirmed_tokens: dict[str, _ConfirmedCommandReceipt] = {}
+        self._confirmed_spectrum: dict[str, dict[str, int | None]] = {}
+        self._spectrum_report_provenance: dict[str, dict[str, _ReportedFieldProvenance]] = {}
         self.manual_preferences: ManualPreferences | None = None
         self._pending_manual_choices: dict[str, _PendingManualChoice] = {}
         self._manual_choice_generation = 0
@@ -323,6 +325,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._reported_fields.clear()
             self._has_reported_fields.clear()
             self._locally_commanded_fields.clear()
+            self._confirmed_spectrum.clear()
+            self._spectrum_report_provenance.clear()
             for receipt in self._already_confirmed_tokens.values():
                 receipt.timeout.cancel()
             self._already_confirmed_tokens.clear()
@@ -945,6 +949,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     )
                     parsed_shadow = parse_shadow_document(document, dfan_auto_mode=auto_mode)
                     if device is not None and device.device_type == "controller":
+                        self._record_reported_spectrum(
+                            device_id, document, extract_shadow_reported(document), topic,
+                        )
                         self._record_reported_manual_facts(
                             device_id, document, extract_shadow_reported(document), topic,
                         )
@@ -1374,6 +1381,49 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         device_shadow = self._shadow_states.setdefault(device_id, {})
         _deep_merge_mapping(device_shadow, cast("dict[str, object]", state))
 
+    def _record_reported_spectrum(
+        self, device_id: str, document: dict[str, object], reported: dict[str, object] | None, topic: str
+    ) -> None:
+        """Cache only fresh, genuine reported spectrum and manual-plan facts."""
+        light = reported.get("light") if isinstance(reported, dict) else None
+        if not isinstance(light, dict):
+            return
+        body = document.get("current", document)
+        if not isinstance(body, dict):
+            return
+        raw_version = body.get("version")
+        version = raw_version if type(raw_version) is int and raw_version >= 0 else None
+        metadata = body.get("metadata")
+        metadata = metadata.get("reported") if isinstance(metadata, dict) else None
+        light_metadata = metadata.get("light") if isinstance(metadata, dict) else None
+        fields: list[tuple[str, object, tuple[str, ...]]] = [
+            (key, light[key], (key,)) for key in ("mode", "inPlan", "spec") if key in light
+        ]
+        manual = light.get("manu")
+        if "spec" not in light and isinstance(manual, dict) and "spec" in manual:
+            fields.append(("spec", manual["spec"], ("manu", "spec")))
+        if not fields:
+            return
+        state = self._confirmed_spectrum.setdefault(device_id, {})
+        provenance = self._spectrum_report_provenance.setdefault(device_id, {})
+        for key, raw_value, path in fields:
+            leaf = light_metadata
+            for part in path:
+                leaf = leaf.get(part) if isinstance(leaf, dict) else None
+            raw_timestamp = leaf.get("timestamp") if isinstance(leaf, dict) else None
+            timestamp = raw_timestamp if type(raw_timestamp) is int and raw_timestamp >= 0 else None
+            incoming = _ReportedFieldProvenance(version=version, timestamp=timestamp)
+            if not _reported_field_is_fresh(provenance.get(key), incoming, topic):
+                continue
+            if key == "inPlan" and isinstance(raw_value, bool):
+                value: int | None = int(raw_value)
+            elif type(raw_value) is int and raw_value != SENSOR_UNAVAILABLE_SENTINEL:
+                value = raw_value
+            else:
+                value = None
+            state[key] = value
+            provenance[key] = incoming
+
     def _record_reported_manual_facts(
         self, device_id: str, document: dict[str, object], reported: dict[str, object] | None, topic: str,
     ) -> None:
@@ -1458,6 +1508,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             "mqtt_connected": self.is_mqtt_connected,
         }
         shadows = cast("dict[str, dict[str, object]]", snapshot["shadows"])
+        for device_id, confirmed in getattr(self, "_confirmed_spectrum", {}).items():
+            shadows.setdefault(device_id, {})["confirmed_spectrum"] = dict(confirmed)
         for (device_id, channel, field), pending in self._pending_fields.items():
             component = shadows.setdefault(device_id, {}).setdefault(channel, {})
             if not isinstance(component, dict):
