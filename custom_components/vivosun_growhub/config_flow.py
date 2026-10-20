@@ -22,6 +22,7 @@ from .const import (
     DOMAIN,
     OPTION_CFAN_OSCILLATION_CONTROLLERS,
     OPTION_REMEMBER_MANUAL_SETTINGS,
+    OPTION_SPECTRUM_CONTROLLERS,
     OPTION_SUPPORT_CAPTURE_ENABLED,
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
@@ -169,6 +170,11 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         if user_input is not None:
             normalized_input = self._normalize_options(user_input)
             eligible = {device.device_id for device in self._get_controller_devices(entry)}
+            spectrum_selected = normalized_input.get(OPTION_SPECTRUM_CONTROLLERS, [])
+            if not isinstance(spectrum_selected, list) or any(
+                not isinstance(device_id, str) or device_id not in eligible for device_id in spectrum_selected
+            ):
+                errors["base"] = "invalid_spectrum_controller"
             selected = normalized_input.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
             if not isinstance(selected, list) or any(
                 not isinstance(device_id, str) or device_id not in eligible for device_id in selected
@@ -180,6 +186,8 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                 normalized_input = {**entry.options, **normalized_input}
                 if OPTION_SUPPORT_CAPTURE_ENABLED not in user_input or not user_input[OPTION_SUPPORT_CAPTURE_ENABLED]:
                     normalized_input.pop(OPTION_SUPPORT_CAPTURE_ENABLED, None)
+                if OPTION_SPECTRUM_CONTROLLERS in user_input and not user_input[OPTION_SPECTRUM_CONTROLLERS]:
+                    normalized_input.pop(OPTION_SPECTRUM_CONTROLLERS, None)
                 if (
                     OPTION_CFAN_OSCILLATION_CONTROLLERS in user_input
                     and not user_input[OPTION_CFAN_OSCILLATION_CONTROLLERS]
@@ -215,10 +223,24 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         }
         controllers = self._get_controller_devices(entry)
         if controllers:
+            eligible = {device.device_id for device in controllers}
+            saved_spectrum = entry.options.get(OPTION_SPECTRUM_CONTROLLERS, [])
+            schema_fields[vol.Optional(
+                OPTION_SPECTRUM_CONTROLLERS,
+                default=[device_id for device_id in saved_spectrum
+                         if isinstance(device_id, str) and device_id in eligible]
+                if isinstance(saved_spectrum, list) else [],
+            )] = selector.SelectSelector(selector.SelectSelectorConfig(
+                options=[selector.SelectOptionDict(value=device.device_id, label=device.name)
+                         for device in controllers],
+                multiple=True,
+                mode=selector.SelectSelectorMode.LIST,
+            ))
             saved = entry.options.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
             schema_fields[vol.Optional(
                 OPTION_CFAN_OSCILLATION_CONTROLLERS,
-                default=[device_id for device_id in saved if device_id in {d.device_id for d in controllers}]
+                default=[device_id for device_id in saved
+                         if isinstance(device_id, str) and device_id in eligible]
                 if isinstance(saved, list) else [],
             )] = selector.SelectSelector(selector.SelectSelectorConfig(
                 options=[selector.SelectOptionDict(value=device.device_id, label=device.name)

@@ -29,10 +29,12 @@
         "data": {
           "temp_unit": "Temperature unit",
           "support_capture_enabled": "Enable support capture for diagnostics",
+          "spectrum_controllers": "Spectrum control",
           "cfan_oscillation_controllers": "Oscillation control",
           "remember_manual_settings": "Remember manual settings"
         },
         "data_description": {
+          "spectrum_controllers": "Enable only if your light offers spectrum presets in the Vivosun app.",
           "cfan_oscillation_controllers": "Enable only if your fan offers oscillation control in the Vivosun app.",
           "remember_manual_settings": "Settings selected in Home Assistant are remembered."
         }
@@ -47,6 +49,7 @@
     },
     "error": {
       "invalid_ip": "Invalid IP address",
+      "invalid_spectrum_controller": "Select only available controllers for spectrum",
       "invalid_oscillation_controller": "Select only available controllers for oscillation"
     }
   },

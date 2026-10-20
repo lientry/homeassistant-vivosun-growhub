@@ -7,11 +7,13 @@ import time
 from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, OPTION_SPECTRUM_CONTROLLERS
 from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
+from .shadow import build_light_spectrum_payload
 from .vseed import STAGES, command, reported_seed, stage_name
 
 if TYPE_CHECKING:
@@ -28,6 +30,7 @@ OPTION_REFINE_CYCLE = "Refine Cycle"
 OPTION_CURE_ONLY = "Cure Only"
 OPTION_COLD_STORE = "Cold Store"
 OPTION_EXTRACT_CURE = "Extract Cure"
+SPECTRUM_PRESETS = {"Seedling": 20, "Vegetative": 50, "Bloom": 100}
 
 _MODE_CONT_IDS: dict[str, str] = {
     OPTION_QUICK_CYCLE: "234193+1756947323",
@@ -63,8 +66,57 @@ async def async_setup_entry(
             VivosunSeedStageSelect(coordinator, device.device_id)
             for device in coordinator.devices
             if device.device_type == "vseed"
+        ] + [
+            VivosunSpectrumSelect(coordinator, device.device_id)
+            for device in coordinator.devices
+            if device.device_type == "controller"
+            and device.device_id in entry.options.get(OPTION_SPECTRUM_CONTROLLERS, [])
         ]
     )
+
+
+class VivosunSpectrumSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]
+    """Vivosun app growth-spectrum presets, enabled per controller."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Spectrum"
+    _attr_icon = "mdi:palette"
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_spectrum"
+        self._attr_options = list(SPECTRUM_PRESETS)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(self.coordinator, self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return is_entity_available(self.coordinator, self._device_id)
+
+    @property
+    def current_option(self) -> str | None:
+        reported = shadow_slice(self.coordinator, self._device_id, "confirmed_spectrum")
+        value = reported.get("spec")
+        return next((label for label, code in SPECTRUM_PRESETS.items() if type(value) is int and code == value), None)
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in SPECTRUM_PRESETS:
+            raise ServiceValidationError(f"Unknown spectrum preset: {option}")
+        if not self.available:
+            raise HomeAssistantError("Spectrum controller is unavailable")
+        reported = shadow_slice(self.coordinator, self._device_id, "confirmed_spectrum")
+        mode = reported.get("mode")
+        in_plan = reported.get("inPlan")
+        if type(mode) is not int or mode != 0 or not (
+            in_plan is False or (type(in_plan) is int and in_plan == 0)
+        ):
+            raise ServiceValidationError("Spectrum requires reported manual mode with no active plan")
+        await self.coordinator.async_publish_shadow_update(
+            build_light_spectrum_payload(SPECTRUM_PRESETS[option]), device_id=self._device_id, qos=1
+        )
 
 
 class VivosunSeedStageSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]

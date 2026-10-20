@@ -18,6 +18,7 @@ from custom_components.vivosun_growhub.const import (
     DOMAIN,
     OPTION_CFAN_OSCILLATION_CONTROLLERS,
     OPTION_REMEMBER_MANUAL_SETTINGS,
+    OPTION_SPECTRUM_CONTROLLERS,
     OPTION_SUPPORT_CAPTURE_ENABLED,
 )
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
@@ -28,6 +29,106 @@ if TYPE_CHECKING:
 
 
 _DEV_ID = "dev-1"
+
+
+@pytest.mark.parametrize("key", [OPTION_SPECTRUM_CONTROLLERS, OPTION_CFAN_OSCILLATION_CONTROLLERS])
+@pytest.mark.parametrize(
+    ("saved", "expected"),
+    [
+        ([{}], []),
+        ([[]], []),
+        ([42], []),
+        (["unknown-device"], []),
+        ([_DEV_ID, {}], [_DEV_ID]),
+        ("not-a-list", []),
+    ],
+)
+async def test_malformed_saved_controller_selections_have_safe_form_defaults(
+    hass: HomeAssistant, key: str, saved: object, expected: list[str],
+) -> None:
+    original_options = {
+        key: saved,
+        CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"},
+        OPTION_REMEMBER_MANUAL_SETTINGS: True,
+        OPTION_SUPPORT_CAPTURE_ENABLED: True,
+        "future_option": 42,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options=original_options)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry.entry_id, cast("object", _StubCoordinator())
+    )
+    flow = VivosunGrowhubOptionsFlow(entry)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["type"] is FlowResultType.FORM
+    setting = next(marker for marker in form["data_schema"].schema if marker.schema == key)
+    assert setting.default() == expected
+    assert entry.options == original_options
+
+
+@pytest.mark.parametrize(
+    ("key", "error"),
+    [
+        (OPTION_SPECTRUM_CONTROLLERS, "invalid_spectrum_controller"),
+        (OPTION_CFAN_OSCILLATION_CONTROLLERS, "invalid_oscillation_controller"),
+    ],
+)
+@pytest.mark.parametrize("invalid", [[{}], [[]], [42], [None], ["unknown-device"], [_DEV_ID, {}]])
+async def test_malformed_submitted_controller_selections_return_form_errors(
+    hass: HomeAssistant, key: str, error: str, invalid: list[object],
+) -> None:
+    original_options = {
+        CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"},
+        OPTION_REMEMBER_MANUAL_SETTINGS: True,
+        OPTION_SUPPORT_CAPTURE_ENABLED: True,
+        "future_option": 42,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options=original_options)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry.entry_id, cast("object", _StubCoordinator())
+    )
+    flow = VivosunGrowhubOptionsFlow(entry)
+    flow.hass = hass
+    result = await flow.async_step_init({
+        "temp_unit": "celsius",
+        key: invalid,
+        OPTION_REMEMBER_MANUAL_SETTINGS: True,
+        OPTION_SUPPORT_CAPTURE_ENABLED: True,
+    })
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"]["base"] == error
+    assert entry.options == original_options
+
+
+async def test_spectrum_option_is_per_controller_default_off_and_removable(
+    hass: HomeAssistant, enable_custom_integrations: None,
+) -> None:
+    coordinator = _StubCoordinator()
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={"unrelated_setting": "keep"})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(entry.entry_id, cast("object", coordinator))
+    key = OPTION_SPECTRUM_CONTROLLERS
+    with patch.object(hass.config_entries, "async_reload", AsyncMock(return_value=True)):
+        form = await hass.config_entries.options.async_init(entry.entry_id)
+        assert key in {m.schema for m in form["data_schema"].schema}
+        assert key not in entry.options
+        with pytest.raises(InvalidData):
+            await hass.config_entries.options.async_configure(
+                form["flow_id"], user_input={"temp_unit": "celsius", key: ["camera-1"]}
+            )
+        saved = await hass.config_entries.options.async_configure(
+            form["flow_id"], user_input={"temp_unit": "celsius", key: [_DEV_ID]}
+        )
+        assert saved["type"] is FlowResultType.CREATE_ENTRY
+        await hass.async_block_till_done()
+        assert entry.options[key] == [_DEV_ID]
+        form = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.config_entries.options.async_configure(
+            form["flow_id"], user_input={"temp_unit": "celsius", key: []}
+        )
+        await hass.async_block_till_done()
+    assert key not in entry.options
+    assert entry.options["unrelated_setting"] == "keep"
 
 
 class _StubCoordinator:

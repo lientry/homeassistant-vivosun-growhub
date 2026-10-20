@@ -52,15 +52,9 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
 
     device = DeviceInfo("a22-1", "vivosun-VSPLUGA22-account-a22", "topic/a22", "GrowHub A22", True, 42, "a22")
     assert infer_device_type("GrowHub A22", device.client_id) == "a22"
-    coordinator = object.__new__(VivosunCoordinator)
+    coordinator = VivosunCoordinator(hass, object(), email="offline@example.com", password="unused")
     coordinator._devices = [device]
-    coordinator._client_id_to_device_id = {device.client_id: device.device_id}
-    coordinator._topic_prefix_to_device_id = {device.topic_prefix: device.device_id}
-    coordinator._shadow_states = {}
-    coordinator._pending_fields = {}
-    coordinator._sensor_states = {}
-    coordinator._plan_stage_cache = {}
-    coordinator._tokens = None
+    coordinator._build_topic_maps()
     coordinator._support_capture = type("Capture", (), {"record": lambda *a, **kw: None})()
     coordinator.async_update_listeners = lambda: None
     coordinator._refresh_plan_stages = AsyncMock()
