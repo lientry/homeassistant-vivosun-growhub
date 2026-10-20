@@ -1,4 +1,4 @@
-"""Physical A22 port reports and confirmed manual power commands."""
+"""Shared physical-port reports and confirmed manual power commands."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 A22_PORTS = ("usb1", "usb2", "plug1", "plug2")
+VGROW_PORTS = ("usb1", "usb2")
+PORTS_BY_MODEL = {"VSPLUGA22": A22_PORTS, "VSCTLY18": VGROW_PORTS}
 
 
 @dataclass(frozen=True)
@@ -38,5 +40,5 @@ def reported_port(raw: object) -> PortReport:
 def build_manual_port_payload(port: str, on: bool) -> dict[str, object]:
     """Send only the observed manual 0/100 target, without changing mode or type."""
     if port not in A22_PORTS:
-        raise ValueError(f"Unknown A22 physical port: {port}")
+        raise ValueError(f"Unknown physical port: {port}")
     return {"state": {"desired": {port: {"manu": {"lv": 100 if on else 0}}}}}
