@@ -20,6 +20,7 @@ SUPPORT_CAPTURE_MAX_EVENT_BYTES = 72 * 1024
 SUPPORT_CAPTURE_MAX_EVENT_BUFFER_BYTES = 4 * 1024 * 1024
 SUPPORT_CAPTURE_MAX_REST_SAMPLES_PER_DEVICE = 20
 SUPPORT_CAPTURE_MAX_REST_SAMPLE_BYTES = 16 * 1024
+SUPPORT_CAPTURE_MAX_STAGE_RESULTS = 25
 
 
 class SupportCaptureManager:
@@ -39,6 +40,7 @@ class SupportCaptureManager:
         self._shadow_read_results: dict[str, dict[str, object]] = {}
         self._rest_telemetry_results: dict[str, dict[str, object]] = {}
         self._rest_samples: dict[str, list[dict[str, object]]] = {}
+        self._stage_info_results: dict[str, dict[str, object]] = {}
         self._devices: list[dict[str, object]] = []
         self._events: deque[dict[str, object]] = deque()
 
@@ -67,6 +69,7 @@ class SupportCaptureManager:
         self._shadow_read_results = {}
         self._rest_telemetry_results = {}
         self._rest_samples = {}
+        self._stage_info_results = {}
         self._devices = [sanitize_mapping_for_capture(dict(device)) for device in devices]
         self._events = deque(maxlen=max_events)
 
@@ -152,6 +155,23 @@ class SupportCaptureManager:
             if len(samples) > SUPPORT_CAPTURE_MAX_REST_SAMPLES_PER_DEVICE:
                 samples.pop(0)
 
+    def record_stage_info_result(self, stage_id: str, result: Mapping[str, object]) -> None:
+        """Retain bounded outcomes from existing stage-info reads by known stage ID."""
+        if not self._active:
+            return
+        if (
+            stage_id not in self._stage_info_results
+            and len(self._stage_info_results) >= SUPPORT_CAPTURE_MAX_STAGE_RESULTS
+        ):
+            return
+        bounded, truncated = _bounded_capture_payload(result, max_values=SUPPORT_CAPTURE_MAX_REST_VALUES)
+        safe = sanitize_mapping_for_capture({"stage_id": stage_id, **cast("Mapping[str, object]", bounded)})
+        if len(json.dumps(safe, ensure_ascii=True, default=str).encode()) > SUPPORT_CAPTURE_MAX_PAYLOAD_BYTES:
+            safe = {"stage_id": stage_id, "status": result.get("status", "unknown")}
+            truncated = True
+        safe["truncated"] = truncated
+        self._stage_info_results[stage_id] = safe
+
     def snapshot(self) -> dict[str, Any]:
         """Return a diagnostics-safe snapshot of support capture state."""
         return {
@@ -172,6 +192,7 @@ class SupportCaptureManager:
                 {"device_id": device_id, "samples": samples}
                 for device_id, samples in self._rest_samples.items()
             ],
+            "stage_info_results": list(self._stage_info_results.values()),
             "devices": list(self._devices),
             "events": list(self._events),
         }
