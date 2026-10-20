@@ -22,6 +22,7 @@ from custom_components.vivosun_growhub.const import (
 from custom_components.vivosun_growhub.support_capture import (
     SUPPORT_CAPTURE_MAX_EVENT_BUFFER_BYTES,
     SUPPORT_CAPTURE_MAX_MQTT_VALUES,
+    SUPPORT_CAPTURE_MAX_STAGE_RESULTS,
     SupportCaptureManager,
     summarize_rest_telemetry,
     summarize_support_capture_payload,
@@ -50,6 +51,59 @@ class _CoordinatorStub:
 
     async def async_stop_support_capture(self) -> None:
         self.stop_capture_calls += 1
+
+
+def test_stage_info_collection_is_bounded_private_and_resets() -> None:
+    manager = SupportCaptureManager()
+    manager.record_stage_info_result("ignored", {"status": "success"})
+    assert manager.snapshot()["stage_info_results"] == []
+
+    manager.start(max_events=1, devices=[], subscription_topics=[])
+    for index in range(SUPPORT_CAPTURE_MAX_STAGE_RESULTS + 2):
+        manager.record_stage_info_result(f"stage-{index}", {
+            "status": "success",
+            "content": {
+                "duration": index,
+                "hwId": "sensitive",
+                "accessToken": "secret",
+                "nested": {"hardware_id": "private", "userPlanStageId": "stage-0"},
+                "large": list(range(120)),
+            },
+        })
+
+    saved = manager.snapshot()["stage_info_results"]
+    assert len(saved) == SUPPORT_CAPTURE_MAX_STAGE_RESULTS
+    assert saved[0]["stage_id"] == "stage-0"
+    assert saved[0]["content"]["duration"] == 0
+    assert saved[0]["content"]["hwId"] == "***"
+    assert saved[0]["content"]["accessToken"] == "***"
+    assert saved[0]["content"]["nested"] == {"hardware_id": "***", "userPlanStageId": "stage-0"}
+    assert saved[0]["truncated"] is True
+    assert "sensitive" not in str(saved)
+    assert "private" not in str(saved)
+
+    manager.record_stage_info_result("stage-0", {"status": "error", "error_type": "VivosunResponseError"})
+    assert len(manager.snapshot()["stage_info_results"]) == SUPPORT_CAPTURE_MAX_STAGE_RESULTS
+    assert manager.snapshot()["stage_info_results"][0] == {
+        "stage_id": "stage-0", "status": "error", "error_type": "VivosunResponseError", "truncated": False,
+    }
+    manager.stop()
+    manager.record_stage_info_result("stage-0", {"status": "success"})
+    assert manager.snapshot()["stage_info_results"][0]["status"] == "error"
+    manager.start(max_events=1, devices=[], subscription_topics=[])
+    assert manager.snapshot()["stage_info_results"] == []
+
+
+def test_stage_info_oversized_result_omits_content() -> None:
+    manager = SupportCaptureManager()
+    manager.start(max_events=2, devices=[], subscription_topics=[])
+    manager.record_stage_info_result("stage-1", {
+        "status": "success",
+        "content": {f"field{i}": ["A" * 256] * 80 for i in range(80)},
+    })
+    assert manager.snapshot()["stage_info_results"] == [
+        {"stage_id": "stage-1", "status": "success", "truncated": True},
+    ]
 
 
 def test_support_capture_manager_records_bounded_events() -> None:

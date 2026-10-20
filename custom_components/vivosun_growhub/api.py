@@ -360,8 +360,12 @@ class VivosunApiClient:
                 headers=self._auth_headers(tokens),
                 json_body={"userPlanStageId": stage_id},
             )
-        except (VivosunResponseError, VivosunConnectionError):
+        except (VivosunResponseError, VivosunConnectionError) as exc:
             _LOGGER.debug("Failed to fetch plan stage info for stage_id=%s", stage_id)
+            if self._support_capture is not None and self._support_capture.active:
+                self._support_capture.record_stage_info_result(stage_id, {
+                    "status": "error", "error_type": type(exc).__name__,
+                })
             return None
 
         stage_name = self._optional_str(data, "stageName") or "Unknown"
@@ -376,6 +380,11 @@ class VivosunApiClient:
                     content = parsed
             except (ValueError, TypeError):
                 pass
+        if self._support_capture is not None and self._support_capture.active:
+            self._support_capture.record_stage_info_result(stage_id, {
+                "status": "success", "stage_name": stage_name, "icon": icon, "content": content,
+                "content_status": "parsed" if content else "empty_or_unparsed",
+            })
         return PlanStageInfo(stage_name=stage_name, icon=icon, content=content)
 
     async def _request_json(
