@@ -6,11 +6,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
-from .entity_helpers import build_device_info, shadow_slice
+from .entity_helpers import build_device_info, is_entity_available, shadow_slice
+from .models import client_model_token
+from .ports import A22_PORTS, PortReport, build_manual_port_payload, reported_port
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -53,11 +56,76 @@ async def async_setup_entry(
 
     entities: list[SwitchEntity] = []
     for device in coordinator.devices:
+        if client_model_token(device.client_id) == "VSPLUGA22":
+            entities.extend(VivosunPortSwitch(coordinator, device.device_id, port) for port in A22_PORTS)
+            continue
         if device.device_type != "curing_box":
             continue
         for description in _CURING_BOX_SWITCHES:
             entities.append(VivosunControlSwitch(coordinator, device.device_id, description))
     async_add_entities(entities)
+
+
+class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  # type: ignore[misc]
+    """Physical A22 output with reported status and guarded manual power writes."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:power-socket"
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str, port: str) -> None:
+        super().__init__(coordinator)
+        if port not in A22_PORTS:
+            raise ValueError("Unsupported A22 port")
+        self._device_id = device_id
+        self._port = port
+        self._attr_name = port.upper() if port.startswith("usb") else f"Outlet {port[-1]}"
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_{port}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(self.coordinator, self._device_id)
+
+    def _report(self) -> PortReport:
+        return reported_port(shadow_slice(self.coordinator, self._device_id, "ports").get(self._port))
+
+    @property
+    def available(self) -> bool:
+        return is_entity_available(self.coordinator, self._device_id) and self._report().is_on is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return observed output even when a plan or automatic mode controls it."""
+        return self._report().is_on
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        report = self._report()
+        return {
+            "accessory_code": report.accessory_code,
+            "mode_code": report.mode,
+            "in_plan": report.in_plan,
+        }
+
+    async def _publish(self, on: bool) -> None:
+        if not is_entity_available(self.coordinator, self._device_id):
+            raise HomeAssistantError(f"GrowHub A22 {self._attr_name} is unavailable")
+        report = self._report()
+        if report.is_on is None:
+            raise HomeAssistantError(f"GrowHub A22 {self._attr_name} has no reported output level")
+        if not report.can_write:
+            raise ServiceValidationError(
+                f"Cannot control {self._attr_name}: manual mode and no active plan must both be reported "
+                "(mode=0, inPlan=0)"
+            )
+        await self.coordinator.async_publish_shadow_update(
+            build_manual_port_payload(self._port, on), device_id=self._device_id, qos=1
+        )
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        await self._publish(True)
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        await self._publish(False)
 
 
 class VivosunControlSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  # type: ignore[misc]
