@@ -209,6 +209,7 @@ class ShadowV1State(TypedDict, total=False):
     aircd: AirConditionerState
     connection: ConnectionState
     plan: PlanState
+    ports: dict[str, dict[str, object]]
     reported_supported: dict[str, object]
 
 
@@ -306,6 +307,13 @@ def parse_reported_fragment(
             key: value for key, value in reported_fragment.items() if key in _SUPPORTED_REPORTED_ROOT_KEYS
         }
     }
+    port_reports = {
+        key: value
+        for key, value in reported_fragment.items()
+        if key in ("usb1", "usb2", "plug1", "plug2") and isinstance(value, dict)
+    }
+    if port_reports:
+        parsed["ports"] = cast("dict[str, dict[str, object]]", port_reports)
 
     light_raw = _as_dict(reported_fragment.get(SHADOW_KEY_LIGHT))
     if light_raw is not None:
@@ -566,7 +574,11 @@ def _extract_reported(document: dict[str, object]) -> dict[str, object]:
     if state is not None:
         desired = _as_dict(state.get("desired"))
         if desired is not None:
-            return desired
+            # Existing light/fan controls retain their legacy desired-only fallback.
+            # Physical output state must come from the device's reported payload.
+            return {
+                key: value for key, value in desired.items() if key not in ("usb1", "usb2", "plug1", "plug2")
+            }
 
     raise ShadowParseError("Shadow payload does not include state.reported or state.desired")
 

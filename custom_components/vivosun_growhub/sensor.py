@@ -212,6 +212,7 @@ _VGROW_DWC_SENSORS: tuple[VivosunSensorDescription, ...] = (
 )
 
 _DEVICE_TYPE_SENSORS: dict[str, frozenset[str]] = {
+    "a22": frozenset({"pTemp", "pHumi", "pVpd"}),
     "controller": frozenset({"inTemp", "inHumi", "inVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
     "dehumidifier": frozenset({"pTemp", "pHumi", "pVpd"}),
     "humidifier": frozenset({"pTemp", "pHumi", "pVpd", "waterLv", "coreTemp"}),

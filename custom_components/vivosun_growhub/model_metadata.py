@@ -8,6 +8,19 @@ from typing import Any
 from .models import client_model_token
 
 _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
+    "VSPLUGA22": {
+        "default_name": "GrowHub A22",
+        "device_type": "a22",
+        "comm_mode_list": ["MQTT"],
+        "data_upload_groups": [
+            {
+                "group_name": "Probe",
+                "group_type": "CLIMATE",
+                "shadow_channel": 0,
+                "data_keys": ["pTemp", "pHumi", "pVpd"],
+            }
+        ],
+    },
     "VSCBC80": {
         "default_name": "VCure C80",
         "device_type": "curing_box",
