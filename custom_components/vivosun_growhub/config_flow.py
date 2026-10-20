@@ -21,6 +21,7 @@ from .const import (
     DEFAULT_TEMP_UNIT,
     DOMAIN,
     OPTION_CFAN_OSCILLATION_CONTROLLERS,
+    OPTION_REMEMBER_MANUAL_SETTINGS,
     OPTION_SUPPORT_CAPTURE_ENABLED,
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
@@ -36,6 +37,7 @@ class VivosunGrowhubConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # typ
     """Handle a config flow for Vivosun GrowHub."""
 
     VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         """Initialize config flow state."""
@@ -172,6 +174,8 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                 not isinstance(device_id, str) or device_id not in eligible for device_id in selected
             ):
                 errors["base"] = "invalid_oscillation_controller"
+            if type(normalized_input.get(OPTION_REMEMBER_MANUAL_SETTINGS, False)) is not bool:
+                errors["base"] = "invalid_manual_setting"
             if not errors:
                 normalized_input = {**entry.options, **normalized_input}
                 if OPTION_SUPPORT_CAPTURE_ENABLED not in user_input or not user_input[OPTION_SUPPORT_CAPTURE_ENABLED]:
@@ -181,6 +185,8 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                     and not user_input[OPTION_CFAN_OSCILLATION_CONTROLLERS]
                 ):
                     normalized_input.pop(OPTION_CFAN_OSCILLATION_CONTROLLERS, None)
+                if user_input.get(OPTION_REMEMBER_MANUAL_SETTINGS) is not True:
+                    normalized_input.pop(OPTION_REMEMBER_MANUAL_SETTINGS, None)
                 self._camera_devices = self._get_camera_devices(entry)
                 if self._camera_devices:
                     normalized_input.pop(CONF_CAMERA_IPS, None)
@@ -220,6 +226,10 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                 multiple=True,
                 mode=selector.SelectSelectorMode.LIST,
             ))
+        schema_fields[vol.Optional(
+            OPTION_REMEMBER_MANUAL_SETTINGS,
+            default=entry.options.get(OPTION_REMEMBER_MANUAL_SETTINGS) is True,
+        )] = selector.BooleanSelector()
         schema = vol.Schema(schema_fields)
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 

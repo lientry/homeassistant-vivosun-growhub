@@ -21,6 +21,7 @@ from .const import (
     DOMAIN,
     E42A_DFAN_AUTO_MODE,
     MODE_AUTO,
+    SENSOR_UNAVAILABLE_SENTINEL,
     TOPIC_CHANNEL_APP,
     TOPIC_SHADOW_GET,
     TOPIC_SHADOW_GET_ACCEPTED,
@@ -40,7 +41,10 @@ from .shadow import (
     ShadowParseError,
     ShadowV1State,
     accepted_desired_light_level_timestamp,
+    build_cfan_level_payload,
+    build_dfan_level_payload,
     build_light_level_payload,
+    clamp_light_level,
     extract_shadow_reported,
     parse_channel_sensor_payload,
     parse_reported_fragment,
@@ -58,6 +62,7 @@ if TYPE_CHECKING:
     import aiohttp
     from homeassistant.core import HomeAssistant
 
+    from .manual_preferences import ManualPreferences, ManualSelection
     from .models import AuthTokens, AwsIdentity, DeviceInfo
 
 _LOGGER = logging.getLogger(__name__)
@@ -108,6 +113,41 @@ class _ReportedFieldProvenance:
     timestamp: int | None
 
 
+def _reported_field_is_fresh(
+    previous: _ReportedFieldProvenance | None, incoming: _ReportedFieldProvenance, topic: str,
+) -> bool:
+    """Reject stale per-leaf reads without blocking independent partial reports."""
+    if previous is None:
+        return True
+    if previous.version is not None and (incoming.version is None or incoming.version < previous.version):
+        return False
+    if previous.timestamp is not None and incoming.timestamp is not None:
+        if incoming.timestamp < previous.timestamp:
+            return False
+        if incoming.timestamp == previous.timestamp and topic.endswith("/get/accepted"):
+            return False
+    if (
+        previous.version == incoming.version and previous.version is not None
+        and (incoming.timestamp is None or (
+            previous.timestamp is not None and incoming.timestamp <= previous.timestamp
+        ))
+    ):
+        return False
+    return not (previous.timestamp is not None and incoming.timestamp is None and incoming.version is None)
+
+
+@dataclass(slots=True)
+class _PendingManualChoice:
+    """Explicit HA input awaiting its matching cloud shadow acceptance."""
+
+    device_id: str
+    channel: str
+    selection: ManualSelection
+    shadow_level: int
+    generation: int
+    timeout: asyncio.TimerHandle
+
+
 class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ignore[misc]
     """Coordinate cloud bootstrap and MQTT push state lifecycle."""
 
@@ -156,6 +196,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._has_reported_fields: set[_FieldKey] = set()
         self._locally_commanded_fields: set[_FieldKey] = set()
         self._already_confirmed_tokens: dict[str, _ConfirmedCommandReceipt] = {}
+        self.manual_preferences: ManualPreferences | None = None
+        self._pending_manual_choices: dict[str, _PendingManualChoice] = {}
+        self._manual_choice_generation = 0
+        self._last_accepted_manual_generation: dict[tuple[str, str], int] = {}
+        self._manual_choice_lock = asyncio.Lock()
+        self._confirmed_manual_facts: dict[tuple[str, str], dict[str, int | None]] = {}
+        self._manual_fact_provenance: dict[tuple[str, str, str], _ReportedFieldProvenance] = {}
         self._field_generation = 0
         self._sensor_states: dict[str, dict[str, object]] = {}
         self._plan_stage_cache: dict[str, object] = {}  # stage_id -> PlanStageInfo
@@ -278,6 +325,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             for receipt in self._already_confirmed_tokens.values():
                 receipt.timeout.cancel()
             self._already_confirmed_tokens.clear()
+            self._last_accepted_manual_generation.clear()
             self._sensor_states.clear()
             self._plan_stage_cache.clear()
             self._client_id_to_device_id.clear()
@@ -361,15 +409,113 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             },
         )
 
-    async def async_publish_light_level(self, level: int, *, device_id: str) -> None:
+    def manual_memory_enabled(self, device_id: str, channel: str) -> bool:
+        """Check opt-in and the supported controller device/channel contract."""
+        device = self.get_device(device_id)
+        preferences = self.manual_preferences
+        return bool(
+            device is not None and device.device_type == "controller"
+            and preferences is not None and preferences.enabled(device_id, channel)
+        )
+
+    def remembered_manual_selection(self, device_id: str, channel: str) -> ManualSelection | None:
+        """Return stored HA intent only when memory is enabled."""
+        preferences = self.manual_preferences
+        if preferences is None or not self.manual_memory_enabled(device_id, channel):
+            return None
+        return preferences.selection(device_id, channel)
+
+    def manual_restore_allowed(self, device_id: str, channel: str) -> bool:
+        """Require fresh, genuinely reported manual and no-plan component state."""
+        facts = self._confirmed_manual_facts.get((device_id, channel), {})
+        return facts.get("mode") == 0 and facts.get("inPlan") == 0
+
+    def _stage_manual_choice(
+        self, device_id: str, channel: str, selection: ManualSelection, shadow_level: int, token: str,
+    ) -> None:
+        self._manual_choice_generation += 1
+        generation = self._manual_choice_generation
+        timeout = asyncio.get_running_loop().call_later(
+            _FIELD_CONFIRMATION_TIMEOUT, self._discard_manual_choice, token, device_id,
+        )
+        self._pending_manual_choices[token] = _PendingManualChoice(
+            device_id, channel, selection, shadow_level, generation, timeout,
+        )
+
+    def _discard_manual_choice(self, token: str, device_id: str) -> bool:
+        candidate = self._pending_manual_choices.get(token)
+        if candidate is None or candidate.device_id != device_id:
+            return False
+        candidate.timeout.cancel()
+        del self._pending_manual_choices[token]
+        return True
+
+    async def _accept_manual_choice(self, device_id: str, document: dict[str, object]) -> None:
+        """Store only the explicit value correlated to a matching cloud ACK."""
+        token = document.get("clientToken")
+        if not isinstance(token, str):
+            return
+        candidate = self._pending_manual_choices.get(token)
+        if candidate is None or candidate.device_id != device_id:
+            return
+        state = document.get("state")
+        desired = state.get("desired") if isinstance(state, dict) else None
+        component = desired.get(candidate.channel) if isinstance(desired, dict) else None
+        manual = component.get("manu") if isinstance(component, dict) else None
+        if not isinstance(manual, dict) or manual.get("lv") != candidate.shadow_level:
+            return
+        self._discard_manual_choice(token, device_id)
+        preferences = self.manual_preferences
+        if preferences is None or not self.manual_memory_enabled(device_id, candidate.channel):
+            return
+        key = (candidate.device_id, candidate.channel)
+        async with self._manual_choice_lock:
+            if candidate.generation <= self._last_accepted_manual_generation.get(key, 0):
+                return
+            self._last_accepted_manual_generation[key] = candidate.generation
+            await preferences.async_remember(candidate.device_id, candidate.channel, candidate.selection)
+
+    async def async_publish_selected_fan_level(
+        self, *, device_id: str, channel: str, shadow_level: int,
+    ) -> None:
+        """Publish a selected fan level with an independent preference ACK receipt."""
+        values = CFAN_LEVEL_MAP if channel == "cFan" else DFAN_LEVEL_MAP if channel == "dFan" else ()
+        is_natural_wind = channel == "cFan" and shadow_level == 200
+        if not is_natural_wind and shadow_level not in values[1:]:
+            raise ValueError("Unsupported manually selected fan level")
+        if not self.manual_memory_enabled(device_id, channel):
+            raise ValueError("Manual fan setting memory is not enabled")
+        builder = build_cfan_level_payload if channel == "cFan" else build_dfan_level_payload
+        token = uuid4().hex
+        selection: ManualSelection = "natural_wind" if is_natural_wind else values.index(shadow_level) * 10
+        self._stage_manual_choice(device_id, channel, selection, shadow_level, token)
+        try:
+            await self.async_publish_shadow_update(
+                {**builder(shadow_level), "clientToken": token}, device_id=device_id,
+            )
+        except BaseException:
+            self._discard_manual_choice(token, device_id)
+            raise
+
+    async def async_publish_light_level(
+        self, level: int, *, device_id: str, remember_selection: bool = False,
+    ) -> None:
         """Send a local controller light command with immediate provisional feedback."""
         if not self.is_mqtt_connected:
             raise MQTTConnectionError("Cannot publish shadow update while MQTT is disconnected")
         device = self._resolve_device(device_id)
         if device.device_type != "controller":
             raise VivosunResponseError("Light level commands require a controller")
-        payload: dict[str, object] = {**build_light_level_payload(level), "clientToken": uuid4().hex}
-        await self.async_publish_shadow_update(payload, device_id=device_id)
+        token = uuid4().hex
+        payload: dict[str, object] = {**build_light_level_payload(level), "clientToken": token}
+        requested = clamp_light_level(level)
+        if remember_selection and requested > 0 and self.manual_memory_enabled(device_id, "light"):
+            self._stage_manual_choice(device_id, "light", requested, requested, token)
+        try:
+            await self.async_publish_shadow_update(payload, device_id=device_id)
+        except BaseException:
+            self._discard_manual_choice(token, device_id)
+            raise
 
     def _stage_confirmed_receipt(self, device_id: str, channel: str, token: str) -> None:
         """Keep a short rejection receipt without claiming the output changed."""
@@ -722,6 +868,11 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         for pending in self._pending_fields.values():
             pending.timeout.cancel()
         self._pending_fields.clear()
+        for choice in self._pending_manual_choices.values():
+            choice.timeout.cancel()
+        self._pending_manual_choices.clear()
+        self._confirmed_manual_facts.clear()
+        self._manual_fact_provenance.clear()
         for receipt in self._already_confirmed_tokens.values():
             receipt.timeout.cancel()
         self._already_confirmed_tokens.clear()
@@ -766,6 +917,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     document = self._parse_json_object(payload)
                     token = document.get("clientToken")
                     if isinstance(token, str):
+                        self._discard_manual_choice(token, device_id)
                         rejected_channels = self._clear_pending_token(device_id, token)
                         receipt_channel = self._forget_confirmed_receipt(device_id, token)
                         if receipt_channel is not None:
@@ -788,6 +940,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     )
                     parsed_shadow = parse_shadow_document(document, dfan_auto_mode=auto_mode)
                     if device is not None and device.device_type == "controller":
+                        self._record_reported_manual_facts(
+                            device_id, document, extract_shadow_reported(document), topic,
+                        )
                         self._reconcile_reported_fields(device_id, document, parsed_shadow, topic)
                         if topic.endswith("/update/accepted"):
                             self._accept_pending_fields(device_id, document)
@@ -795,6 +950,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                             if isinstance(response_token, str):
                                 self._forget_confirmed_receipt(device_id, response_token)
                     self._merge_shadow_state(device_id, parsed_shadow)
+                    if topic.endswith("/update/accepted"):
+                        await self._accept_manual_choice(device_id, document)
                     if "plan" in parsed_shadow:
                         await self._refresh_plan_stages(force_refresh_active=True)
                     updated = True
@@ -1211,6 +1368,44 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     def _merge_shadow_state(self, device_id: str, state: ShadowV1State) -> None:
         device_shadow = self._shadow_states.setdefault(device_id, {})
         _deep_merge_mapping(device_shadow, cast("dict[str, object]", state))
+
+    def _record_reported_manual_facts(
+        self, device_id: str, document: dict[str, object], reported: dict[str, object] | None, topic: str,
+    ) -> None:
+        """Track genuinely reported manual/plan facts with independent per-leaf freshness."""
+        if not isinstance(reported, dict):
+            return
+        current = document.get("current", document)
+        if not isinstance(current, dict):
+            return
+        raw_version = current.get("version")
+        version = raw_version if type(raw_version) is int and raw_version >= 0 else None
+        metadata = current.get("metadata")
+        metadata = metadata.get("reported") if isinstance(metadata, dict) else None
+        for channel in ("light", "cFan", "dFan"):
+            component = reported.get(channel)
+            if not isinstance(component, dict):
+                continue
+            component_metadata = metadata.get(channel) if isinstance(metadata, dict) else None
+            for field in ("mode", "inPlan"):
+                if field not in component:
+                    continue
+                raw_value = component[field]
+                leaf = component_metadata.get(field) if isinstance(component_metadata, dict) else None
+                raw_time = leaf.get("timestamp") if isinstance(leaf, dict) else None
+                timestamp = raw_time if type(raw_time) is int and raw_time >= 0 else None
+                provenance_key = (device_id, channel, field)
+                incoming = _ReportedFieldProvenance(version=version, timestamp=timestamp)
+                if not _reported_field_is_fresh(self._manual_fact_provenance.get(provenance_key), incoming, topic):
+                    continue
+                if field == "inPlan" and isinstance(raw_value, bool):
+                    value: int | None = int(raw_value)
+                elif type(raw_value) is int and raw_value != SENSOR_UNAVAILABLE_SENTINEL:
+                    value = raw_value
+                else:
+                    value = None
+                self._confirmed_manual_facts.setdefault((device_id, channel), {})[field] = value
+                self._manual_fact_provenance[provenance_key] = incoming
 
     def _merge_sensor_state(self, device_id: str, state: ChannelSensorState) -> None:
         self._sensor_states.setdefault(device_id, {}).update(cast("dict[str, object]", state))

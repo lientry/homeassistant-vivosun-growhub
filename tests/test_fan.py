@@ -51,6 +51,8 @@ class _StubCoordinator:
         self._devices = devices or [_controller_device(_DEV_ID)]
         self.is_mqtt_connected = True
         self.async_publish_shadow_update = AsyncMock()
+        self.manual_memory_enabled = lambda device_id, channel: False
+        self.manual_restore_allowed = lambda device_id, channel: False
 
     @property
     def device(self) -> DeviceInfo:

@@ -149,9 +149,30 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
             return
 
         target = requested_percentage if requested_percentage is not None else self.percentage
+        if requested_percentage is None and requested_preset is None and not self.is_on and (
+            target is None or target <= 0
+        ):
+            selection = (
+                self.coordinator.remembered_manual_selection(self._device_id, self._manual_channel)
+                if self.coordinator.manual_restore_allowed(self._device_id, self._manual_channel) else None
+            )
+            if selection == "natural_wind" and self._manual_channel == "cFan":
+                await self.coordinator.async_publish_shadow_update(
+                    build_cfan_level_payload(200), device_id=self._device_id,
+                )
+                return
+            if type(selection) is int:
+                target = selection
         if target is None or target <= 0:
             target = _DEFAULT_TURN_ON_PERCENTAGE
-        await self.async_set_percentage(target)
+        if requested_percentage is not None and requested_percentage > 0:
+            await self.async_set_percentage(target)
+        else:
+            await self._async_write_percentage(target, remember=False)
+
+    async def _async_write_percentage(self, percentage: int, *, remember: bool) -> None:
+        """Publish a fan speed, distinguishing explicit selection from a bare ON."""
+        raise NotImplementedError
 
     async def async_turn_off(self, **kwargs: object) -> None:
         """Turn the fan off."""
@@ -258,10 +279,18 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
 
     async def async_set_percentage(self, percentage: int) -> None:
         """Set circulation fan speed percentage."""
-        await self.coordinator.async_publish_shadow_update(
-            build_cfan_level_payload(cfan_percentage_to_shadow(percentage)),
-            device_id=self._device_id,
-        )
+        await self._async_write_percentage(percentage, remember=True)
+
+    async def _async_write_percentage(self, percentage: int, *, remember: bool) -> None:
+        level = cfan_percentage_to_shadow(percentage)
+        if remember and percentage > 0 and self.coordinator.manual_memory_enabled(self._device_id, "cFan"):
+            await self.coordinator.async_publish_selected_fan_level(
+                device_id=self._device_id, channel="cFan", shadow_level=level,
+            )
+        else:
+            await self.coordinator.async_publish_shadow_update(
+                build_cfan_level_payload(level), device_id=self._device_id,
+            )
 
     async def async_oscillate(self, oscillating: bool) -> None:
         """Set circulation fan oscillation."""
@@ -277,9 +306,14 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set circulation fan preset mode."""
         if preset_mode == "natural_wind":
-            await self.coordinator.async_publish_shadow_update(
-                build_cfan_level_payload(200), device_id=self._device_id
-            )
+            if self.coordinator.manual_memory_enabled(self._device_id, "cFan"):
+                await self.coordinator.async_publish_selected_fan_level(
+                    device_id=self._device_id, channel="cFan", shadow_level=200,
+                )
+            else:
+                await self.coordinator.async_publish_shadow_update(
+                    build_cfan_level_payload(200), device_id=self._device_id,
+                )
             return
         raise ValueError(f"Unsupported circulation fan preset: {preset_mode}")
 
@@ -348,10 +382,18 @@ class VivosunDuctFanEntity(_VivosunFanBase):
 
     async def async_set_percentage(self, percentage: int) -> None:
         """Set duct fan speed percentage."""
-        await self.coordinator.async_publish_shadow_update(
-            build_dfan_level_payload(dfan_percentage_to_shadow(percentage)),
-            device_id=self._device_id,
-        )
+        await self._async_write_percentage(percentage, remember=True)
+
+    async def _async_write_percentage(self, percentage: int, *, remember: bool) -> None:
+        level = dfan_percentage_to_shadow(percentage)
+        if remember and percentage > 0 and self.coordinator.manual_memory_enabled(self._device_id, "dFan"):
+            await self.coordinator.async_publish_selected_fan_level(
+                device_id=self._device_id, channel="dFan", shadow_level=level,
+            )
+        else:
+            await self.coordinator.async_publish_shadow_update(
+                build_dfan_level_payload(level), device_id=self._device_id,
+            )
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set duct fan preset mode."""

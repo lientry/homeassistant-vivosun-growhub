@@ -29,10 +29,12 @@
         "data": {
           "temp_unit": "Temperature unit",
           "support_capture_enabled": "Enable support capture for diagnostics",
-          "cfan_oscillation_controllers": "Oscillation control"
+          "cfan_oscillation_controllers": "Oscillation control",
+          "remember_manual_settings": "Remember manual settings"
         },
         "data_description": {
-          "cfan_oscillation_controllers": "Enable only if your fan offers oscillation control in the Vivosun app."
+          "cfan_oscillation_controllers": "Enable only if your fan offers oscillation control in the Vivosun app.",
+          "remember_manual_settings": "Settings selected in Home Assistant are remembered."
         }
       },
       "camera": {

@@ -9,8 +9,14 @@ import pytest
 from homeassistant.exceptions import ConfigEntryNotReady
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.vivosun_growhub import async_setup_entry, async_unload_entry
-from custom_components.vivosun_growhub.const import CONF_EMAIL, CONF_PASSWORD, DOMAIN, PLATFORMS
+from custom_components.vivosun_growhub import async_migrate_entry, async_setup_entry, async_unload_entry
+from custom_components.vivosun_growhub.const import (
+    CONF_EMAIL,
+    CONF_PASSWORD,
+    DOMAIN,
+    OPTION_REMEMBER_MANUAL_SETTINGS,
+    PLATFORMS,
+)
 from custom_components.vivosun_growhub.exceptions import VivosunResponseError
 from custom_components.vivosun_growhub.models import RuntimeData
 
@@ -133,3 +139,30 @@ async def test_setup_entry_success_stores_runtime_and_forwards_platforms(
     assert isinstance(runtime, RuntimeData)
     assert isinstance(runtime.coordinator, _CoordinatorStub)
     hass.config_entries.async_forward_entry_setups.assert_awaited_once_with(entry, PLATFORMS)
+
+
+async def test_config_entry_migration_keeps_unrelated_options_and_disables_invalid_legacy(
+    hass: HomeAssistant,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={}, options={
+            "temp_unit": "fahrenheit", OPTION_REMEMBER_MANUAL_SETTINGS: ["invalid"],
+        }, minor_version=1,
+    )
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.minor_version == 2
+    assert entry.options == {"temp_unit": "fahrenheit"}
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options == {"temp_unit": "fahrenheit"}
+
+
+async def test_config_entry_migration_keeps_approved_legacy_opt_in(hass: HomeAssistant) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN, data={}, options={
+            OPTION_REMEMBER_MANUAL_SETTINGS: ["device-1:cFan", "device-1:light"],
+        }, minor_version=1,
+    )
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[OPTION_REMEMBER_MANUAL_SETTINGS] is True
