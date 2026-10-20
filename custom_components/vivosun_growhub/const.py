@@ -28,6 +28,7 @@ CONF_HAS_CAMERA = "has_camera"
 DEFAULT_TEMP_UNIT = "celsius"
 OPTION_SUPPORT_CAPTURE_ENABLED = "support_capture_enabled"
 OPTION_CFAN_OSCILLATION_CONTROLLERS = "cfan_oscillation_controllers"
+OPTION_REMEMBER_MANUAL_SETTINGS = "remember_manual_settings"
 SERVICE_START_SUPPORT_CAPTURE = "start_support_capture"
 SERVICE_STOP_SUPPORT_CAPTURE = "stop_support_capture"
 SUPPORT_CAPTURE_DEFAULT_MAX_EVENTS = 500

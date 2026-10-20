@@ -13,6 +13,7 @@ from .const import (
     CONF_EMAIL,
     CONF_PASSWORD,
     DOMAIN,
+    OPTION_REMEMBER_MANUAL_SETTINGS,
     OPTION_SUPPORT_CAPTURE_ENABLED,
     PLATFORMS,
     SERVICE_START_SUPPORT_CAPTURE,
@@ -21,6 +22,7 @@ from .const import (
 )
 from .coordinator import VivosunCoordinator
 from .exceptions import VivosunGrowhubError
+from .manual_preferences import MANUAL_CHANNELS, ManualPreferences
 from .models import RuntimeData
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -112,6 +114,33 @@ async def _async_handle_stop_support_capture(hass: HomeAssistant, call: ServiceC
     await coordinator.async_stop_support_capture()
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Upgrade the former per-channel option to a single Boolean opt-in."""
+    if entry.version != 1:
+        return False
+    if entry.minor_version >= 2:
+        return True
+
+    previous = entry.options.get(OPTION_REMEMBER_MANUAL_SETTINGS, False)
+    if type(previous) is bool:
+        enabled = previous
+    elif isinstance(previous, list):
+        enabled = bool(previous) and all(
+            isinstance(key, str) and ":" in key and bool(key.rsplit(":", 1)[0])
+            and key.rsplit(":", 1)[1] in MANUAL_CHANNELS
+            for key in previous
+        )
+    else:
+        enabled = False
+    options = dict(entry.options)
+    if enabled:
+        options[OPTION_REMEMBER_MANUAL_SETTINGS] = True
+    else:
+        options.pop(OPTION_REMEMBER_MANUAL_SETTINGS, None)
+    hass.config_entries.async_update_entry(entry, options=options, minor_version=2)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Vivosun GrowHub from a config entry."""
     _register_services(hass)
@@ -129,6 +158,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         await coordinator.async_start()
+        preferences = ManualPreferences(
+            hass, entry.entry_id, entry.options.get(OPTION_REMEMBER_MANUAL_SETTINGS) is True,
+        )
+        await preferences.async_load()
+        coordinator.manual_preferences = preferences
         if entry.options.get(OPTION_SUPPORT_CAPTURE_ENABLED) is True:
             await coordinator.async_start_support_capture(max_events=SUPPORT_CAPTURE_DEFAULT_MAX_EVENTS)
     except VivosunGrowhubError as err:

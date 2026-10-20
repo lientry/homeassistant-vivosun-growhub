@@ -105,9 +105,20 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
         brightness = kwargs.get("brightness")
         if isinstance(brightness, int):
             level = round(brightness * 100 / 255)
-            await self.coordinator.async_publish_light_level(level, device_id=self._device_id)
+            if level > 0 and self.coordinator.manual_memory_enabled(self._device_id, "light"):
+                await self.coordinator.async_publish_light_level(
+                    level, device_id=self._device_id, remember_selection=True,
+                )
+            else:
+                await self.coordinator.async_publish_light_level(level, device_id=self._device_id)
         elif self._light_level() in (None, 0):
-            await self.coordinator.async_publish_light_level(LIGHT_MIN_BRIGHTNESS, device_id=self._device_id)
+            selection = (
+                self.coordinator.remembered_manual_selection(self._device_id, "light")
+                if self.coordinator.manual_restore_allowed(self._device_id, "light") else None
+            )
+            await self.coordinator.async_publish_light_level(
+                selection if type(selection) is int else LIGHT_MIN_BRIGHTNESS, device_id=self._device_id,
+            )
 
         spectrum = kwargs.get("spectrum")
         if isinstance(spectrum, int):

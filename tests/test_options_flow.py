@@ -17,6 +17,7 @@ from custom_components.vivosun_growhub.const import (
     CONF_HAS_CAMERA,
     DOMAIN,
     OPTION_CFAN_OSCILLATION_CONTROLLERS,
+    OPTION_REMEMBER_MANUAL_SETTINGS,
     OPTION_SUPPORT_CAPTURE_ENABLED,
 )
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
@@ -94,6 +95,33 @@ async def test_oscillation_option_is_per_controller_and_removable(
         await hass.async_block_till_done()
     assert OPTION_CFAN_OSCILLATION_CONTROLLERS not in entry.options
     assert entry.options["unrelated_setting"] == "keep"
+
+
+async def test_global_remember_option_defaults_off_and_can_be_disabled(
+    hass: HomeAssistant, enable_custom_integrations: None,
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={"unrelated_setting": "keep"})
+    entry.add_to_hass(hass)
+    with patch.object(hass.config_entries, "async_reload", AsyncMock(return_value=True)):
+        form = await hass.config_entries.options.async_init(entry.entry_id)
+        assert OPTION_REMEMBER_MANUAL_SETTINGS in {m.schema for m in form["data_schema"].schema}
+        assert OPTION_REMEMBER_MANUAL_SETTINGS not in entry.options
+        await hass.config_entries.options.async_configure(
+            form["flow_id"], user_input={
+                "temp_unit": "celsius", OPTION_REMEMBER_MANUAL_SETTINGS: True,
+            },
+        )
+        await hass.async_block_till_done()
+        assert entry.options[OPTION_REMEMBER_MANUAL_SETTINGS] is True
+        form = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.config_entries.options.async_configure(
+            form["flow_id"], user_input={
+                "temp_unit": "celsius", OPTION_REMEMBER_MANUAL_SETTINGS: False,
+            },
+        )
+        await hass.async_block_till_done()
+        assert OPTION_REMEMBER_MANUAL_SETTINGS not in entry.options
+        assert entry.options["unrelated_setting"] == "keep"
 
 
 async def test_options_flow_updates_temp_unit_and_sensor_unit(
