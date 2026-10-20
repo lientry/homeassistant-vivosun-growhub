@@ -124,6 +124,7 @@ SHADOW_ROOT_REPORTED = "reported"
 DESIRED_LEVEL_PATH_NOTE = "desired.<key>.manu.lv"
 
 PLATFORMS: list[Platform] = [
+    Platform.NUMBER,
     Platform.SELECT,
     Platform.SWITCH,
     Platform.LIGHT,

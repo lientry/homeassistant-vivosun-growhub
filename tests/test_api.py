@@ -183,7 +183,7 @@ async def test_login_success_returns_auth_tokens(caplog: pytest.LogCaptureFixtur
     assert "refresh-123" not in caplog.text
 
 
-async def test_discovery_retains_safe_capture_routing_when_scene_is_missing() -> None:
+async def test_discovery_accepts_vseed_without_scene_and_retains_safe_capture_routing() -> None:
     entries = [
         {
             "name": "VSeed S40",
@@ -216,11 +216,14 @@ async def test_discovery_retains_safe_capture_routing_when_scene_is_missing() ->
 
     devices = await api.get_devices(_valid_tokens())
 
-    assert not any(device.name == "VSeed S40" for device in devices)
+    vseed = next(device for device in devices if device.name == "VSeed S40")
+    assert vseed.device_type == "vseed"
+    assert vseed.supports_point_log is True
+    assert vseed.scene_id == 0
     candidates = api.capture_devices
     assert len(candidates) == 1
     assert candidates[0].client_id == "vivosun-VSSBS40-account-seed"
-    assert candidates[0].missing_fields == ("sceneId",)
+    assert candidates[0].missing_fields == ()
     assert candidates[0].topic_prefix == "vivosun/seed"
     assert "never-copy" not in repr(candidates)
     assert "camera-secret" not in repr(candidates)

@@ -14,6 +14,7 @@ from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
 from .ports import A22_PORTS, PortReport, build_manual_port_payload, reported_port
+from .vseed import STAGES, command, reported_seed
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -59,6 +60,11 @@ async def async_setup_entry(
         if client_model_token(device.client_id) == "VSPLUGA22":
             entities.extend(VivosunPortSwitch(coordinator, device.device_id, port) for port in A22_PORTS)
             continue
+        if device.device_type == "vseed":
+            entities.append(VivosunSeedIrrigationSwitch(coordinator, device.device_id))
+            for phase in (1, 2, 3):
+                for key in ("lgtEn", "pumpEn"):
+                    entities.append(VivosunSeedStageSwitch(coordinator, device.device_id, phase, key))
         if device.device_type != "curing_box":
             continue
         for description in _CURING_BOX_SWITCHES:
@@ -119,6 +125,94 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
             )
         await self.coordinator.async_publish_shadow_update(
             build_manual_port_payload(self._port, on), device_id=self._device_id, qos=1
+        )
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        await self._publish(True)
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        await self._publish(False)
+
+
+class VivosunSeedIrrigationSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  # type: ignore[misc]
+    """Manual Quick Irrigation (10 minutes), with reported-only status."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Quick Irrigation"
+    _attr_icon = "mdi:watering-can"
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_seed_quick_irrigation"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(self.coordinator, self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return is_entity_available(self.coordinator, self._device_id)
+
+    @property
+    def is_on(self) -> bool | None:
+        quick = reported_seed(self.coordinator, self._device_id).get("quickAct")
+        value = quick.get("waterTime") if isinstance(quick, dict) else None
+        return value > 0 if type(value) is int else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        return {"water_warning_code": reported_seed(self.coordinator, self._device_id).get("lackWater")}
+
+    async def _publish(self, seconds: int) -> None:
+        await self.coordinator.async_publish_shadow_update(
+            command(("quickAct", "waterTime"), seconds), device_id=self._device_id, qos=1
+        )
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        """Request the app's 600-second manual cycle; hardware may refuse."""
+        await self._publish(600)
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        """Request app-equivalent stop without retries."""
+        await self._publish(0)
+
+
+class VivosunSeedStageSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  # type: ignore[misc]
+    """Edit a stored stage recipe's light or pump enable flag."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str, phase: int, key: str) -> None:
+        super().__init__(coordinator)
+        if phase not in (1, 2, 3) or key not in ("lgtEn", "pumpEn"):
+            raise ValueError("Unsupported VSeed enable setting")
+        self._device_id = device_id
+        self._phase = phase
+        self._key = key
+        function = "Light Enabled" if key == "lgtEn" else "Irrigation Enabled"
+        self._attr_name = f"{STAGES[phase]} {function}"
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_seed_stage{phase}_{key}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(self.coordinator, self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return is_entity_available(self.coordinator, self._device_id)
+
+    @property
+    def is_on(self) -> bool | None:
+        stage = reported_seed(self.coordinator, self._device_id).get(f"stage{self._phase}")
+        value = stage.get(self._key) if isinstance(stage, dict) else None
+        return value == 1 if type(value) is int and value in (0, 1) else None
+
+    async def _publish(self, enabled: bool) -> None:
+        await self.coordinator.async_publish_shadow_update(
+            command((f"stage{self._phase}", self._key), int(enabled)),
+            device_id=self._device_id,
+            qos=1,
         )
 
     async def async_turn_on(self, **kwargs: object) -> None:

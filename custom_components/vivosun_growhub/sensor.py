@@ -30,6 +30,7 @@ from .coordinator import VivosunCoordinator
 from .entity_helpers import build_device_info, is_entity_available, plan_slice, plan_stage_cache, sensor_slice
 from .models import client_model_token
 from .shadow import cfan_shadow_to_percentage, dfan_shadow_to_percentage
+from .vseed import reported_seed
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -211,6 +212,26 @@ _VGROW_DWC_SENSORS: tuple[VivosunSensorDescription, ...] = (
     ),
 )
 
+_VSEED_SENSORS: tuple[VivosunSensorDescription, ...] = (
+    VivosunSensorDescription(
+        key="seed_root_temperature", name="Root Temperature", channel_key="rTemp",
+        quantity="temperature", device_class=SensorDeviceClass.TEMPERATURE,
+    ),
+    VivosunSensorDescription(
+        key="seed_dome_temperature", name="Dome Temperature", channel_key="pTemp",
+        quantity="temperature", device_class=SensorDeviceClass.TEMPERATURE,
+    ),
+    VivosunSensorDescription(
+        key="seed_dome_humidity", name="Dome Humidity", channel_key="pHumi",
+        quantity="humidity", device_class=SensorDeviceClass.HUMIDITY,
+        native_unit_of_measurement=PERCENTAGE,
+    ),
+    VivosunSensorDescription(
+        key="seed_vpd", name="VPD", channel_key="pVpd",
+        quantity="vpd", native_unit_of_measurement="kPa", icon="mdi:leaf",
+    ),
+)
+
 _DEVICE_TYPE_SENSORS: dict[str, frozenset[str]] = {
     "a22": frozenset({"pTemp", "pHumi", "pVpd"}),
     "controller": frozenset({"inTemp", "inHumi", "inVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
@@ -238,6 +259,12 @@ async def async_setup_entry(
 
     entities: list[SensorEntity] = []
     for device in coordinator.devices:
+        if device.device_type == "vseed":
+            entities.extend(
+                VivosunChannelSensorEntity(coordinator, entry, description, device.device_id)
+                for description in _VSEED_SENSORS
+            )
+            entities.append(VivosunSeedLiveLightSensor(coordinator, device.device_id))
         allowed_keys = _DEVICE_TYPE_SENSORS.get(device.device_type, frozenset())
         for description in _ALL_SENSOR_DESCRIPTIONS:
             if description.channel_key in allowed_keys:
@@ -263,6 +290,34 @@ async def async_setup_entry(
                     )
                 )
     async_add_entities(entities)
+
+
+class VivosunSeedLiveLightSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
+    """Actual S40 light level from the reported actuator state."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Current Light Intensity"
+    _attr_icon = "mdi:brightness-6"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_seed_current_light_intensity"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(self.coordinator, self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return is_entity_available(self.coordinator, self._device_id)
+
+    @property
+    def native_value(self) -> int | None:
+        level = reported_seed(self.coordinator, self._device_id).get("lgtLv")
+        return level if type(level) is int and 0 <= level <= 100 else None
 
 
 class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
@@ -350,6 +405,8 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
 
     def _computed_vpd(self) -> float | None:
         """Compute air VPD in kPa from matching temperature/RH channels (FAO-56)."""
+        if self.entity_description.key == "seed_vpd":
+            return None
         sensors = sensor_slice(self.coordinator, self._device_id)
         for vpd_key in self.entity_description.channel_key_lookup:
             prefix = vpd_key.removesuffix("Vpd")

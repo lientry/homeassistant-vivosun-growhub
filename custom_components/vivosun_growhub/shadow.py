@@ -64,6 +64,7 @@ _SUPPORTED_REPORTED_ROOT_KEYS: frozenset[str] = frozenset(
         "ctlLight",
         "ctlLock",
         "cure",
+        "seed",
     }
 )
 _DFAN_AUTO_FIELDS: frozenset[str] = frozenset(
@@ -575,9 +576,10 @@ def _extract_reported(document: dict[str, object]) -> dict[str, object]:
         desired = _as_dict(state.get("desired"))
         if desired is not None:
             # Existing light/fan controls retain their legacy desired-only fallback.
-            # Physical output state must come from the device's reported payload.
+            # Physical output and VSeed state require device-reported values.
             return {
-                key: value for key, value in desired.items() if key not in ("usb1", "usb2", "plug1", "plug2")
+                key: value for key, value in desired.items()
+                if key not in ("seed", "usb1", "usb2", "plug1", "plug2")
             }
 
     raise ShadowParseError("Shadow payload does not include state.reported or state.desired")
