@@ -171,7 +171,9 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
             normalized_input = self._normalize_options(user_input)
             eligible = {device.device_id for device in self._get_controller_devices(entry)}
             spectrum_selected = normalized_input.get(OPTION_SPECTRUM_CONTROLLERS, [])
-            if not isinstance(spectrum_selected, list) or any(id not in eligible for id in spectrum_selected):
+            if not isinstance(spectrum_selected, list) or any(
+                not isinstance(device_id, str) or device_id not in eligible for device_id in spectrum_selected
+            ):
                 errors["base"] = "invalid_spectrum_controller"
             selected = normalized_input.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
             if not isinstance(selected, list) or any(
@@ -221,10 +223,12 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         }
         controllers = self._get_controller_devices(entry)
         if controllers:
+            eligible = {device.device_id for device in controllers}
             saved_spectrum = entry.options.get(OPTION_SPECTRUM_CONTROLLERS, [])
             schema_fields[vol.Optional(
                 OPTION_SPECTRUM_CONTROLLERS,
-                default=[id for id in saved_spectrum if id in {device.device_id for device in controllers}]
+                default=[device_id for device_id in saved_spectrum
+                         if isinstance(device_id, str) and device_id in eligible]
                 if isinstance(saved_spectrum, list) else [],
             )] = selector.SelectSelector(selector.SelectSelectorConfig(
                 options=[selector.SelectOptionDict(value=device.device_id, label=device.name)
@@ -235,7 +239,8 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
             saved = entry.options.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
             schema_fields[vol.Optional(
                 OPTION_CFAN_OSCILLATION_CONTROLLERS,
-                default=[device_id for device_id in saved if device_id in {d.device_id for d in controllers}]
+                default=[device_id for device_id in saved
+                         if isinstance(device_id, str) and device_id in eligible]
                 if isinstance(saved, list) else [],
             )] = selector.SelectSelector(selector.SelectSelectorConfig(
                 options=[selector.SelectOptionDict(value=device.device_id, label=device.name)

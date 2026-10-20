@@ -31,6 +31,75 @@ if TYPE_CHECKING:
 _DEV_ID = "dev-1"
 
 
+@pytest.mark.parametrize("key", [OPTION_SPECTRUM_CONTROLLERS, OPTION_CFAN_OSCILLATION_CONTROLLERS])
+@pytest.mark.parametrize(
+    ("saved", "expected"),
+    [
+        ([{}], []),
+        ([[]], []),
+        ([42], []),
+        (["unknown-device"], []),
+        ([_DEV_ID, {}], [_DEV_ID]),
+        ("not-a-list", []),
+    ],
+)
+async def test_malformed_saved_controller_selections_have_safe_form_defaults(
+    hass: HomeAssistant, key: str, saved: object, expected: list[str],
+) -> None:
+    original_options = {
+        key: saved,
+        CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"},
+        OPTION_REMEMBER_MANUAL_SETTINGS: True,
+        OPTION_SUPPORT_CAPTURE_ENABLED: True,
+        "future_option": 42,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options=original_options)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry.entry_id, cast("object", _StubCoordinator())
+    )
+    flow = VivosunGrowhubOptionsFlow(entry)
+    flow.hass = hass
+    form = await flow.async_step_init()
+    assert form["type"] is FlowResultType.FORM
+    setting = next(marker for marker in form["data_schema"].schema if marker.schema == key)
+    assert setting.default() == expected
+    assert entry.options == original_options
+
+
+@pytest.mark.parametrize(
+    ("key", "error"),
+    [
+        (OPTION_SPECTRUM_CONTROLLERS, "invalid_spectrum_controller"),
+        (OPTION_CFAN_OSCILLATION_CONTROLLERS, "invalid_oscillation_controller"),
+    ],
+)
+@pytest.mark.parametrize("invalid", [[{}], [[]], [42], [None], ["unknown-device"], [_DEV_ID, {}]])
+async def test_malformed_submitted_controller_selections_return_form_errors(
+    hass: HomeAssistant, key: str, error: str, invalid: list[object],
+) -> None:
+    original_options = {
+        CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"},
+        OPTION_REMEMBER_MANUAL_SETTINGS: True,
+        OPTION_SUPPORT_CAPTURE_ENABLED: True,
+        "future_option": 42,
+    }
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options=original_options)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry.entry_id, cast("object", _StubCoordinator())
+    )
+    flow = VivosunGrowhubOptionsFlow(entry)
+    flow.hass = hass
+    result = await flow.async_step_init({
+        "temp_unit": "celsius",
+        key: invalid,
+        OPTION_REMEMBER_MANUAL_SETTINGS: True,
+        OPTION_SUPPORT_CAPTURE_ENABLED: True,
+    })
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"]["base"] == error
+    assert entry.options == original_options
+
+
 async def test_spectrum_option_is_per_controller_default_off_and_removable(
     hass: HomeAssistant, enable_custom_integrations: None,
 ) -> None:

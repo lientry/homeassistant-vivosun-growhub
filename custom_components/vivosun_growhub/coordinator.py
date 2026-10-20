@@ -1508,7 +1508,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             "mqtt_connected": self.is_mqtt_connected,
         }
         shadows = cast("dict[str, dict[str, object]]", snapshot["shadows"])
-        for device_id, confirmed in getattr(self, "_confirmed_spectrum", {}).items():
+        for device_id, confirmed in self._confirmed_spectrum.items():
             shadows.setdefault(device_id, {})["confirmed_spectrum"] = dict(confirmed)
         for (device_id, channel, field), pending in self._pending_fields.items():
             component = shadows.setdefault(device_id, {}).setdefault(channel, {})
