@@ -41,6 +41,10 @@ _CURING_BOX_SWITCHES: tuple[VivosunSwitchDescription, ...] = (
 )
 
 
+_PORT_ONLY_MODELS = frozenset({"VSPLUGA10", "VSPLUGA22"})
+_PORT_MODEL_NAMES = {"VSPLUGA10": "GrowHub A10", "VSPLUGA22": "GrowHub A22", "VSCTLY18": "VGrow"}
+
+
 def _runtime(hass: HomeAssistant, entry: ConfigEntry) -> RuntimeData:
     return cast("RuntimeData", hass.data[DOMAIN][entry.entry_id])
 
@@ -62,7 +66,7 @@ async def async_setup_entry(
             entities.extend(
                 VivosunPortSwitch(coordinator, device.device_id, port, model) for port in PORTS_BY_MODEL[model]
             )
-            if model == "VSPLUGA22":
+            if model in _PORT_ONLY_MODELS:
                 continue
         if device.device_type == "vseed":
             entities.append(VivosunSeedIrrigationSwitch(coordinator, device.device_id))
@@ -77,7 +81,7 @@ async def async_setup_entry(
 
 
 class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  # type: ignore[misc]
-    """Physical A22 or VGrow output with reported status and guarded manual writes."""
+    """Physical A10, A22 or VGrow output with reported status and guarded manual writes."""
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:power-socket"
@@ -88,7 +92,7 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
             raise ValueError("Unsupported model/physical port")
         self._device_id = device_id
         self._port = port
-        self._model_name = "GrowHub A22" if model == "VSPLUGA22" else "VGrow"
+        self._model_name = _PORT_MODEL_NAMES[model]
         self._attr_name = port.upper() if port.startswith("usb") else f"Outlet {port[-1]}"
         self._attr_unique_id = f"vivosun_growhub_{device_id}_{port}"
 

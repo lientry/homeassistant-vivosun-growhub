@@ -65,6 +65,8 @@ _LOGGER = logging.getLogger(__name__)
 _AUTH_MESSAGE_MARKERS = ("auth", "credential", "forbidden", "invalid", "login", "password", "token", "unauthorized")
 _SP_APP_ID = "com.vivosun.android"
 _NO_SCENE_DEVICE_TYPES = frozenset({"curing_box", "vseed"})
+# Port-only devices with no built-in climate sensor: no point-log polling and no sceneId requirement.
+_NO_POINT_LOG_DEVICE_TYPES = frozenset({"a10"})
 
 
 class VivosunApiClient:
@@ -154,7 +156,9 @@ class VivosunApiClient:
         topic_prefix = self._optional_str(device, "topicPrefix")
         device_type = infer_device_type(name, client_id or "")
         scene_id = self._optional_scene_id(device)
-        supports_point_log = scene_id is not None or device_type in _NO_SCENE_DEVICE_TYPES
+        supports_point_log = device_type not in _NO_POINT_LOG_DEVICE_TYPES and (
+            scene_id is not None or device_type in _NO_SCENE_DEVICE_TYPES
+        )
         if device_type == "vseed":
             if client_id is not None and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", client_id) is None:
                 client_id = None
@@ -170,7 +174,11 @@ class VivosunApiClient:
         missing_fields: list[str] = []
         if device_id is None:
             missing_fields.append("deviceId")
-        if scene_id is None and device_type not in _NO_SCENE_DEVICE_TYPES and device_type != "camera":
+        if (
+            scene_id is None
+            and device_type not in _NO_SCENE_DEVICE_TYPES | _NO_POINT_LOG_DEVICE_TYPES
+            and device_type != "camera"
+        ):
             missing_fields.append("sceneId")
         if device_type != "camera":
             if client_id is None:

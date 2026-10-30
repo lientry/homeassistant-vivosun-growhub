@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+A10_PORTS = ("plug1",)
 A22_PORTS = ("usb1", "usb2", "plug1", "plug2")
 VGROW_PORTS = ("usb1", "usb2")
-PORTS_BY_MODEL = {"VSPLUGA22": A22_PORTS, "VSCTLY18": VGROW_PORTS}
+PORTS_BY_MODEL = {"VSPLUGA10": A10_PORTS, "VSPLUGA22": A22_PORTS, "VSCTLY18": VGROW_PORTS}
 
 
 @dataclass(frozen=True)

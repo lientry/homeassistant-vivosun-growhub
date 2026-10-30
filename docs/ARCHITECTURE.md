@@ -16,9 +16,9 @@ The integration uses REST for account discovery and climate telemetry, and AWS I
 
 Bootstrap logs in through `/user/login`, discovers account devices through `/iot/device/getTotalList`, exchanges `/iot/user/awsIdentity` with Cognito, connects MQTT and requests initial shadows and telemetry.
 
-One coordinator routes devices by their device ID, client ID and topic prefix. Device classification determines entity families, with exact model handling for A22, VGrow, VSeed and other model-specific protocols. Controller identity does not establish which external accessories are physically attached.
+One coordinator routes devices by their device ID, client ID and topic prefix. Device classification determines entity families, with exact model handling for A10, A22, VGrow, VSeed and other model-specific protocols. Controller identity does not establish which external accessories are physically attached.
 
-VSeed S40 discovery and point-log requests accept a device without a garden scene. Cameras use account discovery and optional per-camera LAN IP configuration, but remain outside the MQTT device path. RTSP credentials are URL-encoded when building stream URLs.
+VSeed S40 discovery and point-log requests accept a device without a garden scene. A10 discovery also accepts a device without a garden scene, and the A10 makes no point-log requests. Cameras use account discovery and optional per-camera LAN IP configuration, but remain outside the MQTT device path. RTSP credentials are URL-encoded when building stream URLs.
 
 ## State and command contracts
 
@@ -63,13 +63,15 @@ Spectrum and circulation oscillation are separate default-off, per-controller op
 
 Oscillation opt-in exposes the native fan feature and existing Boolean `cFan.osc` command. Disabled controls reject stale service calls before publishing. It does not infer fan generation or translate multilevel oscillation.
 
-### A22 and VGrow ports
+### A10, A22 and VGrow ports
 
-A22 has physical `usb1`, `usb2`, `plug1` and `plug2` switches. VGrow `VSCTLY18` has `usb1` and `usb2`. Stable identities follow the physical port, not its accessory selection.
+A22 has physical `usb1`, `usb2`, `plug1` and `plug2` switches. A10 `VSPLUGA10` has one AC outlet, `plug1`, with the same port schema as the A22 outlets. VGrow `VSCTLY18` has `usb1` and `usb2`. Stable identities follow the physical port, not its accessory selection.
 
 Current output comes from genuine reported root `lv`: exactly zero or 100. The stored manual level may differ during a plan. Output remains readable across modes and partial reports; unknown/nonbinary output makes the switch unavailable.
 
 Writes require an available binary output and explicit reported manual mode with no plan. They change only `manu.lv` to zero or 100, never mode, plan or accessory type. Numeric `dev` is an accessory-code attribute, not a verified accessory name or a speed contract.
+
+A10 and A22 are classified by model token before the generic GrowHub name check, so neither receives the controller entities (light, fans, inside/outside climate sensors, plan sensors). A10 has no built-in climate sensor, so it has no sensors besides connectivity, does not poll point logs and does not require a `sceneId`. Optional external sensors on the A10 are not handled.
 
 ### VSeed S40
 
