@@ -57,6 +57,8 @@ def infer_device_type(name: str, client_id: str = "") -> str:
     """Infer device type from stable model tokens and friendly-name hints."""
     combined = f"{name} {client_id}".lower()
     model_token = client_model_token(client_id)
+    if model_token == "VSPLUGA10":
+        return "a10"
     if model_token == "VSPLUGA22":
         return "a22"
     if model_token == "VSSBS40":

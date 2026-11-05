@@ -19,6 +19,7 @@ Requires your Vivosun app account. Device control and sensor readings use the Vi
 | Device | Controls | Sensors |
 | --- | --- | --- |
 | GrowHub E42, E42A, E42A+, E25 | Grow light brightness, circulation and duct fans, fan presets, spectrum, oscillation | Temperature, humidity, VPD, connection, grow-plan stage and schedules |
+| GrowHub A10 | One AC outlet | Connection |
 | GrowHub A22 | Two USB outputs and two AC outlets | Probe temperature, humidity and VPD |
 | VGrow | Grow light, fans, spectrum and two USB outputs | Temperature, humidity, VPD, DWC water level and temperature |
 | VSeed S40 | Growth stage, Quick Irrigation, stage temperature, humidity, light and irrigation settings | Root and dome temperature, dome humidity, VPD and current light intensity |

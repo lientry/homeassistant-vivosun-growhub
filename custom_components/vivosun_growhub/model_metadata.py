@@ -8,6 +8,12 @@ from typing import Any
 from .models import client_model_token
 
 _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
+    "VSPLUGA10": {
+        "default_name": "GrowHub A10",
+        "device_type": "a10",
+        "comm_mode_list": ["MQTT"],
+        "data_upload_groups": [],
+    },
     "VSPLUGA22": {
         "default_name": "GrowHub A22",
         "device_type": "a22",
