@@ -9,6 +9,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, shadow_slice
 
 if TYPE_CHECKING:
@@ -34,11 +35,9 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    entities = [
+    watch_devices(entry, coordinator, async_add_entities, lambda device: [
         VivosunConnectionBinarySensorEntity(coordinator, device.device_id)
-        for device in coordinator.devices
-    ]
-    async_add_entities(entities)
+    ])
 
 
 class VivosunConnectionBinarySensorEntity(CoordinatorEntity[VivosunCoordinator], BinarySensorEntity):  # type: ignore[misc]

@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
+from discovery_stubs import DiscoveryCoordinatorStub
+from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
@@ -13,8 +15,62 @@ from custom_components.vivosun_growhub.select import (
     OPTION_CURE_ONLY,
     OPTION_STOPPED,
     VivosunCureModeSelect,
+    VivosunSpectrumSelect,
     async_setup_entry,
 )
+
+
+async def test_spectrum_requires_opt_in_and_reported_manual_state(hass: HomeAssistant) -> None:
+    coordinator = _StubCoordinator()
+    controller = DeviceInfo(
+        "controller-1", "vivosun-VSCTLE42A-account-1", "topic-a", "AeroLight", True, 1, "controller"
+    )
+    spider = DeviceInfo(
+        "controller-2", "vivosun-VSCTLE42A-account-2", "topic-b", "Spider Farmer", True, 2, "controller"
+    )
+    coordinator._device = controller
+    coordinator._devices = [controller, spider]
+    coordinator.data["shadows"]["controller-1"] = {"confirmed_spectrum": {"spec": 50, "mode": 0, "inPlan": 0}}
+    coordinator.data["shadows"]["controller-2"] = {"confirmed_spectrum": {"spec": 50, "mode": 0, "inPlan": 0}}
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={"spectrum_controllers": ["controller-1"]})
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(entry.entry_id, cast("object", coordinator))
+    added: list[object] = []
+    await async_setup_entry(hass, entry, added.extend)
+    spectra = [entity for entity in added if isinstance(entity, VivosunSpectrumSelect)]
+    assert len(spectra) == 1
+    spectrum = spectra[0]
+    assert spectrum.unique_id == "vivosun_growhub_controller-1_spectrum"
+    assert spectrum.current_option == "Vegetative"
+    await spectrum.async_select_option("Bloom")
+    coordinator.async_publish_shadow_update.assert_awaited_once_with(
+        {"state": {"desired": {"light": {"manu": {"spec": 100}}}}},
+        device_id="controller-1", qos=1,
+    )
+    coordinator.data["shadows"]["controller-1"]["confirmed_spectrum"]["inPlan"] = 1
+    try:
+        await spectrum.async_select_option("Seedling")
+    except ServiceValidationError:
+        pass
+    else:
+        raise AssertionError("active plan must reject spectrum writes")
+    assert coordinator.async_publish_shadow_update.await_count == 1
+
+
+async def test_spectrum_default_off_for_vgrow_and_external_controllers(hass: HomeAssistant) -> None:
+    coordinator = _StubCoordinator()
+    coordinator._devices = [
+        DeviceInfo("vgrow", "vivosun-VSCTLY18-account", "topic-1", "VGrow", True, 1, "controller"),
+        DeviceInfo("spider", "vivosun-VSCTLE42A-account", "topic-2", "Spider Farmer", True, 2, "controller"),
+    ]
+    for device in coordinator._devices:
+        coordinator.data["shadows"][device.device_id] = {
+            "confirmed_spectrum": {"spec": 50, "mode": 0, "inPlan": 0}
+        }
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={})
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(entry.entry_id, cast("object", coordinator))
+    added: list[object] = []
+    await async_setup_entry(hass, entry, added.extend)
+    assert not any(isinstance(entity, VivosunSpectrumSelect) for entity in added)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -23,7 +79,7 @@ if TYPE_CHECKING:
 _DEV_ID = "vcure-1"
 
 
-class _StubCoordinator:
+class _StubCoordinator(DiscoveryCoordinatorStub):
     def __init__(self) -> None:
         self.data: dict[str, object] = {
             "shadows": {
@@ -54,7 +110,7 @@ class _StubCoordinator:
 
     @property
     def devices(self) -> list[DeviceInfo]:
-        return [self._device]
+        return getattr(self, "_devices", [self._device])
 
     def get_device(self, device_id: str) -> DeviceInfo | None:
         return self._device if device_id == _DEV_ID else None

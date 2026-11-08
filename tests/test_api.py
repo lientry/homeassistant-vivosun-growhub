@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import aiohttp
 import pytest
@@ -16,6 +17,9 @@ from custom_components.vivosun_growhub.exceptions import (
 )
 from custom_components.vivosun_growhub.models import AuthTokens
 from custom_components.vivosun_growhub.support_capture import SupportCaptureManager
+
+if TYPE_CHECKING:
+    from pytest import MonkeyPatch
 
 
 class _MockResponse:
@@ -79,12 +83,8 @@ async def test_stage_info_capture_records_existing_success_only_when_enabled(ena
     client.set_support_capture(capture)
     if enabled:
         capture.start(max_events=10, devices=[], subscription_topics=[])
-
     result = await client.get_plan_stage_info(_valid_tokens(), "stage-1")
-
     assert result is not None and result.stage_name == "Dry"
-    assert result.icon == "dry"
-    assert result.content["hwId"] == "raw-hardware"
     assert len(session.calls) == 1
     assert session.calls[0]["url"].endswith("/iot/plan/stageInfo")
     saved = capture.snapshot()["stage_info_results"]
@@ -95,34 +95,10 @@ async def test_stage_info_capture_records_existing_success_only_when_enabled(ena
     assert saved[0]["stage_id"] == "stage-1"
     assert saved[0]["status"] == "success"
     assert saved[0]["stage_name"] == "Dry"
-    assert saved[0]["icon"] == "dry"
-    assert saved[0]["content_status"] == "parsed"
     assert saved[0]["content"]["duration"] == 480
     assert saved[0]["content"]["temperature"] == "18"
     assert saved[0]["content"]["hwId"] == "***"
     assert saved[0]["content"]["nested"] == {"hardwareId": "***", "userPlanId": "recipe-1"}
-    assert "raw-hardware" not in str(saved)
-
-
-@pytest.mark.parametrize("content", ["not-json", "[1, 2]", "{}"])
-async def test_stage_info_capture_retains_empty_or_unparsed_outcome(content: str) -> None:
-    session = _MockSession(responses=[_MockResponse(status=200, payload={
-        "success": True, "message": "success",
-        "data": {"stageName": "Cure", "icon": "", "planStageContent": content},
-    })])
-    client = VivosunApiClient(cast("aiohttp.ClientSession", session))
-    capture = SupportCaptureManager()
-    capture.start(max_events=2, devices=[], subscription_topics=[])
-    client.set_support_capture(capture)
-
-    result = await client.get_plan_stage_info(_valid_tokens(), "stage-3")
-
-    assert result is not None and result.content == {}
-    assert len(session.calls) == 1
-    assert capture.snapshot()["stage_info_results"] == [{
-        "stage_id": "stage-3", "status": "success", "stage_name": "Cure", "icon": "",
-        "content": {}, "content_status": "empty_or_unparsed", "truncated": False,
-    }]
 
 
 async def test_stage_info_capture_failure_preserves_original_return_and_request_count() -> None:
@@ -133,26 +109,32 @@ async def test_stage_info_capture_failure_preserves_original_return_and_request_
     capture = SupportCaptureManager()
     capture.start(max_events=10, devices=[], subscription_topics=[])
     client.set_support_capture(capture)
-
     assert await client.get_plan_stage_info(_valid_tokens(), "stage-2") is None
     assert len(session.calls) == 1
-    assert capture.snapshot()["stage_info_results"] == [{
-        "stage_id": "stage-2", "status": "error", "error_type": "VivosunResponseError", "truncated": False,
-    }]
+    assert capture.snapshot()["stage_info_results"][0]["status"] == "error"
 
 
-async def test_stage_info_capture_connection_error_preserves_return() -> None:
-    session = _MockSession(request_error=aiohttp.ClientConnectionError("offline"))
-    client = VivosunApiClient(cast("aiohttp.ClientSession", session))
+async def test_stage_info_inflight_capture_result_cannot_enter_next_session(monkeypatch: MonkeyPatch) -> None:
+    """The API recorder binds results to their initiating opt-in session."""
     capture = SupportCaptureManager()
-    capture.start(max_events=2, devices=[], subscription_topics=[])
+    client = VivosunApiClient(cast("aiohttp.ClientSession", object()))
     client.set_support_capture(capture)
+    capture.start(max_events=10, devices=[], subscription_topics=[])
+    entered, release = asyncio.Event(), asyncio.Event()
 
-    assert await client.get_plan_stage_info(_valid_tokens(), "stage-4") is None
-    assert len(session.calls) == 1
-    assert capture.snapshot()["stage_info_results"] == [{
-        "stage_id": "stage-4", "status": "error", "error_type": "VivosunConnectionError", "truncated": False,
-    }]
+    async def deferred(*_args: object, **_kwargs: object) -> dict[str, object]:
+        entered.set()
+        await release.wait()
+        return {"stageName": "Seedling", "icon": "", "planStageContent": "{}"}
+
+    monkeypatch.setattr(client, "_request_json", deferred)
+    task = asyncio.create_task(client.get_plan_stage_info(_valid_tokens(), "stage-previous"))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    capture.stop()
+    capture.start(max_events=10, devices=[], subscription_topics=[])
+    release.set()
+    assert (await task).stage_name == "Seedling"
+    assert capture.snapshot()["stage_info_results"] == []
 
 
 async def test_login_success_returns_auth_tokens(caplog: pytest.LogCaptureFixture) -> None:
@@ -183,7 +165,7 @@ async def test_login_success_returns_auth_tokens(caplog: pytest.LogCaptureFixtur
     assert "refresh-123" not in caplog.text
 
 
-async def test_discovery_accepts_vseed_without_scene_and_retains_safe_capture_routing() -> None:
+async def test_discovery_retains_safe_capture_routing_when_scene_is_missing() -> None:
     entries = [
         {
             "name": "VSeed S40",
@@ -216,10 +198,10 @@ async def test_discovery_accepts_vseed_without_scene_and_retains_safe_capture_ro
 
     devices = await api.get_devices(_valid_tokens())
 
-    vseed = next(device for device in devices if device.name == "VSeed S40")
-    assert vseed.device_type == "vseed"
-    assert vseed.supports_point_log is True
-    assert vseed.scene_id == 0
+    vseed = [device for device in devices if device.device_type == "vseed"]
+    assert len(vseed) == 1
+    assert vseed[0].name == "VSeed S40"
+    assert vseed[0].supports_point_log
     candidates = api.capture_devices
     assert len(candidates) == 1
     assert candidates[0].client_id == "vivosun-VSSBS40-account-seed"

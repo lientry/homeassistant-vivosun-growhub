@@ -11,6 +11,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DEFAULT_TEMP_UNIT, DOMAIN, MODE_AUTO, MODE_MANUAL, TEMP_SCALE_FACTOR
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, sensor_slice, shadow_slice
 from .shadow import (
     build_aircd_func_payload,
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.device_registry import DeviceInfo
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .models import DeviceInfo as VivosunDeviceInfo
     from .models import RuntimeData
 
 _OPTIONS_TEMP_UNIT = "temp_unit"
@@ -53,14 +55,14 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    entities: list[ClimateEntity] = []
-    for device in coordinator.devices:
+    def factory(device: VivosunDeviceInfo) -> list[ClimateEntity]:
         if device.device_type == "heater":
-            entities.append(VivosunHeaterClimateEntity(coordinator, entry, device.device_id))
-        elif device.device_type == "air_conditioner":
-            entities.append(VivosunAirConditionerClimateEntity(coordinator, entry, device.device_id))
-    if entities:
-        async_add_entities(entities)
+            return [VivosunHeaterClimateEntity(coordinator, entry, device.device_id)]
+        if device.device_type == "air_conditioner":
+            return [VivosunAirConditionerClimateEntity(coordinator, entry, device.device_id)]
+        return []
+
+    watch_devices(entry, coordinator, async_add_entities, factory)
 
 
 class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateEntity):  # type: ignore[misc]

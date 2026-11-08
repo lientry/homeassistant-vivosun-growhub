@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.components.climate.const import HVACAction, HVACMode
 from homeassistant.const import UnitOfTemperature
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
 _DEV_ID = "heater-1"
 
 
-class _StubCoordinator:
+class _StubCoordinator(DiscoveryCoordinatorStub):
     def __init__(self) -> None:
         self.data: dict[str, object] = {}
         self._device = DeviceInfo(

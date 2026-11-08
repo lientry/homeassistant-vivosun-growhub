@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, E42A_DFAN_AUTO_MODE, MODE_AUTO, OPTION_CFAN_OSCILLATION_CONTROLLERS
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
 from .shadow import (
@@ -58,16 +59,10 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    for device in coordinator.devices:
-        if device.device_type == "controller":
-
-            device_id = device.device_id
-            async_add_entities(
-                [
-                    VivosunCirculationFanEntity(coordinator, device_id, entry=entry),
-                    VivosunDuctFanEntity(coordinator, device_id),
-                ]
-            )
+    watch_devices(entry, coordinator, async_add_entities, lambda device: [
+        VivosunCirculationFanEntity(coordinator, device.device_id, entry=entry),
+        VivosunDuctFanEntity(coordinator, device.device_id),
+    ] if device.device_type == "controller" else [])
 
     platform = async_get_current_platform()
     platform.async_register_entity_service(

@@ -188,15 +188,14 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                     normalized_input.pop(OPTION_SUPPORT_CAPTURE_ENABLED, None)
                 if OPTION_SPECTRUM_CONTROLLERS in user_input and not user_input[OPTION_SPECTRUM_CONTROLLERS]:
                     normalized_input.pop(OPTION_SPECTRUM_CONTROLLERS, None)
-                if (
-                    OPTION_CFAN_OSCILLATION_CONTROLLERS in user_input
-                    and not user_input[OPTION_CFAN_OSCILLATION_CONTROLLERS]
-                ):
+                if (OPTION_CFAN_OSCILLATION_CONTROLLERS in user_input
+                        and not user_input[OPTION_CFAN_OSCILLATION_CONTROLLERS]):
                     normalized_input.pop(OPTION_CFAN_OSCILLATION_CONTROLLERS, None)
                 if user_input.get(OPTION_REMEMBER_MANUAL_SETTINGS) is not True:
                     normalized_input.pop(OPTION_REMEMBER_MANUAL_SETTINGS, None)
                 self._camera_devices = self._get_camera_devices(entry)
                 if self._camera_devices:
+                    # Camera IPs are rebuilt from the camera steps, including removals.
                     normalized_input.pop(CONF_CAMERA_IPS, None)
                     normalized_input.pop(CONF_CAMERA_IP, None)
                     self._pending_options = normalized_input
@@ -236,12 +235,12 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                 multiple=True,
                 mode=selector.SelectSelectorMode.LIST,
             ))
-            saved = entry.options.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
+            saved_oscillation = entry.options.get(OPTION_CFAN_OSCILLATION_CONTROLLERS, [])
             schema_fields[vol.Optional(
                 OPTION_CFAN_OSCILLATION_CONTROLLERS,
-                default=[device_id for device_id in saved
+                default=[device_id for device_id in saved_oscillation
                          if isinstance(device_id, str) and device_id in eligible]
-                if isinstance(saved, list) else [],
+                if isinstance(saved_oscillation, list) else [],
             )] = selector.SelectSelector(selector.SelectSelectorConfig(
                 options=[selector.SelectOptionDict(value=device.device_id, label=device.name)
                          for device in controllers],
@@ -312,7 +311,7 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         return [device for device in camera_devices if isinstance(device, DeviceInfo)]
 
     def _get_controller_devices(self, entry: config_entries.ConfigEntry) -> list[DeviceInfo]:
-        """Return discovered controller IDs for opt-in options."""
+        """List discovered controllers for the separate per-device options."""
         runtime = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
         coordinator = getattr(runtime, "coordinator", None)
         devices = getattr(coordinator, "devices", [])

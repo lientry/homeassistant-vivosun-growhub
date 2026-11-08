@@ -1,4 +1,4 @@
-"""A22 reported port behavior from sanitized, capture-shaped MQTT traffic."""
+"""Reported A22 port behavior with sanitized, capture-shaped MQTT traffic."""
 
 from __future__ import annotations
 
@@ -52,9 +52,18 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
 
     device = DeviceInfo("a22-1", "vivosun-VSPLUGA22-account-a22", "topic/a22", "GrowHub A22", True, 42, "a22")
     assert infer_device_type("GrowHub A22", device.client_id) == "a22"
-    coordinator = VivosunCoordinator(hass, object(), email="offline@example.com", password="unused")
+    coordinator = object.__new__(VivosunCoordinator)
+    coordinator._device_listeners = []
+    coordinator._garden_inventory = None
+    coordinator._garden_listeners = []
     coordinator._devices = [device]
-    coordinator._build_topic_maps()
+    coordinator._client_id_to_device_id = {device.client_id: device.device_id}
+    coordinator._topic_prefix_to_device_id = {device.topic_prefix: device.device_id}
+    coordinator._shadow_states = {}
+    coordinator._pending_fields = {}
+    coordinator._sensor_states = {}
+    coordinator._plan_stage_cache = {}
+    coordinator._tokens = None
     coordinator._support_capture = type("Capture", (), {"record": lambda *a, **kw: None})()
     coordinator.async_update_listeners = lambda: None
     coordinator._refresh_plan_stages = AsyncMock()
@@ -99,8 +108,8 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
     assert plug.is_on is None
     assert plug.available is False
 
-    # An OFF outlet under an active plan still has a known physical output state.
-    # USB1 reports its output, but no inPlan status yet.
+    # Real capture #49 starts with an OFF outlet inside an active plan.
+    # USB1 has an actual output report but no inPlan confirmation yet.
     await deliver({"state": {"reported": {
         "plug1": {"mode": 0, "inPlan": 1, "lv": 0, "manu": {"lv": 0}, "dev": 501},
         "usb1": {"mode": 0, "lv": 100, "manu": {"lv": 0}, "dev": 0},
@@ -116,7 +125,7 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
         await usb1.async_turn_off()
     coordinator.async_publish_shadow_update.assert_not_awaited()
 
-    # Later partial reports can update root lv without changing stored manu.lv.
+    # Documents may only report root lv. Earlier stored manu.lv must not override it.
     await deliver({"current": {"state": {"reported": {"plug1": {"lv": 100}}}}},
                   f"$aws/things/{device.client_id}/shadow/update/documents")
     assert plug.is_on is True
@@ -149,6 +158,7 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
         build_manual_port_payload("plug1", False), device_id="a22-1", qos=1
     )
+
     coordinator.async_publish_shadow_update.reset_mock()
     await deliver({"state": {"reported": {"usb1": {"inPlan": 0}}}})
     await usb1.async_turn_off()
@@ -160,12 +170,14 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
     assert plug.available is True
     assert plug.extra_state_attributes == {"accessory_code": 0, "mode_code": 0, "in_plan": 0}
 
+    # Reported auto/plan ON stays visible, including when the stored target differs.
     await deliver({"state": {"reported": {"plug1": {"mode": 1, "inPlan": 1, "lv": 100}}}})
     assert plug.is_on is True
     assert plug.available is True
     with pytest.raises(ServiceValidationError, match="manual mode and no active plan"):
         await plug.async_turn_off()
 
+    # An offline device is unavailable, but the last measured output remains in the model.
     await deliver({"state": {"reported": {"connected": False}}})
     assert plug.is_on is True
     assert plug.available is False
@@ -179,6 +191,7 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
         await plug.async_turn_off()
     coordinator._mqtt_client.is_connected = True
 
+    # Unsupported reported values are unknown even when the mode metadata remains available.
     await deliver({"state": {"reported": {"plug1": {"lv": 50}}}})
     assert plug.is_on is None
     assert plug.available is False
@@ -188,6 +201,7 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
     assert plug.is_on is True
     assert plug.available is True
 
+    # Nonmatching and rejected MQTT topics retain previous truth.
     await deliver({"state": {"reported": {"plug1": {"lv": 0, "manu": {"lv": 0}}}}}, "not/our/topic")
     assert plug.is_on is True
     await deliver({"state": {"reported": {"plug1": {"lv": 0}}}},
@@ -206,3 +220,4 @@ def test_a22_metadata_is_model_specific() -> None:
     assert metadata["device_type"] == "a22"
     assert metadata["data_upload_groups"][0]["data_keys"] == ["pTemp", "pHumi", "pVpd"]
     assert infer_device_type("Unknown device", "vivosun-VSCTLE42A-acct-id") == "controller"
+    assert infer_device_type("VSeed", "vivosun-VSSBS40-acct-id") == "vseed"

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -14,10 +16,12 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import PERCENTAGE, SIGNAL_STRENGTH_DECIBELS_MILLIWATT, UnitOfTemperature
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CFAN_NATURAL_WIND_VALUE,
     DEFAULT_TEMP_UNIT,
     DFAN_LEVEL_MAP,
     DOMAIN,
@@ -27,7 +31,9 @@ from .const import (
     WATER_LEVEL_SCALE_FACTOR,
 )
 from .coordinator import VivosunCoordinator
-from .entity_helpers import build_device_info, is_entity_available, plan_slice, plan_stage_cache, sensor_slice
+from .discovery import watch_devices, watch_gardens
+from .entity_helpers import build_device_info, is_entity_available, sensor_slice
+from .garden_display import GardenScheduleClock, GardenSelection, garden_stage_clock, select_garden_plan
 from .models import client_model_token
 from .shadow import cfan_shadow_to_percentage, dfan_shadow_to_percentage
 from .vseed import reported_seed
@@ -35,9 +41,10 @@ from .vseed import reported_seed
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
-    from homeassistant.helpers.device_registry import DeviceInfo
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .gardens import Garden
+    from .models import DeviceInfo as VivosunDeviceInfo
     from .models import RuntimeData
 
 _OPTIONS_TEMP_UNIT = "temp_unit"
@@ -53,6 +60,10 @@ _PLAN_DEVICE_ENTITIES: tuple[tuple[str, str, str, str], ...] = (
     ("drip", "Drip Irrigation", "mdi:water-sync", "drip"),
     ("heat", "Heater", "mdi:radiator", "heater"),
     ("aircd", "Air Conditioner", "mdi:air-conditioner", "air_conditioner"),
+)
+_GARDEN_SCHEDULE_ENTITIES = (
+    ("light", "Light", "mdi:lightbulb-on-outline", "light"),
+    *_PLAN_DEVICE_ENTITIES,
 )
 _AIR_CONDITIONER_FUNCTIONS: dict[int, str] = {
     1: "Cooling",
@@ -257,8 +268,8 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    entities: list[SensorEntity] = []
-    for device in coordinator.devices:
+    def factory(device: VivosunDeviceInfo) -> list[SensorEntity]:
+        entities: list[SensorEntity] = []
         if device.device_type == "vseed":
             entities.extend(
                 VivosunChannelSensorEntity(coordinator, entry, description, device.device_id)
@@ -274,22 +285,167 @@ async def async_setup_entry(
         if client_model_token(device.client_id) == "VSCTLY18":
             for description in _VGROW_DWC_SENSORS:
                 entities.append(VivosunChannelSensorEntity(coordinator, entry, description, device.device_id))
-        if device.device_type == "controller":
-            entities.append(VivosunPlanStageSensor(coordinator, entry, device.device_id))
-            entities.append(VivosunPlanLightSensor(coordinator, entry, device.device_id))
-            for plan_key, plan_name, icon, entity_kind in _PLAN_DEVICE_ENTITIES:
-                entities.append(
-                    VivosunPlanDeviceSensor(
-                        coordinator,
-                        entry,
-                        device.device_id,
-                        plan_key=plan_key,
-                        name=plan_name,
-                        icon=icon,
-                        entity_kind=entity_kind,
-                    )
-                )
-    async_add_entities(entities)
+        return entities
+
+    watch_devices(entry, coordinator, async_add_entities, factory)
+
+    def garden_factory(garden: Garden) -> list[SensorEntity]:
+        entities: list[SensorEntity] = [
+            VivosunGardenSensor(coordinator, entry, garden.scene_id, "recipe", "Recipe", "mdi:book-open-variant"),
+            VivosunGardenSensor(coordinator, entry, garden.scene_id, "stage", "Current Stage", "mdi:sprout"),
+        ]
+        relevant = coordinator.garden_schedule_keys(garden.scene_id)
+        entities.extend(
+            VivosunGardenSensor(
+                coordinator, entry, garden.scene_id, f"plan_{key}", f"{name} Schedule", icon,
+                schedule_kind=kind,
+            )
+            for key, name, icon, kind in _GARDEN_SCHEDULE_ENTITIES if key in relevant
+        )
+        return entities
+
+    watch_gardens(entry, coordinator, async_add_entities, garden_factory)
+
+
+class VivosunGardenSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
+    """Garden-configured intent, not evidence of physical device execution."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: VivosunCoordinator,
+        entry: ConfigEntry,
+        scene_id: int,
+        role: str,
+        name: str,
+        icon: str,
+        *,
+        schedule_kind: str | None = None,
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry_id = entry.entry_id
+        self._scene_id = scene_id
+        self._role = role
+        self._schedule_kind = schedule_kind
+        self._attr_unique_id = f"vivosun_growhub_{entry.entry_id}_garden_{scene_id}_{role}"
+        self._attr_name = name
+        self._attr_icon = icon
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"garden:{self._entry_id}:{self._scene_id}")},
+            manufacturer="VIVOSUN",
+            model="Garden",
+        )
+
+    @property
+    def available(self) -> bool:
+        read = self.coordinator.garden_plan_read(self._scene_id)
+        if read.status not in ("current", "refreshing") or read.plans is None:
+            return False
+        return self._schedule_kind is None or self._role.removeprefix("plan_") in (
+            self.coordinator.garden_schedule_keys(self._scene_id)
+        )
+
+    def _selected(self) -> GardenSelection | None:
+        read = self.coordinator.garden_plan_read(self._scene_id)
+        if read.status not in ("current", "refreshing") or read.plans is None:
+            return None
+        return select_garden_plan(read.plans, int(datetime.now(tz=UTC).timestamp()))
+
+    def _garden_timezone(self) -> str | None:
+        inventory = self.coordinator.garden_inventory
+        if inventory is None:
+            return None
+        garden = next((g for g in inventory.gardens if g.scene_id == self._scene_id), None)
+        return garden.timezone_id if garden is not None else None
+
+    def _schedule_clock(self, selected: GardenSelection) -> tuple[GardenScheduleClock | None, str]:
+        timezone = self._garden_timezone()
+        if selected.stage is None or timezone is None:
+            return None, "unknown_time"
+        return garden_stage_clock(selected.stage, timezone, datetime.now(tz=UTC))
+
+    def _schedule(self, selected: GardenSelection) -> dict[str, Any]:
+        stage = selected.stage
+        clock, _ = self._schedule_clock(selected)
+        if stage is None or stage.content_status != "valid" or stage.content is None or clock is None:
+            return {}
+        key = self._role.removeprefix("plan_")
+        if key == "light":
+            return _compute_light_schedule(
+                stage.content, now_seconds=clock.now_seconds, phase_seconds=clock.phase_seconds,
+            )
+        if self._schedule_kind == "fan":
+            return _compute_fan_schedule(
+                stage.content, key, now_seconds=clock.now_seconds, phase_seconds=clock.phase_seconds,
+            )
+        return _compute_recipe_device_schedule(
+            stage.content, key, now_seconds=clock.now_seconds, phase_seconds=clock.phase_seconds,
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        selected = self._selected()
+        if selected is None:
+            return None
+        if self._role == "recipe":
+            return selected.recipe
+        if self._role == "stage":
+            if selected.state == "running" and selected.stage is not None:
+                return selected.stage.name
+            return selected.state.capitalize() if selected.state != "unknown" else None
+        if selected.state == "scheduled":
+            return "Scheduled"
+        if selected.state != "running":
+            return selected.state.capitalize() if selected.state != "unknown" else None
+        info = self._schedule(selected)
+        if not info:
+            return None
+        if self._schedule_kind == "light":
+            label = info.get("remaining_label")
+            return label if isinstance(label, str) else None
+        if (
+            info.get("level") is None and self._schedule_kind in ("fan", "humidifier", "drip")
+            and info.get("mode") not in ("auto", "cycle") and info.get("state") not in ("auto", "cycle")
+            and info.get("preset_mode") != "natural_wind"
+        ):
+            return None
+        return _recipe_device_label(self._schedule_kind or "", info)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        read = self.coordinator.garden_plan_read(self._scene_id)
+        attrs: dict[str, Any] = {"read_status": read.status}
+        selected = self._selected()
+        if selected is None:
+            return attrs
+        if self._role == "recipe":
+            attrs["plan_count"] = len(read.plans.plans) if read.plans else 0
+            return attrs
+        attrs["stage_status"] = selected.state
+        attrs["configured_only"] = True
+        if selected.stage is not None:
+            attrs["stage_name"] = selected.stage.name
+            if selected.stage.start_time:
+                timezone = self._garden_timezone()
+                if timezone is not None:
+                    with suppress(OverflowError, OSError, ValueError, ZoneInfoNotFoundError):
+                        attrs["starts_at"] = datetime.fromtimestamp(
+                            selected.stage.start_time, tz=ZoneInfo(timezone)
+                        ).isoformat()
+        if self._role.startswith("plan_"):
+            timezone = self._garden_timezone()
+            if timezone is not None:
+                attrs["timezone"] = timezone
+            if selected.state in ("running", "scheduled"):
+                _, status = self._schedule_clock(selected)
+                attrs["schedule_status"] = status
+                if status == "current":
+                    attrs.update(self._schedule(selected))
+        return attrs
 
 
 class VivosunSeedLiveLightSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
@@ -406,6 +562,7 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
     def _computed_vpd(self) -> float | None:
         """Compute air VPD in kPa from matching temperature/RH channels (FAO-56)."""
         if self.entity_description.key == "seed_vpd":
+            # S40 VPD is separately reported; an absent reading stays unavailable.
             return None
         sensors = sensor_slice(self.coordinator, self._device_id)
         for vpd_key in self.entity_description.channel_key_lookup:
@@ -434,28 +591,6 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
         return _UNIT_CELSIUS
 
 
-def _get_active_stage_info(coordinator: VivosunCoordinator, device_id: str) -> tuple[str | None, dict[str, object]]:
-    """Return (stage_name, stage_content) for the active plan stage, or (None, {})."""
-    plan = plan_slice(coordinator, device_id)
-    active_key = plan.get("active_stage")
-    if not isinstance(active_key, str) or not active_key:
-        return None, {}
-    stages = plan.get("stages")
-    if not isinstance(stages, dict):
-        return None, {}
-    stage_entry = stages.get(active_key)
-    if not isinstance(stage_entry, dict):
-        return None, {}
-    stage_id = stage_entry.get("stage_id", "")
-    if not stage_id:
-        return None, {}
-    cache = plan_stage_cache(coordinator)
-    info = cache.get(stage_id)
-    if info is None:
-        return None, {}
-    return getattr(info, "stage_name", None), getattr(info, "content", {})
-
-
 def _seconds_from_midnight() -> int:
     """Return seconds elapsed since midnight in Home Assistant local time."""
     now = dt_util.now()
@@ -463,18 +598,9 @@ def _seconds_from_midnight() -> int:
     return int((now - midnight).total_seconds())
 
 
-def _normalize_slot_time(value: object) -> int:
-    """Normalize slot time to seconds-from-midnight.
-
-    Vivosun planStageContent appears to use minutes-from-midnight in some payloads,
-    but seconds-from-midnight is also plausible. Values <= 1440 are treated as
-    minutes; larger values are treated as seconds.
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
-    if value <= 1440:
-        return value * 60
-    return value
+def _normalize_slot_time(value: object) -> int | None:
+    """The app's slot.time wire unit is seconds, including the 86400 endpoint."""
+    return value if type(value) is int and 0 <= value <= 86400 else None
 
 
 def _format_time(seconds: int) -> str:
@@ -483,18 +609,46 @@ def _format_time(seconds: int) -> str:
     return f"{h:02d}:{m:02d}"
 
 
-def _active_slot(slots: list[object]) -> tuple[dict[str, object], int, int | None] | None:
-    """Return the currently active timed slot plus its start/next-change time."""
+def _schedule_slots(
+    slots: list[object], *, phase_seconds: int = 0,
+) -> list[tuple[int, dict[str, object]]] | None:
+    """Validate complete slot timing before shifting the daily cycle."""
+    if type(phase_seconds) is not int or not 0 <= phase_seconds < 86400:
+        return None
     normalized: list[tuple[int, dict[str, object]]] = []
+    raw_times: set[int] = set()
     for slot in slots:
         if not isinstance(slot, dict):
-            continue
-        normalized.append((_normalize_slot_time(slot.get("time", 0)), slot))
+            return None
+        seconds = _normalize_slot_time(slot.get("time", 0))
+        if seconds is None or seconds in raw_times:
+            return None
+        raw_times.add(seconds)
+        normalized.append((seconds, slot))
+
+    # Native interval conversion starts with an off slot when 00:00 is omitted.
+    if 0 not in raw_times:
+        normalized.append((0, {}))
+        raw_times.add(0)
+
+    # A 24:00 endpoint closes a day's final interval; when 00:00 is also
+    # supplied, that 00:00 slot owns the start of the next daily cycle.
+    if 0 in raw_times and 86400 in raw_times:
+        normalized = [(seconds, slot) for seconds, slot in normalized if seconds != 86400]
+    result = [((seconds + phase_seconds) % 86400, slot) for seconds, slot in normalized]
+    result.sort(key=lambda item: item[0])
+    return result
+
+
+def _active_slot(
+    slots: list[object], *, now_seconds: int | None = None, phase_seconds: int = 0,
+) -> tuple[dict[str, object], int, int | None] | None:
+    """Return the currently active timed slot plus its start/next-change time."""
+    normalized = _schedule_slots(slots, phase_seconds=phase_seconds)
     if not normalized:
         return None
 
-    normalized.sort(key=lambda item: item[0])
-    now_secs = _seconds_from_midnight()
+    now_secs = _seconds_from_midnight() if now_seconds is None else now_seconds
     next_index = next((idx for idx, (time_value, _) in enumerate(normalized) if time_value > now_secs), None)
     current_index = len(normalized) - 1 if next_index is None or next_index == 0 else next_index - 1
     current_time, current_slot = normalized[current_index]
@@ -502,8 +656,10 @@ def _active_slot(slots: list[object]) -> tuple[dict[str, object], int, int | Non
     return current_slot, current_time, next_time
 
 
-def _compute_light_schedule(content: dict[str, object]) -> dict[str, Any]:
-    """Compute light schedule info from plan stage content."""
+def _compute_light_schedule(
+    content: dict[str, object], *, now_seconds: int | None = None, phase_seconds: int = 0,
+) -> dict[str, Any]:
+    """Read the active level and on/off intervals from one daily light schedule."""
     light = content.get("light")
     if not isinstance(light, dict):
         return {}
@@ -511,64 +667,77 @@ def _compute_light_schedule(content: dict[str, object]) -> dict[str, Any]:
     if not isinstance(slots, list) or not slots:
         return {}
 
-    on_slots = [s for s in slots if isinstance(s, dict) and s.get("level", 0) > 0]
-    off_slots = [s for s in slots if isinstance(s, dict) and s.get("level", 0) == 0]
+    normalized = _schedule_slots(slots, phase_seconds=phase_seconds)
+    if not normalized:
+        return {}
+    events: list[tuple[int, int]] = []
+    for seconds, slot in normalized:
+        level = slot.get("level", 0)
+        if type(level) is not int or not 0 <= level <= 100:
+            return {}
+        events.append((seconds, level))
 
-    if not on_slots:
-        return {"state": "off", "level": 0, "on_hours": 0}
-
-    first_on = on_slots[0]
-    level = first_on.get("level", 0)
+    now_secs = _seconds_from_midnight() if now_seconds is None else now_seconds
+    current_index = next((i - 1 for i, (second, _) in enumerate(events) if second > now_secs),
+                         len(events) - 1)
+    _, level = events[current_index]
+    is_on = level > 0
     spectrum = light.get("spec", 0)
-    on_times = sorted(_normalize_slot_time(s.get("time", 0)) for s in on_slots)
-    off_times = sorted(
-        _normalize_slot_time(s.get("time", 0)) for s in off_slots if _normalize_slot_time(s.get("time", 0)) >= 0
+    count = len(events)
+    on_seconds = (
+        86400 if events[0][1] > 0 else 0
+    ) if count == 1 else sum(
+        ((events[(i + 1) % count][0] - seconds) % 86400)
+        for i, (seconds, slot_level) in enumerate(events) if slot_level > 0
     )
 
-    start_time = on_times[0] if on_times else 0
-    end_time = off_times[0] if off_times else None
-
-    if end_time is None:
-        on_duration = 86400
-    elif end_time > start_time:
-        on_duration = end_time - start_time
-    else:
-        on_duration = (86400 - start_time) + end_time
-
-    on_hours = round(on_duration / 3600, 1)
-
-    now_secs = _seconds_from_midnight()
-    if end_time is None:
-        is_on = True
-        remaining = 0
-    elif end_time > start_time:
-        is_on = start_time <= now_secs < end_time
+    on_starts = [
+        i for i, (_, slot_level) in enumerate(events)
+        if slot_level > 0 and events[(i - 1) % count][1] == 0
+    ]
+    off_starts = [
+        i for i, (_, slot_level) in enumerate(events)
+        if slot_level == 0 and events[(i - 1) % count][1] > 0
+    ]
+    if on_starts and off_starts:
         if is_on:
-            remaining = end_time - now_secs
+            start_index = next(
+                i for step in range(count) if (i := (current_index - step) % count) in on_starts
+            )
         else:
-            remaining = -(start_time - now_secs) if now_secs < start_time else -(86400 - now_secs + start_time)
+            start_index = next(
+                i for step in range(1, count + 1)
+                if (i := (current_index + step) % count) in on_starts
+            )
+        end_index = next(
+            i for step in range(1, count + 1)
+            if (i := (start_index + step) % count) in off_starts
+        )
+        next_change = events[end_index if is_on else start_index][0]
+        remaining_hours: float | None = round(((next_change - now_secs) % 86400) / 3600, 1)
+        remaining_label = f"{remaining_hours}h until {'off' if is_on else 'on'}"
+        on_time: str | None = _format_time(events[start_index][0])
+        off_time: str | None = _format_time(events[end_index][0])
     else:
-        is_on = now_secs >= start_time or now_secs < end_time
-        if is_on:
-            remaining = 86400 - now_secs + end_time if now_secs >= start_time else end_time - now_secs
-        else:
-            remaining = -(start_time - now_secs)
-
-    remaining_h = abs(remaining) / 3600
-
+        remaining_hours = None
+        remaining_label = "On" if is_on else "Off"
+        on_time = _format_time(events[0][0]) if is_on else None
+        off_time = None
     return {
         "state": "on" if is_on else "off",
         "level": level,
         "spectrum": spectrum,
-        "on_hours": on_hours,
-        "on_time": _format_time(start_time),
-        "off_time": _format_time(end_time) if end_time is not None else "00:00",
-        "remaining_hours": round(remaining_h, 1),
-        "remaining_label": f"{round(remaining_h, 1)}h until {'off' if is_on else 'on'}",
+        "on_hours": round(on_seconds / 3600, 1),
+        "on_time": on_time,
+        "off_time": off_time,
+        "remaining_hours": remaining_hours,
+        "remaining_label": remaining_label,
     }
 
 
-def _compute_fan_schedule(content: dict[str, object], fan_key: str) -> dict[str, Any]:
+def _compute_fan_schedule(
+    content: dict[str, object], fan_key: str, *, now_seconds: int | None = None, phase_seconds: int = 0,
+) -> dict[str, Any]:
     """Compute fan schedule info from plan stage content."""
     fan = content.get(fan_key)
     if not isinstance(fan, dict):
@@ -577,24 +746,30 @@ def _compute_fan_schedule(content: dict[str, object], fan_key: str) -> dict[str,
     if not isinstance(slots, list) or not slots:
         return {}
 
-    active_slot = _active_slot(slots)
+    active_slot = _active_slot(slots, now_seconds=now_seconds, phase_seconds=phase_seconds)
     if active_slot is None:
         return {}
     slot, slot_time, next_time = active_slot
 
     mode = slot.get("mode", 0)
+    if type(mode) is not int or mode not in (0, 1, _PLAN_AUTO_MODE):
+        return {}
     if mode == 1:
-        lv_on = _normalize_fan_percentage(slot.get("lvOn", slot.get("level", 0)), fan_key=fan_key)
+        lv_on = _normalize_recipe_fan_selection(
+            slot.get("lvOn", slot.get("level", 0)), fan_key=fan_key, allow_preset="lvOn" in slot,
+        )
         lv_off = _normalize_fan_percentage(slot.get("lvOff", 0), fan_key=fan_key)
+        if lv_on is None or lv_off is None:
+            return {}
         on_dur = slot.get("onDur", 0)
         off_dur = slot.get("offDur", 0)
-        if not isinstance(on_dur, int) or not isinstance(off_dur, int):
+        if type(on_dur) is not int or type(off_dur) is not int or on_dur < 0 or off_dur < 0:
             return {}
         on_min = round(on_dur / 60)
         off_min = round(off_dur / 60)
-        return {
+        result: dict[str, Any] = {
             "mode": "cycle",
-            "level_on": lv_on,
+            "level_on": lv_on if type(lv_on) is int else None,
             "level_off": lv_off,
             "on_minutes": on_min,
             "off_minutes": off_min,
@@ -602,7 +777,12 @@ def _compute_fan_schedule(content: dict[str, object], fan_key: str) -> dict[str,
             "next_time": _format_time(next_time) if next_time is not None else None,
             "cycle": f"{on_min}m on / {off_min}m off",
         }
+        if lv_on == "natural_wind":
+            result["preset_mode"] = lv_on
+        return result
     if mode == _PLAN_AUTO_MODE:
+        if any(key in slot and _normalize_plan_int(slot[key]) is None for key in ("lvMin", "lvMax")):
+            return {}
         level_min = _normalize_fan_percentage(slot.get("lvMin"), fan_key=fan_key)
         level_max = _normalize_fan_percentage(slot.get("lvMax"), fan_key=fan_key)
         standby_status = _normalize_dfan_standby_status(slot.get("lvMin")) if fan_key == "dfan" else None
@@ -620,14 +800,18 @@ def _compute_fan_schedule(content: dict[str, object], fan_key: str) -> dict[str,
             "slot_time": _format_time(slot_time),
             "next_time": _format_time(next_time) if next_time is not None else None,
         }
-    else:
-        level = _normalize_fan_percentage(slot.get("level", 0), fan_key=fan_key)
-        return {
-            "mode": "manual",
-            "level": level,
-            "slot_time": _format_time(slot_time),
-            "next_time": _format_time(next_time) if next_time is not None else None,
-        }
+    level = _normalize_recipe_fan_selection(slot.get("level", 0), fan_key=fan_key, allow_preset=True)
+    if level is None:
+        return {}
+    result = {
+        "mode": "manual",
+        "level": level if type(level) is int else None,
+        "slot_time": _format_time(slot_time),
+        "next_time": _format_time(next_time) if next_time is not None else None,
+    }
+    if level == "natural_wind":
+        result["preset_mode"] = level
+    return result
 
 
 def _format_percent_value(value: object) -> str | None:
@@ -637,7 +821,7 @@ def _format_percent_value(value: object) -> str | None:
 
 
 def _normalize_plan_int(value: object) -> int | None:
-    if not isinstance(value, int):
+    if type(value) is not int:
         return None
     if value == SENSOR_UNAVAILABLE_SENTINEL:
         return None
@@ -653,11 +837,20 @@ def _normalize_scaled_plan_value(value: object) -> float | None:
 
 def _normalize_fan_percentage(value: object, *, fan_key: str) -> int | None:
     normalized = _normalize_plan_int(value)
-    if normalized is None:
+    if normalized is None or not 0 <= normalized <= 100:
         return None
     if fan_key == "cfan":
         return cfan_shadow_to_percentage(normalized)
     return dfan_shadow_to_percentage(normalized)
+
+
+def _normalize_recipe_fan_selection(
+    value: object, *, fan_key: str, allow_preset: bool,
+) -> int | Literal["natural_wind"] | None:
+    """App recipe slots support Natural Wind only for cFan manual level and cycle lvOn."""
+    if fan_key == "cfan" and allow_preset and type(value) is int and value == CFAN_NATURAL_WIND_VALUE:
+        return "natural_wind"
+    return _normalize_fan_percentage(value, fan_key=fan_key)
 
 
 def _normalize_dfan_standby_status(value: object) -> str | None:
@@ -691,15 +884,10 @@ def _format_vpd_target(value: object) -> str | None:
     return None
 
 
-def _stringify_plan_attribute(value: object) -> object:
-    if value is None:
-        return "Not set"
-    if isinstance(value, dict):
-        return {key: _stringify_plan_attribute(item) for key, item in value.items()}
-    return value
-
-
-def _compute_recipe_device_schedule(content: dict[str, object], recipe_key: str) -> dict[str, Any]:
+def _compute_recipe_device_schedule(
+    content: dict[str, object], recipe_key: str, *, now_seconds: int | None = None,
+    phase_seconds: int = 0,
+) -> dict[str, Any]:
     recipe = content.get(recipe_key)
     if not isinstance(recipe, dict):
         return {}
@@ -707,10 +895,15 @@ def _compute_recipe_device_schedule(content: dict[str, object], recipe_key: str)
     if not isinstance(slots, list) or not slots:
         return {}
 
-    active_slot = _active_slot(slots)
+    active_slot = _active_slot(slots, now_seconds=now_seconds, phase_seconds=phase_seconds)
     if active_slot is None:
         return {}
     slot, slot_time, next_time = active_slot
+    mode = slot.get("mode", 0)
+    if recipe_key in ("hmdf", "dhmdf", "drip"):
+        supported = (0, 1) if recipe_key == "drip" else (0, _PLAN_AUTO_MODE)
+        if type(mode) is not int or mode not in supported:
+            return {}
 
     info: dict[str, Any] = {
         "mode": slot.get("mode", 0),
@@ -773,13 +966,19 @@ def _recipe_device_label(entity_kind: str, info: dict[str, Any]) -> str:
     if entity_kind == "fan":
         mode = info.get("mode", "off")
         if mode == "cycle":
+            if info.get("preset_mode") == "natural_wind":
+                return f"Natural Wind · {info.get('cycle', 'Not set')}"
             return cast("str", info.get("cycle", "Not set"))
         if mode == "auto":
             standby_status = info.get("standby_status")
             if isinstance(standby_status, str):
                 return f"Auto Standby {standby_status}"
             return "Auto"
-        level = info.get("level", 0)
+        if info.get("preset_mode") == "natural_wind":
+            return "Natural Wind"
+        level = info.get("level")
+        if type(level) is not int:
+            return "Not set"
         return f"{level}%" if level > 0 else "Off"
 
     if entity_kind == "humidifier":
@@ -816,158 +1015,3 @@ def _recipe_device_label(entity_kind: str, info: dict[str, Any]) -> str:
         return "On"
 
     return "Not set"
-
-
-class VivosunPlanStageSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
-    """Sensor showing the active grow plan stage name."""
-
-    _attr_has_entity_name = True
-    _attr_icon = "mdi:sprout"
-
-    def __init__(self, coordinator: VivosunCoordinator, entry: ConfigEntry, device_id: str) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._device_id = device_id
-        self._attr_name = "Grow Plan Stage"
-        self._attr_unique_id = f"vivosun_growhub_{device_id}_plan_stage"
-
-    @property
-    def available(self) -> bool:
-        return is_entity_available(self.coordinator, self._device_id)
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return build_device_info(self.coordinator, self._device_id)
-
-    @property
-    def native_value(self) -> str | None:
-        name, _ = _get_active_stage_info(self.coordinator, self._device_id)
-        if name:
-            return name
-        return "Manual"
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
-        plan = plan_slice(self.coordinator, self._device_id)
-        active_key = plan.get("active_stage")
-        stages = plan.get("stages")
-        attrs: dict[str, Any] = {}
-        if active_key:
-            attrs["active_stage_key"] = active_key
-        if isinstance(stages, dict):
-            for key, entry in stages.items():
-                if isinstance(entry, dict) and entry.get("start_time", 0) > 0:
-                    attrs[f"{key}_started"] = datetime.fromtimestamp(
-                        entry["start_time"], tz=UTC
-                    ).isoformat()
-        return attrs if attrs else None
-
-
-class VivosunPlanLightSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
-    """Sensor showing light schedule from the active plan stage."""
-
-    _attr_has_entity_name = True
-    _attr_icon = "mdi:lightbulb-on-outline"
-
-    def __init__(self, coordinator: VivosunCoordinator, entry: ConfigEntry, device_id: str) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._device_id = device_id
-        self._attr_name = "Plan Light Schedule"
-        self._attr_unique_id = f"vivosun_growhub_{device_id}_plan_light"
-
-    @property
-    def available(self) -> bool:
-        return is_entity_available(self.coordinator, self._device_id)
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return build_device_info(self.coordinator, self._device_id)
-
-    @property
-    def native_value(self) -> str | None:
-        _, content = _get_active_stage_info(self.coordinator, self._device_id)
-        if not content:
-            return "Not set"
-        info = _compute_light_schedule(content)
-        if not info:
-            return "Not set"
-        return info.get("remaining_label")
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
-        _, content = _get_active_stage_info(self.coordinator, self._device_id)
-        if not content:
-            return {"state": "manual"}
-        info = _compute_light_schedule(content)
-        if not info:
-            return {"state": "manual"}
-        return {
-            "state": info.get("state"),
-            "level": info.get("level"),
-            "spectrum": info.get("spectrum"),
-            "on_hours": info.get("on_hours"),
-            "on_time": info.get("on_time"),
-            "off_time": info.get("off_time"),
-            "remaining_hours": info.get("remaining_hours"),
-        }
-
-
-class VivosunPlanDeviceSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
-    """Sensor showing recipe schedule info from the active plan stage."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        coordinator: VivosunCoordinator,
-        entry: ConfigEntry,
-        device_id: str,
-        *,
-        plan_key: str,
-        name: str,
-        icon: str,
-        entity_kind: str,
-    ) -> None:
-        super().__init__(coordinator)
-        self._entry = entry
-        self._device_id = device_id
-        self._plan_key = plan_key
-        self._entity_kind = entity_kind
-        self._attr_name = f"Plan {name} Schedule"
-        self._attr_unique_id = f"vivosun_growhub_{device_id}_plan_{plan_key}"
-        self._attr_icon = icon
-
-    @property
-    def available(self) -> bool:
-        return is_entity_available(self.coordinator, self._device_id)
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return build_device_info(self.coordinator, self._device_id)
-
-    @property
-    def native_value(self) -> str | None:
-        _, content = _get_active_stage_info(self.coordinator, self._device_id)
-        if not content:
-            return "Not set"
-        if self._entity_kind == "fan":
-            info = _compute_fan_schedule(content, self._plan_key)
-        else:
-            info = _compute_recipe_device_schedule(content, self._plan_key)
-        if not info:
-            return "Not set"
-        return _recipe_device_label(self._entity_kind, info)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any] | None:
-        _, content = _get_active_stage_info(self.coordinator, self._device_id)
-        if not content:
-            return {"state": "manual"}
-        if self._entity_kind == "fan":
-            info = _compute_fan_schedule(content, self._plan_key)
-        else:
-            info = _compute_recipe_device_schedule(content, self._plan_key)
-        if not info:
-            return {"state": "manual"}
-        return cast("dict[str, Any]", _stringify_plan_attribute(info))

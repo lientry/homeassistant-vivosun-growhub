@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 _DEV_ID = "dev-1"
 
 
-class _StubCoordinator:
+class _StubCoordinator(DiscoveryCoordinatorStub):
     def __init__(self) -> None:
         self.data: dict[str, object] = {}
         self._device = DeviceInfo(

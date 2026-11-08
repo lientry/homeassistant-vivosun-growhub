@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, H09_MODE_AUTO, H09_MODE_MANUAL, MODE_AUTO, MODE_MANUAL, TEMP_SCALE_FACTOR
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, sensor_slice, shadow_slice
 from .models import client_model_token
 from .shadow import (
@@ -31,9 +32,9 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.device_registry import DeviceInfo
-    from homeassistant.helpers.entity import Entity
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .models import DeviceInfo as VivosunDeviceInfo
     from .models import RuntimeData
 
 _HMDF_MODES = ("manual", "auto")
@@ -56,20 +57,19 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    entities: list[Entity] = []
-    humidifiers = [d for d in coordinator.devices if d.device_type == "humidifier"]
-    for device in humidifiers:
-        entity_type = (
-            VivosunH09HumidifierEntity
-            if client_model_token(device.client_id) == "VSHUMH09"
-            else VivosunHumidifierEntity
-        )
-        entities.append(entity_type(coordinator, device.device_id))
-    dehumidifiers = [d for d in coordinator.devices if d.device_type == "dehumidifier"]
-    if dehumidifiers:
-        entities.extend([VivosunDehumidifierEntity(coordinator, d.device_id) for d in dehumidifiers])
-    if entities:
-        async_add_entities(entities)
+    def factory(device: VivosunDeviceInfo) -> list[HumidifierEntity]:
+        if device.device_type == "humidifier":
+            entity_type = (
+                VivosunH09HumidifierEntity
+                if client_model_token(device.client_id) == "VSHUMH09"
+                else VivosunHumidifierEntity
+            )
+            return [entity_type(coordinator, device.device_id)]
+        if device.device_type == "dehumidifier":
+            return [VivosunDehumidifierEntity(coordinator, device.device_id)]
+        return []
+
+    watch_devices(entry, coordinator, async_add_entities, factory)
 
 class VivosunHumidifierEntity(CoordinatorEntity[VivosunCoordinator], HumidifierEntity):  # type: ignore[misc]
     """Representation of a Vivosun AeroStream humidifier."""

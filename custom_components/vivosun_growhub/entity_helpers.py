@@ -91,22 +91,6 @@ def sensor_slice(coordinator: VivosunCoordinator, device_id: str) -> Mapping[str
     return cast("Mapping[str, object]", device_sensors)
 
 
-def plan_slice(coordinator: VivosunCoordinator, device_id: str) -> Mapping[str, object]:
-    """Extract plan state for a specific device from the shadow."""
-    return shadow_slice(coordinator, device_id, "plan")
-
-
-def plan_stage_cache(coordinator: VivosunCoordinator) -> Mapping[str, object]:
-    """Return the plan stage info cache from coordinator data."""
-    data = coordinator.data
-    if not isinstance(data, Mapping):
-        return {}
-    stages = data.get("plan_stages")
-    if not isinstance(stages, Mapping):
-        return {}
-    return cast("Mapping[str, object]", stages)
-
-
 def _model_from_client_id(client_id: str) -> str:
     parts = client_id.split("-")
     if len(parts) >= 2 and parts[1]:

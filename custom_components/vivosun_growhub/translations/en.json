@@ -29,14 +29,14 @@
         "data": {
           "temp_unit": "Temperature unit",
           "support_capture_enabled": "Enable support capture for diagnostics",
-          "spectrum_controllers": "Spectrum control",
-          "cfan_oscillation_controllers": "Oscillation control",
-          "remember_manual_settings": "Remember manual settings"
+          "spectrum_controllers": "Controllers with spectrum presets",
+          "cfan_oscillation_controllers": "Controllers with fan oscillation",
+          "remember_manual_settings": "Remember brightness and fan speed"
         },
         "data_description": {
-          "spectrum_controllers": "Enable only if your light offers spectrum presets in the Vivosun app.",
-          "cfan_oscillation_controllers": "Enable only if your fan offers oscillation control in the Vivosun app.",
-          "remember_manual_settings": "Settings selected in Home Assistant are remembered."
+          "spectrum_controllers": "Select controllers whose connected lights offer spectrum presets in the Vivosun app.",
+          "cfan_oscillation_controllers": "Select controllers whose connected fans offer oscillation controls in the Vivosun app.",
+          "remember_manual_settings": "Reuse brightness and fan speed selected in Home Assistant when turning devices back on in manual mode without an active plan."
         }
       },
       "camera": {
@@ -49,8 +49,9 @@
     },
     "error": {
       "invalid_ip": "Invalid IP address",
-      "invalid_spectrum_controller": "Select only available controllers for spectrum",
-      "invalid_oscillation_controller": "Select only available controllers for oscillation"
+      "invalid_spectrum_controller": "Select only available controllers",
+      "invalid_oscillation_controller": "Select only available controllers for oscillation",
+      "invalid_manual_setting": "Remember manual settings must be enabled or disabled"
     }
   },
   "entity": {

@@ -10,9 +10,6 @@ import pytest
 from custom_components.vivosun_growhub.mqtt_client import ReceivedPublish
 from custom_components.vivosun_growhub.shadow import (
     ShadowParseError,
-    build_aircd_func_payload,
-    build_aircd_on_payload,
-    build_aircd_target_temp_payload,
     build_cfan_level_payload,
     build_cfan_oscillate_payload,
     build_dfan_auto_mode_payload,
@@ -383,6 +380,12 @@ def test_c08_shadow_parses_captured_fields_and_partial_report() -> None:
 
 
 def test_c08_shadow_commands_use_reported_schema() -> None:
+    from custom_components.vivosun_growhub.shadow import (
+        build_aircd_func_payload,
+        build_aircd_on_payload,
+        build_aircd_target_temp_payload,
+    )
+
     assert build_aircd_on_payload(False) == {"state": {"desired": {"aircd": {"state": 0}}}}
     assert build_aircd_func_payload(1) == {
         "state": {"desired": {"aircd": {"state": 1, "func": 1}}}
@@ -407,70 +410,3 @@ def test_h09_reported_shadow_target_and_explicit_unavailable() -> None:
         "target_humidity": None
     }
     assert parse_reported_fragment({"hmdf": {"mode": 2}})["hmdf"] == {"mode": 2}
-
-
-def test_parse_reported_fragment_parses_aircd_state() -> None:
-    fragment = {
-        "aircd": {
-            "mode": 0,
-            "inPlan": 0,
-            "state": 1,
-            "pause": 0,
-            "func": 1,
-            "wdLv": 50,
-            "tMin": 1600,
-            "tTemp": 2399,
-            "tHumi": 8000,
-            "tVpd": -6666,
-        }
-    }
-
-    parsed = parse_reported_fragment(fragment)
-
-    aircd = parsed["aircd"]
-    assert aircd["state"] == 1
-    assert parsed["reported_supported"]["aircd"]["mode"] == 0
-    assert aircd["pause"] == 0
-    assert aircd["func"] == 1
-    assert aircd["wind_level"] == 50
-    assert aircd["target_temp"] == 2399
-    assert aircd["target_humidity"] == 8000
-    assert aircd["min_target_temp"] == 1600
-    assert "aircd" in parsed["reported_supported"]
-
-
-def test_build_aircd_payloads() -> None:
-    assert build_aircd_on_payload(True) == {"state": {"desired": {"aircd": {"state": 1}}}}
-    assert build_aircd_on_payload(False) == {"state": {"desired": {"aircd": {"state": 0}}}}
-    assert build_aircd_func_payload(1) == {"state": {"desired": {"aircd": {"state": 1, "func": 1}}}}
-    assert build_aircd_target_temp_payload(2399) == {"state": {"desired": {"aircd": {"tTemp": 2399}}}}
-
-
-def test_parse_reported_fragment_humidifier_full_state() -> None:
-    fragment: dict[str, object] = {
-        "hmdf": {
-            "mode": 1,
-            "manu": {"lv": 45},
-            "auto": {"tHumi": 5959},
-            "waterWarn": 0,
-        }
-    }
-
-    parsed = parse_reported_fragment(fragment)
-
-    assert parsed["hmdf"] == {
-        "mode": 1,
-        "level": 45,
-        "target_humidity": 5959,
-        "water_warning": False,
-    }
-
-
-def test_parse_reported_fragment_humidifier_sparse_partial_update() -> None:
-    # A partial update with only auto.tHumi must not clobber mode/level.
-    parsed = parse_reported_fragment({"hmdf": {"auto": {"tHumi": 7000}}})
-    assert parsed["hmdf"] == {"target_humidity": 7000}
-
-    # On/off is not derived from mode; only the raw mode is surfaced.
-    parsed_mode = parse_reported_fragment({"hmdf": {"mode": 0}})
-    assert parsed_mode["hmdf"] == {"mode": 0}

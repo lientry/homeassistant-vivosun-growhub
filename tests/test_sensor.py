@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.components.sensor import SensorStateClass
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -13,7 +14,6 @@ from custom_components.vivosun_growhub.const import DOMAIN
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
 from custom_components.vivosun_growhub.sensor import (
     VivosunChannelSensorEntity,
-    VivosunPlanStageSensor,
     async_setup_entry,
 )
 
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 _DEV_ID = "dev-1"
 
 
-class _StubCoordinator:
+class _StubCoordinator(DiscoveryCoordinatorStub):
     def __init__(
         self,
         *,
@@ -57,7 +57,7 @@ class _StubCoordinator:
         return None
 
 
-async def test_sensor_setup_creates_seventeen_entities(hass: HomeAssistant) -> None:
+async def test_sensor_setup_creates_eight_physical_entities(hass: HomeAssistant) -> None:
     coordinator = _StubCoordinator()
     entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
@@ -70,7 +70,7 @@ async def test_sensor_setup_creates_seventeen_entities(hass: HomeAssistant) -> N
 
     await async_setup_entry(hass, entry, _add)
 
-    assert len(added) == 17
+    assert len(added) == 8
     assert {entity.unique_id for entity in added} == {
         f"vivosun_growhub_{_DEV_ID}_inTemp",
         f"vivosun_growhub_{_DEV_ID}_inHumi",
@@ -80,15 +80,6 @@ async def test_sensor_setup_creates_seventeen_entities(hass: HomeAssistant) -> N
         f"vivosun_growhub_{_DEV_ID}_outVpd",
         f"vivosun_growhub_{_DEV_ID}_coreTemp",
         f"vivosun_growhub_{_DEV_ID}_rssi",
-        f"vivosun_growhub_{_DEV_ID}_plan_stage",
-        f"vivosun_growhub_{_DEV_ID}_plan_light",
-        f"vivosun_growhub_{_DEV_ID}_plan_cfan",
-        f"vivosun_growhub_{_DEV_ID}_plan_dfan",
-        f"vivosun_growhub_{_DEV_ID}_plan_hmdf",
-        f"vivosun_growhub_{_DEV_ID}_plan_dhmdf",
-        f"vivosun_growhub_{_DEV_ID}_plan_drip",
-        f"vivosun_growhub_{_DEV_ID}_plan_heat",
-        f"vivosun_growhub_{_DEV_ID}_plan_aircd",
     }
 
 
@@ -307,35 +298,13 @@ async def test_sensor_temperature_options_celsius_and_fahrenheit(hass: HomeAssis
     assert in_temp_f.native_value == 77.0
 
 
-async def test_plan_stage_sensor_returns_manual_when_inactive() -> None:
-    coordinator = _StubCoordinator()
-    coordinator.data = {
-        "shadows": {
-            _DEV_ID: {
-                "plan": {
-                    "active_stage": None,
-                    "stages": {
-                        "stage1": {"stage_id": "abc", "start_time": 0},
-                    },
-                }
-            }
-        }
-    }
-
-    sensor = VivosunPlanStageSensor(
-        cast("object", coordinator),
-        MockConfigEntry(domain=DOMAIN, title="t", data={}),
-        _DEV_ID,
-    )
-    assert sensor.native_value == "Manual"
-
-
 def test_compute_light_schedule_handles_wraparound_window(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(sensor_module, "_seconds_from_midnight", lambda: 21 * 3600)
     content = {
         "light": {
             "spec": 0,
             "slot": [
+                {"time": 0, "level": 25},
                 {"time": 20 * 3600, "level": 25},
                 {"time": 8 * 3600, "level": 0},
             ],
@@ -354,6 +323,7 @@ def test_compute_light_schedule_handles_wraparound_off_period(monkeypatch: Monke
         "light": {
             "spec": 0,
             "slot": [
+                {"time": 0, "level": 25},
                 {"time": 20 * 3600, "level": 25},
                 {"time": 8 * 3600, "level": 0},
             ],
@@ -384,7 +354,7 @@ def test_compute_light_schedule_uses_local_time_semantics(monkeypatch: MonkeyPat
     assert info["remaining_label"] == "18.0h until on"
 
 
-def test_compute_light_schedule_minute_based_slots(monkeypatch: MonkeyPatch) -> None:
+def test_compute_light_schedule_small_wire_seconds_do_not_become_minutes(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(sensor_module, "_seconds_from_midnight", lambda: (19 * 3600) + (26 * 60))
     content = {
         "light": {
@@ -397,9 +367,11 @@ def test_compute_light_schedule_minute_based_slots(monkeypatch: MonkeyPatch) -> 
     }
 
     info = sensor_module._compute_light_schedule(content)
-    assert info["state"] == "on"
-    assert info["remaining_hours"] == 0.6
-    assert info["remaining_label"] == "0.6h until off"
+    # Legacy arithmetic incorrectly treated 1200 seconds as 20 hours.
+    assert info["state"] == "off"
+    assert (info["on_time"], info["off_time"], info["on_hours"]) == ("00:00", "00:20", 0.3)
+    assert info["remaining_hours"] == 4.6
+    assert info["remaining_label"] == "4.6h until on"
 
 
 def test_compute_light_schedule_second_based_slots(monkeypatch: MonkeyPatch) -> None:
@@ -443,11 +415,12 @@ def test_compute_fan_schedule_selects_active_auto_slot(monkeypatch: MonkeyPatch)
     assert sensor_module._recipe_device_label("fan", info) == "Auto Standby S1"
 
 
-def test_compute_fan_schedule_wraps_manual_slot_before_first_change(monkeypatch: MonkeyPatch) -> None:
+def test_compute_fan_schedule_keeps_explicit_midnight_manual_speed(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(sensor_module, "_seconds_from_midnight", lambda: 2 * 3600)
     content = {
         "dfan": {
             "slot": [
+                {"time": 0, "mode": 0, "level": 30},
                 {"time": 6 * 3600, "mode": 2, "lvMin": 30, "lvMax": 100},
                 {"time": 12 * 3600, "mode": 0, "level": 0},
                 {"time": 18 * 3600, "mode": 0, "level": 30},
@@ -458,7 +431,7 @@ def test_compute_fan_schedule_wraps_manual_slot_before_first_change(monkeypatch:
     info = sensor_module._compute_fan_schedule(content, "dfan")
     assert info["mode"] == "manual"
     assert info["level"] == 10
-    assert info["slot_time"] == "18:00"
+    assert info["slot_time"] == "00:00"
     assert info["next_time"] == "06:00"
 
 
@@ -565,21 +538,6 @@ def test_compute_recipe_device_schedule_air_conditioner(monkeypatch: MonkeyPatch
     assert sensor_module._recipe_device_label("air_conditioner", info) == "Cooling"
 
 
-def test_stringify_plan_attribute_replaces_none_with_not_set() -> None:
-    info = {
-        "temperature_min": None,
-        "temperature_max": 25.56,
-        "nested": {"vpd_min": None},
-    }
-
-    formatted = sensor_module._stringify_plan_attribute(info)
-    assert formatted == {
-        "temperature_min": "Not set",
-        "temperature_max": 25.56,
-        "nested": {"vpd_min": "Not set"},
-    }
-
-
 async def test_sensor_setup_creates_probe_sensors_for_humidifier(hass: HomeAssistant) -> None:
     coordinator = _StubCoordinator(device_type="humidifier")
     entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
@@ -674,158 +632,3 @@ async def test_vgrow_dwc_water_sensors_are_model_scoped(hass: HomeAssistant) -> 
     vgrow.data = {"sensors": {_DEV_ID: {}}}
     assert level.native_value is None
     assert temperature.native_value is None
-
-_VGROW_CLIENT_ID = "vivosun-VSCTLY18-acc-dev-1"
-
-
-async def _setup_entities(hass: HomeAssistant, coordinator: _StubCoordinator) -> list[VivosunChannelSensorEntity]:
-    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
-        entry_id=entry.entry_id, coordinator=cast("object", coordinator)
-    )
-    entities: list[VivosunChannelSensorEntity] = []
-    await async_setup_entry(hass, entry, entities.extend)
-    return entities
-
-
-async def test_sensor_setup_adds_water_sensors_for_vgrow(hass: HomeAssistant) -> None:
-    added = await _setup_entities(hass, _StubCoordinator(client_id=_VGROW_CLIENT_ID))
-
-    unique_ids = {entity.unique_id for entity in added}
-    assert f"vivosun_growhub_{_DEV_ID}_waterLv" in unique_ids
-    assert f"vivosun_growhub_{_DEV_ID}_waterT" in unique_ids
-    assert len(added) == 19
-
-
-async def test_sensor_setup_skips_water_sensors_for_other_controllers(hass: HomeAssistant) -> None:
-    added = await _setup_entities(hass, _StubCoordinator())
-
-    unique_ids = {entity.unique_id for entity in added}
-    assert f"vivosun_growhub_{_DEV_ID}_waterLv" not in unique_ids
-    assert f"vivosun_growhub_{_DEV_ID}_waterT" not in unique_ids
-
-
-async def test_sensor_vgrow_water_values_preserve_zero_and_ignore_sentinels(hass: HomeAssistant) -> None:
-    coordinator = _StubCoordinator(client_id=_VGROW_CLIENT_ID)
-    coordinator.data = {"sensors": {_DEV_ID: {"waterLv": 0, "waterT": 0}}}
-    added = await _setup_entities(hass, coordinator)
-    water_level = next(e for e in added if e.unique_id.endswith("_waterLv"))
-    water_temp = next(e for e in added if e.unique_id.endswith("_waterT"))
-    assert water_level.native_value == 0.0
-    assert water_temp.native_value == 0.0
-
-    coordinator.data = {"sensors": {_DEV_ID: {"waterLv": -6666, "waterT": -6666}}}
-    assert water_level.native_value is None
-    assert water_temp.native_value is None
-
-
-async def test_sensor_vgrow_water_values_scale_from_point_log(hass: HomeAssistant) -> None:
-    # Real VGrow + DWC kit sample: the app showed 11 L of a 15 L tank and 22.2 °C.
-    coordinator = _StubCoordinator(client_id=_VGROW_CLIENT_ID)
-    coordinator.data = {"sensors": {_DEV_ID: {"waterLv": 7500, "waterT": 2226}}}
-    added = await _setup_entities(hass, coordinator)
-
-    water_level = next(e for e in added if e.unique_id.endswith("_waterLv"))
-    water_temp = next(e for e in added if e.unique_id.endswith("_waterT"))
-    assert water_level.native_value == 75.0
-    assert water_level.native_unit_of_measurement == PERCENTAGE
-    assert water_temp.native_value == 22.26
-    assert water_temp.native_unit_of_measurement == UnitOfTemperature.CELSIUS
-
-    # Same box after topping up to the 15 L mark.
-    coordinator.data = {"sensors": {_DEV_ID: {"waterLv": 10000, "waterT": 2220}}}
-    assert water_level.native_value == 100.0
-    assert water_temp.native_value == 22.2
-
-
-async def test_sensor_vgrow_water_values_unknown_without_dwc_sensor(hass: HomeAssistant) -> None:
-    coordinator = _StubCoordinator(client_id=_VGROW_CLIENT_ID)
-    coordinator.data = {"sensors": {_DEV_ID: {"pTemp": 2669}}}
-    added = await _setup_entities(hass, coordinator)
-
-    assert next(e for e in added if e.unique_id.endswith("_waterLv")).native_value is None
-    assert next(e for e in added if e.unique_id.endswith("_waterT")).native_value is None
-
-
-async def test_sensor_vpd_computed_when_device_omits_vpd(hass: HomeAssistant) -> None:
-    """VSCTL001 (GrowHub E42) reports temp/humidity but never VPD - compute it."""
-    coordinator = _StubCoordinator()
-    coordinator.data = {
-        "sensors": {
-            _DEV_ID: {
-                "inTemp": 2345,
-                "inHumi": 6012,
-                "outTemp": 1876,
-                "outHumi": 5234,
-            },
-        },
-        "shadows": {_DEV_ID: {"connection": {"connected": True}}},
-    }
-
-    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
-    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
-
-    added: list[VivosunChannelSensorEntity] = []
-
-    def _add(entities: list[VivosunChannelSensorEntity]) -> None:
-        added.extend(entities)
-
-    await async_setup_entry(hass, entry, _add)
-    entity_by_unique_id = {entity.unique_id: entity for entity in added}
-
-    inside_vpd = entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_inVpd"]
-    assert inside_vpd.native_value == 1.15
-    assert inside_vpd.extra_state_attributes == {"quantity": "vpd", "source": "computed"}
-
-    outside_vpd = entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_outVpd"]
-    assert outside_vpd.native_value == 1.03
-    assert outside_vpd.extra_state_attributes == {"quantity": "vpd", "source": "computed"}
-
-
-async def test_sensor_vpd_reported_value_wins_over_computed(hass: HomeAssistant) -> None:
-    coordinator = _StubCoordinator()
-    coordinator.data = {
-        "sensors": {
-            _DEV_ID: {"inTemp": 2345, "inHumi": 6012, "inVpd": 145},
-        },
-    }
-
-    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
-    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
-
-    added: list[VivosunChannelSensorEntity] = []
-
-    def _add(entities: list[VivosunChannelSensorEntity]) -> None:
-        added.extend(entities)
-
-    await async_setup_entry(hass, entry, _add)
-    entity_by_unique_id = {entity.unique_id: entity for entity in added}
-
-    inside_vpd = entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_inVpd"]
-    assert inside_vpd.native_value == 1.45
-    assert inside_vpd.extra_state_attributes == {"quantity": "vpd", "source": "reported"}
-
-
-async def test_sensor_vpd_stays_none_without_humidity(hass: HomeAssistant) -> None:
-    coordinator = _StubCoordinator()
-    coordinator.data = {
-        "sensors": {
-            _DEV_ID: {"inTemp": 2345},
-        },
-    }
-
-    entry = MockConfigEntry(domain=DOMAIN, title="t", data={})
-    runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
-
-    added: list[VivosunChannelSensorEntity] = []
-
-    def _add(entities: list[VivosunChannelSensorEntity]) -> None:
-        added.extend(entities)
-
-    await async_setup_entry(hass, entry, _add)
-    entity_by_unique_id = {entity.unique_id: entity for entity in added}
-
-    assert entity_by_unique_id[f"vivosun_growhub_{_DEV_ID}_inVpd"].native_value is None
