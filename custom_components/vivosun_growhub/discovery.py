@@ -61,12 +61,14 @@ def watch_gardens(
         seen.intersection_update({uid for uid in seen if any(uid.startswith(prefix) for prefix in active)})
         for garden in inventory.gardens:
             try:
+                candidates: dict[str, Entity] = {}
                 for entity in factory(garden):
                     unique_id = entity.unique_id
-                    if unique_id is None or unique_id in seen:
-                        continue
-                    async_add_entities([entity])
-                    seen.add(unique_id)
+                    if unique_id is not None and unique_id not in seen:
+                        candidates.setdefault(unique_id, entity)
+                if candidates:
+                    async_add_entities(list(candidates.values()))
+                    seen.update(candidates)
             except Exception:
                 _LOGGER.exception("Garden sensor discovery failed; will retry")
 

@@ -112,6 +112,7 @@ def test_vseed_telemetry_entities_use_specific_root_and_dome_channels() -> None:
 def _real_coordinator(hass: HomeAssistant) -> VivosunCoordinator:
     coordinator = VivosunCoordinator(hass, object(), email="synthetic@example.test", password="unused")  # type: ignore[arg-type]
     coordinator._devices = [DeviceInfo("device-1", "id-VSSBS40-1", "thing/1", "Seed", True, 0, "vseed")]
+    coordinator._all_devices = list(coordinator._devices)
     coordinator._build_topic_maps()
     coordinator.data = coordinator._build_state_snapshot()
     return coordinator

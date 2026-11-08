@@ -88,7 +88,7 @@ async def test_native_three_gardens_moves_and_customizations(hass: HomeAssistant
     assert registry.async_get(e25.id).via_device_id is None
 
 
-async def test_removed_persisted_gardens_retire_only_owned_rows_and_preserve_absent_physical(
+async def test_removed_persisted_gardens_remove_owned_rows_and_unlink_absent_physical(
     hass: HomeAssistant,
 ) -> None:
     entry = MockConfigEntry(domain=DOMAIN, title="Account", data={})
@@ -106,6 +106,11 @@ async def test_removed_persisted_gardens_retire_only_owned_rows_and_preserve_abs
         identifiers={(DOMAIN, topology.identifier(20))},
         entry_type=dr.DeviceEntryType.SERVICE, name="Deleted garden", model="Garden",
     )
+    deleted_second = registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, topology.identifier(30))},
+        entry_type=dr.DeviceEntryType.SERVICE, name="Another deleted garden", model="Garden",
+    )
     retained = registry.async_get_or_create(
         config_entry_id=entry.entry_id, identifiers={(DOMAIN, "temporarily-absent")},
         via_device_id=deleted.id,
@@ -118,6 +123,10 @@ async def test_removed_persisted_gardens_retire_only_owned_rows_and_preserve_abs
     old_row = entities.async_get_or_create(
         "sensor", DOMAIN, f"vivosun_growhub_{entry.entry_id}_garden_20_stage",
         config_entry=entry, device_id=deleted.id,
+    )
+    old_second_row = entities.async_get_or_create(
+        "sensor", DOMAIN, f"vivosun_growhub_{entry.entry_id}_garden_30_stage",
+        config_entry=entry, device_id=deleted_second.id,
     )
     other_row = entities.async_get_or_create(
         "sensor", DOMAIN, f"vivosun_growhub_{unrelated_entry.entry_id}_garden_20_stage",
@@ -132,14 +141,15 @@ async def test_removed_persisted_gardens_retire_only_owned_rows_and_preserve_abs
     topology.apply(valid, [])
     topology.apply(valid, [])
     assert registry.async_get(deleted.id) is None
+    assert registry.async_get(deleted_second.id) is None
     assert entities.async_get(old_row.entity_id) is None
+    assert entities.async_get(old_second_row.entity_id) is None
     assert registry.async_get(retained.id).via_device_id is None
     assert entities.async_get(physical_row.entity_id).disabled_by == er.RegistryEntryDisabler.USER
     assert entities.async_get(other_row.entity_id) == other_row
     assert registry.async_get(other_parent.id) == other_parent
 
-    # Returning stable cloud identity may be registered again without adopting
-    # old physical device identity or the other account's garden.
+    # A returning garden is registered without adopting the other account's device.
     topology.apply(GardenInventory((_garden(10, "Surviving garden"), _garden(20, "Returned"))), [])
     restored = registry.async_get_device_by_identifier((DOMAIN, topology.identifier(20)), entry.entry_id)
     assert restored is not None and restored.id != other_parent.id

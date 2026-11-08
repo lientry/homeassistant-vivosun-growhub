@@ -81,22 +81,23 @@ class GardenTopology:
             elif existing.via_device_id != via_device_id:
                 self._registry.async_update_device(existing.id, via_device_id=via_device_id)
 
-        # A device may disappear temporarily from getTotalList. Unlink any
-        # retained physical child before removing its former service parent.
+        # Unlink retained physical children before removing confirmed-deleted gardens.
         current_parents = set(parents.values())
+        device_entries = dr.async_entries_for_config_entry(self._registry, self._entry_id)
         retired = [
-            row for row in dr.async_entries_for_config_entry(self._registry, self._entry_id)
+            row for row in device_entries
             if row.entry_type == dr.DeviceEntryType.SERVICE
             and any(domain == DOMAIN and identifier.startswith(f"garden:{self._entry_id}:")
                     for domain, identifier in row.identifiers)
             and row.id not in current_parents
         ]
         retired_ids = {row.id for row in retired}
-        for row in dr.async_entries_for_config_entry(self._registry, self._entry_id):
+        for row in device_entries:
             if row.via_device_id in retired_ids:
                 self._registry.async_update_device(row.id, via_device_id=None)
-        for parent in retired:
+        if retired_ids:
             for entity in er.async_entries_for_config_entry(self._entities, self._entry_id):
-                if entity.device_id == parent.id and entity.platform == DOMAIN:
+                if entity.device_id in retired_ids and entity.platform == DOMAIN:
                     self._entities.async_remove(entity.entity_id)
+        for parent in retired:
             self._registry.async_remove_device(parent.id)

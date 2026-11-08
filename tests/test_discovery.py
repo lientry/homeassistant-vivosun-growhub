@@ -12,7 +12,8 @@ from homeassistant.helpers.entity_platform import EntityPlatform
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
-from custom_components.vivosun_growhub.discovery import watch_devices
+from custom_components.vivosun_growhub.discovery import watch_devices, watch_gardens
+from custom_components.vivosun_growhub.gardens import Garden, GardenInventory
 from custom_components.vivosun_growhub.models import DeviceInfo
 
 if TYPE_CHECKING:
@@ -53,6 +54,21 @@ class _DiscoveredSensor(SensorEntity):
     def __init__(self, device_id: str) -> None:
         self._attr_name = f"{device_id} Reading"
         self._attr_unique_id = f"garden-test-{device_id}"
+
+
+class _GardenCoordinator:
+    def __init__(self) -> None:
+        self.listeners: list[Callable[[GardenInventory], None]] = []
+
+    def async_add_garden_listener(
+        self, callback: Callable[[GardenInventory], None],
+    ) -> Callable[[], None]:
+        self.listeners.append(callback)
+        return lambda: self.listeners.remove(callback)
+
+    def notify(self, *gardens: Garden) -> None:
+        for callback in tuple(self.listeners):
+            callback(GardenInventory(gardens))
 
 
 async def test_factory_and_callback_failures_recover_without_poisoning_native_registry(
@@ -116,3 +132,48 @@ async def test_factory_and_callback_failures_recover_without_poisoning_native_re
     assert not coordinator._listeners
     coordinator.notify(_device("d"))
     assert registry.async_get_entity_id("sensor", DOMAIN, "garden-test-d") is None
+
+
+async def test_garden_additions_batch_and_retry_without_losing_dynamic_sources(hass: HomeAssistant) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, title="Account", data={})
+    entry.add_to_hass(hass)
+    coordinator = _GardenCoordinator()
+    garden = Garden(10, 600, "Garden", "UTC", ())
+    include_micro = False
+    handoffs: list[list[str]] = []
+
+    def factory(garden: Garden) -> list[SensorEntity]:
+        roles = ["stage", "recipe", "recipe"]
+        if include_micro:
+            roles.append("micro_inside")
+        entities = []
+        for role in roles:
+            sensor = _DiscoveredSensor(role)
+            sensor._attr_unique_id = f"vivosun_growhub_{entry.entry_id}_garden_{garden.scene_id}_{role}"
+            entities.append(sensor)
+        return entities
+
+    def add_entities(entities: list[SensorEntity]) -> None:
+        handoffs.append([entity.unique_id for entity in entities])
+        if len(handoffs) == 1:
+            raise RuntimeError("transient platform handoff failure")
+
+    watch_gardens(entry, coordinator, add_entities, factory)
+    prefix = f"vivosun_growhub_{entry.entry_id}_garden_10_"
+    try:
+        coordinator.notify(garden)
+        coordinator.notify(garden)
+        coordinator.notify(garden)
+        assert handoffs == [
+            [prefix + "stage", prefix + "recipe"],
+            [prefix + "stage", prefix + "recipe"],
+        ]
+        include_micro = True
+        coordinator.notify(garden)
+        assert handoffs[-1] == [prefix + "micro_inside"]
+        coordinator.notify()
+        coordinator.notify(garden)
+        assert handoffs[-1] == [prefix + "stage", prefix + "recipe", prefix + "micro_inside"]
+    finally:
+        await entry._async_process_on_unload(hass)
+    assert not coordinator.listeners

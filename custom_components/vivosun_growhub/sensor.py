@@ -34,6 +34,7 @@ from .coordinator import VivosunCoordinator
 from .discovery import watch_devices, watch_gardens
 from .entity_helpers import build_device_info, is_entity_available, sensor_slice
 from .garden_display import GardenScheduleClock, GardenSelection, garden_stage_clock, select_garden_plan
+from .garden_environment import METRICS
 from .models import client_model_token
 from .shadow import cfan_shadow_to_percentage, dfan_shadow_to_percentage
 from .vseed import reported_seed
@@ -302,9 +303,73 @@ async def async_setup_entry(
             )
             for key, name, icon, kind in _GARDEN_SCHEDULE_ENTITIES if key in relevant
         )
+        entities.extend(
+            VivosunGardenEnvironmentSensor(coordinator, entry, garden.scene_id, role, metric)
+            for role in coordinator.garden_environment_sources(garden.scene_id)
+            for metric in range(len(METRICS))
+        )
         return entities
 
     watch_gardens(entry, coordinator, async_add_entities, garden_factory)
+
+
+class VivosunGardenEnvironmentSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
+    """A selected garden projection, not a controller automation input."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self, coordinator: VivosunCoordinator, entry: ConfigEntry, scene_id: int, role: str, metric: int,
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry_id = entry.entry_id
+        self._scene_id = scene_id
+        self._role = role
+        self._metric = metric
+        name = METRICS[metric]
+        label = "Micro" if role.startswith("micro_") else role.capitalize()
+        self._attr_unique_id = f"vivosun_growhub_{entry.entry_id}_garden_{scene_id}_{role}_{name}"
+        self._attr_name = f"{label} {name.upper() if name == 'vpd' else name.capitalize()}"
+        if name == "temperature":
+            self._attr_device_class = SensorDeviceClass.TEMPERATURE
+            self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        elif name == "humidity":
+            self._attr_device_class = SensorDeviceClass.HUMIDITY
+            self._attr_native_unit_of_measurement = PERCENTAGE
+        else:
+            self._attr_icon = "mdi:leaf"
+            self._attr_native_unit_of_measurement = "kPa"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"garden:{self._entry_id}:{self._scene_id}")},
+            manufacturer="VIVOSUN", model="Garden",
+        )
+
+    @property
+    def available(self) -> bool:
+        return self.native_value is not None
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.garden_environment_value(self._scene_id, self._role, self._metric)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        source = self.coordinator.garden_environment_source(self._scene_id, self._role)
+        attrs = self.coordinator.garden_environment_status(self._scene_id, self._role, self._metric)
+        if source is None:
+            return attrs
+        attrs.update({
+            "selected_source_model": client_model_token(source.client_id),
+            "selected_source_channel": {
+                "inTemp": "inside", "outTemp": "outside", "pTemp": "probe", "bTemp": "built_in",
+            }[source.keys[0]],
+            "selected_source": source.identity[:12],
+        })
+        return attrs
 
 
 class VivosunGardenSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]

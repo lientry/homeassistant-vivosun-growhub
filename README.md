@@ -20,6 +20,8 @@ Requires your Vivosun app account. Device control and sensor readings use the Vi
 
 Each garden in the Vivosun app appears as a native Home Assistant service device, with its connected physical devices beneath it. Garden sensors show the configured recipe and stage, plus equipment schedules where available, including for gardens without a connected controller.
 
+Mapped garden sources also provide inside, outside and micro-environment temperature, humidity and VPD readings. Inside/outside entity IDs stay stable when sources change. Replacing a micro source creates new entities and retains the old history.
+
 **Upgrading?** Controller plan sensors now belong to gardens. If automations or dashboards reference the old controller plan sensors, update those references to garden sensors after upgrading. Physical controls keep their entity IDs.
 
 ## Supported devices
