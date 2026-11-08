@@ -90,12 +90,14 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
     _attr_has_entity_name = True
     _attr_icon = "mdi:power-socket"
 
-    def __init__(self, coordinator: VivosunCoordinator, device_id: str, port: str, model: str) -> None:
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str, port: str,
+                 model: str = "VSPLUGA22") -> None:
         super().__init__(coordinator)
         if port not in PORTS_BY_MODEL.get(model, ()):
             raise ValueError("Unsupported model/physical port")
         self._device_id = device_id
         self._port = port
+        self._model = model
         self._model_name = _PORT_MODEL_NAMES[model]
         self._attr_name = port.upper() if port.startswith("usb") else f"Outlet {port[-1]}"
         self._attr_unique_id = f"vivosun_growhub_{device_id}_{port}"
@@ -105,6 +107,8 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
         return build_device_info(self.coordinator, self._device_id)
 
     def _report(self) -> PortReport:
+        if self._model == "VSPLUGA22":
+            return self.coordinator.a22_settings(self._device_id, self._port).status
         return reported_port(shadow_slice(self.coordinator, self._device_id, "ports").get(self._port))
 
     @property
@@ -136,6 +140,9 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
                 f"Cannot control {self._attr_name}: manual mode and no active plan must both be reported "
                 "(mode=0, inPlan=0)"
             )
+        if self._model == "VSPLUGA22":
+            await self.coordinator.async_set_a22_manual_power(self._device_id, self._port, on)
+            return
         await self.coordinator.async_publish_shadow_update(
             build_manual_port_payload(self._port, on), device_id=self._device_id, qos=1
         )

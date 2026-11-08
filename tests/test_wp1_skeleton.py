@@ -110,7 +110,7 @@ async def test_constants_match_wp1_spec() -> None:
     assert PLATFORMS == [
         Platform.SELECT, Platform.SWITCH, Platform.LIGHT, Platform.FAN, Platform.SENSOR,
         Platform.BINARY_SENSOR, Platform.HUMIDIFIER, Platform.CLIMATE, Platform.CAMERA,
-        Platform.NUMBER,
+        Platform.NUMBER, Platform.TIME,
     ]
 
 
