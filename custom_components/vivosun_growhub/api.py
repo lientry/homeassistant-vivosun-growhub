@@ -45,7 +45,6 @@ from .const import (
 )
 from .encryption import encrypt_request_body
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
-from .garden_environment import Sample, parse_sample
 from .gardens import GardenInventory, GardenPlans, parse_garden_inventory, parse_garden_plans
 from .models import (
     AuthTokens,
@@ -71,15 +70,6 @@ _SP_APP_ID = "com.vivosun.android"
 _NO_SCENE_DEVICE_TYPES = frozenset({"curing_box", "vseed"})
 # Port-only A10 has no built-in climate sensor, even when a scene is assigned.
 _NO_POINT_LOG_DEVICE_TYPES = frozenset({"a10"})
-
-
-class PointLog(dict[str, int | None]):
-    """Existing physical snapshot plus independent timestamped garden sample."""
-
-    def __init__(self, values: dict[str, int | None], sample: Sample | None, status: str = "current") -> None:
-        super().__init__(values)
-        self.sample = sample
-        self.status = status
 
 
 class VivosunApiClient:
@@ -168,25 +158,6 @@ class VivosunApiClient:
             json_body={"sceneId": scene_id},
         )
         return parse_garden_plans(data, scene_id=scene_id)
-
-    async def get_garden_panel(self, tokens: AuthTokens, scene_id: int) -> Mapping[str, object]:
-        """Read the app's current selected garden cards."""
-        return await self._request_json(
-            "POST", "/iot/feature/getDataPanel", headers=self._auth_headers(tokens),
-            json_body={"kind": "feature_iot_home_data_panel", "code": "app_v2", "sceneId": scene_id},
-        )
-
-    async def get_garden_sample(self, tokens: AuthTokens, scene_id: int, now: int) -> Sample | None:
-        """Read the app's five-minute garden scene projection."""
-        data = await self._request_json(
-            "POST", "/iot/data/getScenePointLog", headers=self._auth_headers(tokens),
-            json_body={
-                "sceneId": scene_id, "startTime": now - 300, "endTime": now, "reportType": 0,
-                "timeLevel": "ONE_MINUTE", "orderBy": "asc",
-                "param": ["inTemp", "inHumi", "inVpd", "outTemp", "outHumi", "outVpd"],
-            },
-        )
-        return parse_sample(data)
 
     def _parse_device_entry(
         self,
@@ -386,7 +357,7 @@ class VivosunApiClient:
                 })
             if device.device_type == "vseed":
                 return parse_point_log([], now=end_time)
-            return PointLog({}, None, "missing")
+            return {}
 
         latest = self._expect_mapping_item(entries[-1], "iotDataLogList[-1]")
         if self._support_capture is not None and self._support_capture.active:
@@ -426,13 +397,7 @@ class VivosunApiClient:
             SENSOR_KEY_RSSI,
         ):
             snapshot[key] = self._optional_sensor_int(latest, key)
-        try:
-            sample = parse_sample(data)
-            sample_status = "current"
-        except VivosunResponseError:
-            sample = None
-            sample_status = "invalid"
-        return PointLog(snapshot, sample, sample_status)
+        return snapshot
 
     async def get_plan_stage_info(self, tokens: AuthTokens, stage_id: str) -> PlanStageInfo | None:
         """Fetch plan stage details from iot/plan/stageInfo."""

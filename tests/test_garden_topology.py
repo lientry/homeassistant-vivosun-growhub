@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
-from custom_components.vivosun_growhub.garden_topology import GardenTopology
+from custom_components.vivosun_growhub.garden_topology import GardenTopology, garden_membership
 from custom_components.vivosun_growhub.gardens import Garden, GardenInventory, GardenMember
 from custom_components.vivosun_growhub.models import DeviceInfo
 
@@ -29,6 +30,12 @@ def _device(device_id: str, scene_id: int) -> DeviceInfo:
                       device_type="controller")
 
 
+@pytest.mark.parametrize("kind", ["vseed", "curing_box"])
+def test_garden_membership_accepts_devices_without_scene_metadata(kind: str) -> None:
+    device = DeviceInfo("standalone", "thing", "topic", "Standalone", True, 0, kind)
+    assert garden_membership(GardenInventory((_garden(10, "Garden", "standalone"),)), [device]) == {"standalone": 10}
+
+
 async def test_native_three_gardens_moves_and_customizations(hass: HomeAssistant) -> None:
     entry = MockConfigEntry(domain=DOMAIN, title="Account", data={})
     entry.add_to_hass(hass)
@@ -40,11 +47,14 @@ async def test_native_three_gardens_moves_and_customizations(hass: HomeAssistant
 
     topology.apply(initial, [_device("e42a", 10), _device("e25", 20)])
 
-    parents = [registry.async_get_device(identifiers={(DOMAIN, topology.identifier(i))}) for i in (10, 20, 30)]
+    parents = [
+        registry.async_get_device_by_identifier((DOMAIN, topology.identifier(i)), entry.entry_id)
+        for i in (10, 20, 30)
+    ]
     assert all(parent is not None and parent.entry_type == dr.DeviceEntryType.SERVICE for parent in parents)
     p10, p20, p30 = parents
     assert p30 is not None and p30.via_device_id is None
-    e25 = registry.async_get_device(identifiers={(DOMAIN, "e25")})
+    e25 = registry.async_get_device_by_identifier((DOMAIN, "e25"), entry.entry_id)
     assert e25 is not None and p20 is not None and e25.via_device_id == p20.id
     entity = entities.async_get_or_create("sensor", DOMAIN, "vivosun_growhub_e25_inTemp",
                                           config_entry=entry, device_id=e25.id)

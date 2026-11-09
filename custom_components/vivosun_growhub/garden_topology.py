@@ -32,7 +32,7 @@ def garden_membership(inventory: GardenInventory, devices: list[DeviceInfo]) -> 
         if device.client_id:
             routes.add(device.client_id)
         scene_id = members.get(device.device_id, 0)
-        if scene_id != device.scene_id:
+        if device.scene_id != 0 and scene_id != device.scene_id:
             raise VivosunResponseError("Garden and device inventories disagree on membership")
         expected_client = member_clients.get(device.device_id)
         if expected_client and device.client_id and expected_client != device.client_id:

@@ -1000,7 +1000,7 @@ async def test_shutdown_abandons_pending_discovery_and_restart_uses_new_lifecycl
 
     registry = dr.async_get(hass)
     assert coordinator.devices == [] and coordinator.garden_inventory is None
-    assert coordinator._subscribed_client_ids == set()
+    assert coordinator._subscribed_routes == set()
     assert received == [("device-1", "device-2")]
     assert registry.async_get_device(identifiers={(DOMAIN, "device-3")}) is None
     assert prior is not None
@@ -1049,7 +1049,7 @@ async def test_superseded_subscription_cannot_commit_and_recovery_adds_once(
     assert coordinator.garden_inventory == original_inventory
     assert received == [("device-1", "device-2")]
     assert coordinator.get_device(new_device.device_id) is None
-    assert new_device.client_id not in coordinator._subscribed_client_ids
+    assert (new_device.client_id, new_device.topic_prefix) not in coordinator._subscribed_routes
 
     api.failure = None
     await coordinator.async_refresh_inventory(force=True)
@@ -1125,6 +1125,94 @@ async def test_verified_garden_only_account_registers_service_device(
         assert (garden.name, garden.via_device_id) == ("Empty Garden", None)
         assert coordinator.devices == [] and not coordinator.is_mqtt_connected
         assert "get_aws_identity" not in api.calls and aws.calls == []
+    finally:
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize("endpoint", ["get_gardens", "get_devices", "get_garden_plans"])
+async def test_garden_only_expired_auth_recovers_without_mqtt(
+    hass: HomeAssistant, monkeypatch: MonkeyPatch, endpoint: str,
+) -> None:
+    api = _GardenApiStub()
+    api.devices = []
+    api.gardens = GardenInventory((Garden(100, 600, "Empty Garden", "UTC", ()),))
+    coordinator, aws = _garden_coordinator(hass, monkeypatch, api)
+    try:
+        await coordinator.async_start()
+        old = api.tokens
+        api.tokens = replace(old, access_token="renewed")
+        attempts: list[AuthTokens] = []
+        original = getattr(api, endpoint)
+
+        async def expired(tokens: AuthTokens, *args: int) -> object:
+            attempts.append(tokens)
+            if tokens is old:
+                raise VivosunAuthError("expired")
+            return await original(tokens, *args)
+
+        monkeypatch.setattr(api, endpoint, expired, raising=False)
+        if endpoint in ("get_gardens", "get_devices"):
+            await coordinator.async_refresh_inventory(force=True)
+        elif endpoint == "get_garden_plans":
+            task = coordinator._queue_garden_read(100)
+            assert task is not None
+            await task
+        assert attempts == [old, api.tokens]
+        assert api.calls.count("login") == 2
+        assert coordinator.devices == [] and not coordinator.is_mqtt_connected
+        assert aws.calls == []
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_concurrent_garden_reads_share_authentication_recovery(
+    hass: HomeAssistant, monkeypatch: MonkeyPatch,
+) -> None:
+    api = _GardenApiStub()
+    api.devices = []
+    api.gardens = GardenInventory(tuple(Garden(i, 600, "Garden", "UTC", ()) for i in (10, 20, 30)))
+    coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
+    try:
+        await coordinator.async_start()
+        old = api.tokens
+        api.tokens = replace(old, access_token="renewed")
+        login = api.login
+
+        async def slow_login(email: str, password: str) -> AuthTokens:
+            await asyncio.sleep(0)
+            return await login(email, password)
+
+        async def expired(tokens: AuthTokens, scene_id: int) -> GardenPlans:
+            if tokens is old:
+                raise VivosunAuthError("expired")
+            return GardenPlans(scene_id, ())
+
+        monkeypatch.setattr(api, "login", slow_login)
+        monkeypatch.setattr(api, "get_garden_plans", expired)
+        await asyncio.gather(*(coordinator._queue_garden_read(i) for i in (10, 20, 30)))
+        assert api.calls.count("login") == 2  # Bootstrap and one shared recovery.
+        assert all(coordinator.garden_plan_read(i).status == "current" for i in (10, 20, 30))
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_inventory_topic_prefix_change_subscribes_new_route(
+    hass: HomeAssistant, monkeypatch: MonkeyPatch,
+) -> None:
+    api = _GardenApiStub()
+    coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
+    try:
+        await coordinator.async_start()
+        mqtt = coordinator._mqtt_client
+        assert isinstance(mqtt, _MqttStub)
+        api.devices = [replace(device, topic_prefix="replacement/topic") if device.device_id == "device-1"
+                       else device for device in api.devices]
+        await coordinator.async_refresh_inventory(force=True)
+        topic = TOPIC_CHANNEL_APP.format(topic_prefix="replacement/topic")
+        assert (topic, 1) in mqtt.subscribed_topics
+        count = mqtt.subscribed_topics.count((topic, 1))
+        await coordinator.async_refresh_inventory(force=True)
+        assert mqtt.subscribed_topics.count((topic, 1)) == count
     finally:
         await coordinator.async_shutdown()
 

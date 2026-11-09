@@ -9,13 +9,13 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar, cast
 from uuid import uuid4
 
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .api import PointLog, VivosunApiClient
+from .api import VivosunApiClient
 from .aws_auth import AWS_CREDENTIAL_REFRESH_SKEW, AwsAuthClient, AwsCredentials
 from .const import (
     CFAN_LEVEL_MAP,
@@ -34,7 +34,6 @@ from .const import (
     TOPIC_SHADOW_UPDATE_REJECTED,
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
-from .garden_environment import KEYS, Sample, Selection, Source, parse_selection
 from .garden_topology import GardenTopology, garden_membership
 from .gardens import GardenPlanRead
 from .model_metadata import support_capture_model_metadata
@@ -66,7 +65,7 @@ from .support_capture import (
 from .vseed import POINT_LOG_KEYS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     import aiohttp
     from homeassistant.core import HomeAssistant
@@ -76,6 +75,7 @@ if TYPE_CHECKING:
     from .models import AuthTokens, AwsIdentity, DeviceInfo
 
 _LOGGER = logging.getLogger(__name__)
+_ReadResult = TypeVar("_ReadResult")
 _RECONNECT_BACKOFF_INITIAL = 1.0
 _RECONNECT_BACKOFF_MAX = 60.0
 _RECONNECT_HEALTH_CHECK_SECONDS = 2.0
@@ -203,6 +203,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._password = password
 
         self._tokens: AuthTokens | None = None
+        self._auth_lock = asyncio.Lock()
         self._aws_identity: AwsIdentity | None = None
         self._aws_credentials: AwsCredentials | None = None
         self._devices: list[DeviceInfo] = []
@@ -215,18 +216,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._garden_read_tasks: dict[int, asyncio.Task[None]] = {}
         self._garden_read_versions: dict[int, int] = {}
         self._garden_read_last_attempt: dict[int, datetime] = {}
-        self._environment_tasks: dict[int, asyncio.Task[None]] = {}
-        self._environment_attempts: dict[int, datetime] = {}
-        self._environment_selections: dict[int, Selection] = {}
-        self._environment_samples: dict[int, Sample | None] = {}
-        self._environment_panel_status: dict[int, str] = {}
-        self._environment_sample_status: dict[int, str] = {}
-        self._environment_sources: dict[tuple[int, str], str] = {}
-        self._environment_after: dict[tuple[int, str], float] = {}
-        self._physical_samples: dict[str, tuple[str, Sample | None]] = {}
         self._physical_sample_versions: dict[str, int] = {}
-        self._physical_sample_status: dict[str, str] = {}
-        self._environment_expiry: asyncio.TimerHandle | None = None
         self._reported_plan_signatures: dict[str, str] = {}
         self._garden_listeners: list[Callable[[GardenInventory], None]] = []
         self._inventory_generation = 0
@@ -235,7 +225,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._unsub_garden_tick: Callable[[], None] | None = None
         self._inventory_apply_lock = asyncio.Lock()
         self._device_listeners: list[tuple[Callable[[list[DeviceInfo]], None], bool]] = []
-        self._subscribed_client_ids: set[str] = set()
+        self._subscribed_routes: set[tuple[str, str]] = set()
         self._capture_devices: list[CaptureDevice] = []
         self._support_shadow_waiters: dict[tuple[str, str], asyncio.Future[dict[str, object]]] = {}
         self._support_capture_task: asyncio.Task[None] | None = None
@@ -308,205 +298,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     def garden_plan_read(self, scene_id: int) -> GardenPlanRead:
         """Return per-garden recipe read health, independent of MQTT."""
         return self._garden_reads.get(scene_id, GardenPlanRead(None, "unknown"))
-
-    def garden_environment_sources(self, scene_id: int) -> dict[str, Source]:
-        """Return verified selected groups for dynamic entity discovery."""
-        selection = self._environment_selections.get(scene_id)
-        inventory = self._garden_inventory
-        garden = next((g for g in inventory.gardens if g.scene_id == scene_id), None) if inventory else None
-        if selection is None or garden is None:
-            return {}
-        result = {role: source for role, source in (("inside", selection.inside),
-                                                     ("outside", selection.outside)) if source is not None}
-        result.update({f"micro_{source.identity}": source for source in selection.micro})
-        members = {member.device_id for member in garden.members}
-        return {
-            role: source for role, source in result.items()
-            if source.device_id in members and any(
-                device.device_id == source.device_id and device.client_id == source.client_id
-                for device in self._all_devices
-            )
-        }
-
-
-    def garden_environment_value(self, scene_id: int, role: str, metric: int) -> float | None:
-        """Read a fresh selected projection without implying atomic source routing."""
-        inventory = self._garden_inventory
-        selection = self._environment_selections.get(scene_id)
-        now = datetime.now(tz=UTC).timestamp()
-        if (inventory is None or not any(g.scene_id == scene_id for g in inventory.gardens)
-                or selection is None or not 0 <= now - selection.observed <= 240):
-            return None
-        source = self.garden_environment_sources(scene_id).get(role)
-        if source is None:
-            return None
-        if role.startswith("micro_"):
-            if not any(
-                device.device_id == source.device_id and device.client_id == source.client_id
-                and device.supports_point_log and device in self._devices
-                for device in self._all_devices
-            ):
-                return None
-            physical = self._physical_samples.get(source.device_id)
-            if physical is None or physical[0] != source.client_id or physical[1] is None:
-                return None
-            return physical[1].value(source.keys[metric], now)
-        sample = self._environment_samples.get(scene_id)
-        if sample is None or role not in KEYS:
-            return None
-        return sample.value(KEYS[role][metric], now, after=self._environment_after.get((scene_id, role)))
-
-
-    def garden_environment_source(self, scene_id: int, role: str) -> Source | None:
-        """Expose only a fresh current selection, not historical attribution."""
-        selection = self._environment_selections.get(scene_id)
-        now = datetime.now(tz=UTC).timestamp()
-        if selection is None or not 0 <= now - selection.observed <= 240:
-            return None
-        return self.garden_environment_sources(scene_id).get(role)
-
-
-    def garden_environment_status(self, scene_id: int, role: str, metric: int) -> dict[str, str]:
-        """Distinguish mapping, read failures, and per-metric sample health."""
-        selection = self._environment_selections.get(scene_id)
-        now = datetime.now(tz=UTC).timestamp()
-        status = self._environment_panel_status.get(scene_id, "unknown")
-        if selection is not None and not 0 <= now - selection.observed <= 240:
-            status = "stale"
-        group = "micro" if role.startswith("micro_") else role
-        source = self.garden_environment_sources(scene_id).get(role)
-        if status == "current" and selection is not None and source is None:
-            status = "invalid" if group in selection.invalid else "unmapped"
-        sample: Sample | None = None
-        sample_status = self._environment_sample_status.get(scene_id, "unknown")
-        key = KEYS.get(role, ("", "", ""))[metric]
-        if role.startswith("micro_") and source is not None:
-            if not any(
-                device.device_id == source.device_id and device.client_id == source.client_id
-                and device.supports_point_log and device in self._devices
-                for device in self._all_devices
-            ):
-                return {"selection_status": status, "sample_status": "unsupported"}
-            physical = self._physical_samples.get(source.device_id)
-            sample = physical[1] if physical is not None and physical[0] == source.client_id else None
-            sample_status = self._physical_sample_status.get(source.device_id, "unknown")
-            key = source.keys[metric]
-        elif not role.startswith("micro_"):
-            sample = self._environment_samples.get(scene_id)
-        if sample is not None:
-            if sample.time < now - 300 or sample.time > now + 60:
-                sample_status = "stale"
-            elif (scene_id, role) in self._environment_after and sample.time <= self._environment_after[scene_id, role]:
-                sample_status = "awaiting_sample"
-            elif sample.values.get(key) is None:
-                sample_status = "invalid"
-        return {"selection_status": status, "sample_status": sample_status}
-
-
-    def _schedule_environment_expiry(self) -> None:
-        """Notify HA at the next freshness boundary without polling per entity."""
-        if self._environment_expiry is not None:
-            self._environment_expiry.cancel()
-            self._environment_expiry = None
-        if self._shutdown_event.is_set():
-            return
-        now = datetime.now(tz=UTC).timestamp()
-        deadlines = [selection.observed + 240 for selection in self._environment_selections.values()]
-        samples = [*self._environment_samples.values(), *(item[1] for item in self._physical_samples.values())]
-        for sample in samples:
-            if sample is not None:
-                deadlines.extend((sample.time - 60, sample.time + 300))
-        future = [deadline for deadline in deadlines if deadline > now]
-        if future:
-            self._environment_expiry = self.hass.loop.call_later(
-                min(future) - now + 0.01, self._environment_expired,
-            )
-
-
-    def _environment_expired(self) -> None:
-        self._environment_expiry = None
-        if not self._shutdown_event.is_set():
-            self._notify_shadow_changed()
-            self._schedule_environment_expiry()
-
-
-    def _queue_environment_read(self, scene_id: int) -> None:
-        """Coalesce each garden's panel and log read on the bounded cadence."""
-        if self._shutdown_event.is_set() or self._tokens is None or self._garden_inventory is None:
-            return
-        last = self._environment_attempts.get(scene_id)
-        if last is not None and datetime.now(tz=UTC) - last < _GARDEN_READ_INTERVAL:
-            return
-        task = self._environment_tasks.get(scene_id)
-        if task is None or task.done():
-            self._environment_tasks[scene_id] = asyncio.create_task(self._read_environment(scene_id))
-
-
-    async def _read_environment(self, scene_id: int) -> None:
-        """Fetch panel and scene sample separately, rejecting obsolete generations."""
-        async with self._garden_read_limit:
-            tokens = self._tokens
-            inventory = self._garden_inventory
-            generation = self._inventory_generation
-            if tokens is None or inventory is None:
-                return
-            garden = next((item for item in inventory.gardens if item.scene_id == scene_id), None)
-            if garden is None:
-                return
-            self._environment_attempts[scene_id] = datetime.now(tz=UTC)
-            selection = None
-            sample: Sample | None = None
-            panel_ok = sample_ok = False
-            panel_status = sample_status = "unreachable"
-            try:
-                panel = await self._api.get_garden_panel(tokens, scene_id)
-                selection = parse_selection(panel, garden, self._all_devices, datetime.now(tz=UTC).timestamp())
-                panel_ok = True
-                panel_status = "current"
-            except asyncio.CancelledError:
-                raise
-            except VivosunResponseError:
-                panel_ok = True
-                panel_status = "invalid"
-            except Exception as error:
-                self._logger.debug("Garden panel unavailable (%s)", _garden_read_failure_category(error))
-            try:
-                sample = await self._api.get_garden_sample(tokens, scene_id, int(datetime.now(tz=UTC).timestamp()))
-                sample_ok = True
-                sample_status = "current" if sample is not None else "missing"
-            except asyncio.CancelledError:
-                raise
-            except VivosunResponseError:
-                sample_ok = True
-                sample_status = "invalid"
-            except Exception as error:
-                self._logger.debug("Garden sample unavailable (%s)", _garden_read_failure_category(error))
-        async with self._inventory_apply_lock:
-            if not self._inventory_is_current(generation) or self._garden_inventory is None or not any(
-                item.scene_id == scene_id for item in self._garden_inventory.gardens
-            ):
-                return
-            self._environment_panel_status[scene_id] = panel_status
-            self._environment_sample_status[scene_id] = sample_status
-            if panel_ok and selection is not None:
-                for role, source in (("inside", selection.inside), ("outside", selection.outside)):
-                    key = (scene_id, role)
-                    if source is not None:
-                        previous = self._environment_sources.get(key)
-                        if previous is not None and previous != source.identity:
-                            self._environment_after[key] = selection.observed
-                            self._environment_samples.pop(scene_id, None)
-                        self._environment_sources[key] = source.identity
-                self._environment_selections[scene_id] = selection
-            elif panel_ok:
-                self._environment_selections.pop(scene_id, None)
-            if sample_ok:
-                previous_sample = self._environment_samples.get(scene_id)
-                if sample is None or previous_sample is None or sample.time >= previous_sample.time:
-                    self._environment_samples[scene_id] = sample
-            self._schedule_environment_expiry()
-            self._notify_shadow_changed()
-
 
     def _physical_poll_is_current(self, device: DeviceInfo, generation: int, version: int) -> bool:
         """Accept a completed poll only for its still-active inventory and route."""
@@ -646,27 +437,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         async with self._start_lock:
             self._shutdown_event.set()
             self._reconnect_event.set()
-            if self._environment_expiry is not None:
-                self._environment_expiry.cancel()
-                self._environment_expiry = None
             self._inventory_generation += 1
             for task in self._garden_read_tasks.values():
                 task.cancel()
-            for task in self._environment_tasks.values():
-                task.cancel()
-            if self._environment_tasks:
-                await asyncio.gather(*self._environment_tasks.values(), return_exceptions=True)
-            self._environment_tasks.clear()
-            self._environment_attempts.clear()
-            self._environment_selections.clear()
-            self._environment_samples.clear()
-            self._environment_panel_status.clear()
-            self._environment_sample_status.clear()
-            self._environment_sources.clear()
-            self._environment_after.clear()
-            self._physical_samples.clear()
             self._physical_sample_versions.clear()
-            self._physical_sample_status.clear()
             if self._garden_read_tasks:
                 await asyncio.gather(*self._garden_read_tasks.values(), return_exceptions=True)
             self._garden_read_tasks.clear()
@@ -1161,7 +935,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._notify_shadow_changed()
             for garden in self._garden_inventory.gardens:
                 self._queue_garden_read(garden.scene_id, periodic=True)
-                self._queue_environment_read(garden.scene_id)
 
 
     def _queue_garden_read(self, scene_id: int, *, periodic: bool = False) -> asyncio.Task[None] | None:
@@ -1205,7 +978,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 version = self._garden_read_versions.get(scene_id, 0)
                 self._garden_read_last_attempt[scene_id] = datetime.now(tz=UTC)
                 try:
-                    plans = await self._api.get_garden_plans(tokens, scene_id)
+                    plans = await self._authenticated_read(lambda auth: self._api.get_garden_plans(auth, scene_id))
                     if plans.scene_id != scene_id:
                         raise VivosunResponseError("Garden plan identity mismatch")
                 except asyncio.CancelledError:
@@ -1253,8 +1026,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._inventory_generation += 1
         generation = self._inventory_generation
         try:
-            inventory = await self._api.get_gardens(tokens)
-            devices = list(initial_devices if initial_devices is not None else await self._api.get_devices(tokens))
+            inventory = await self._authenticated_read(self._api.get_gardens)
+            devices = list(initial_devices if initial_devices is not None
+                           else await self._authenticated_read(self._api.get_devices))
             garden_membership(inventory, devices)
             async with self._inventory_apply_lock:
                 if not self._inventory_is_current(generation):
@@ -1344,16 +1118,16 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._validate_runtime_routes(mqtt_devices, cameras)
 
         mqtt = self._mqtt_client
-        prepared: set[str] = set()
+        prepared: set[tuple[str, str]] = set()
         if mqtt is not None and mqtt.is_connected:
             for device in mqtt_devices.values():
-                if device.client_id not in self._subscribed_client_ids:
+                if (device.client_id, device.topic_prefix) not in self._subscribed_routes:
                     await self._subscribe_device(mqtt, device, track=False, generation=generation)
                     if not self._inventory_is_current(generation):
                         return
                     if self._mqtt_client is not mqtt or not mqtt.is_connected:
                         break
-                    prepared.add(device.client_id)
+                    prepared.add((device.client_id, device.topic_prefix))
 
         if not self._inventory_is_current(generation):
             return
@@ -1365,21 +1139,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         # A successful inventory preserves valid reads during the next plan fetch.
         # Never revive failed reads, or leave absent gardens looking current.
         listed = {garden.scene_id for garden in inventory.gardens}
-        for scene_id, task in tuple(self._environment_tasks.items()):
-            if scene_id not in listed:
-                task.cancel()
-                self._environment_tasks.pop(scene_id, None)
-        for scene_id in (self._environment_attempts.keys() | self._environment_selections.keys()
-                         | self._environment_samples.keys()) - listed:
-            self._environment_attempts.pop(scene_id, None)
-            self._environment_selections.pop(scene_id, None)
-            self._environment_samples.pop(scene_id, None)
-            self._environment_panel_status.pop(scene_id, None)
-            self._environment_sample_status.pop(scene_id, None)
-        for key in tuple(self._environment_sources):
-            if key[0] not in listed:
-                self._environment_sources.pop(key, None)
-                self._environment_after.pop(key, None)
         for scene_id, task in tuple(self._garden_read_tasks.items()):
             if scene_id not in listed:
                 task.cancel()
@@ -1395,18 +1154,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 )
         self._all_devices = devices
         self._devices = sorted(mqtt_devices.values(), key=lambda d: (d.device_id, d.client_id, d.topic_prefix))
-        for device_id, (client_id, _) in tuple(self._physical_samples.items()):
-            if not any(device.device_id == device_id and device.client_id == client_id for device in devices):
-                self._physical_samples.pop(device_id, None)
+        for device_id in tuple(self._physical_sample_versions):
+            if device_id not in mqtt_devices:
                 self._physical_sample_versions.pop(device_id, None)
-                self._physical_sample_status.pop(device_id, None)
-        for garden in inventory.gardens:
-            self._queue_environment_read(garden.scene_id)
-        self._schedule_environment_expiry()
         self._camera_devices = list(cameras.values())
         self._build_topic_maps()
         if mqtt is self._mqtt_client and mqtt is not None and mqtt.is_connected:
-            self._subscribed_client_ids.update(prepared)
+            self._subscribed_routes.update(prepared)
 
         for callback, cameras_only in tuple(self._device_listeners):
             try:
@@ -1468,12 +1222,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 )
                 if not self._physical_poll_is_current(device, generation, version):
                     continue
-                if isinstance(point_log, PointLog):
-                    previous = self._physical_samples.get(device.device_id)
-                    if (point_log.sample is None or previous is None or previous[0] != device.client_id
-                            or previous[1] is None or point_log.sample.time >= previous[1].time):
-                        self._physical_samples[device.device_id] = (device.client_id, point_log.sample)
-                        self._physical_sample_status[device.device_id] = point_log.status
                 if device.device_type == "vseed":
                     self._sensor_states.setdefault(device.device_id, {}).update(
                         {key: point_log.get(key) for key in POINT_LOG_KEYS}
@@ -1483,16 +1231,12 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                         cast("dict[str, object]", point_log)
                     )
             except VivosunResponseError:
-                if self._physical_poll_is_current(device, generation, version):
-                    self._physical_samples[device.device_id] = (device.client_id, None)
-                    self._physical_sample_status[device.device_id] = "invalid"
+                # A malformed response must not erase the last valid physical reading.
+                continue
             except Exception:
-                if self._physical_poll_is_current(device, generation, version):
-                    self._physical_sample_status[device.device_id] = "unreachable"
                 self._logger.debug(
                     "Failed to fetch point log for device %s", device.name, exc_info=True
                 )
-        self._schedule_environment_expiry()
 
 
     def _select_devices(self, devices: list[DeviceInfo]) -> list[DeviceInfo]:
@@ -1537,7 +1281,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         await mqtt_client.connect()
         mqtt_client.add_message_callback(self._handle_mqtt_publish)
         self._mqtt_client = mqtt_client
-        self._subscribed_client_ids.add(primary.client_id)
+        self._subscribed_routes.add((primary.client_id, primary.topic_prefix))
 
         # Subscribe additional devices beyond the primary
         for device in self._devices:
@@ -1588,12 +1332,12 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 self._logger.warning("Cloud command rejection subscription unavailable; timeout remains active")
         if (track and mqtt_client is self._mqtt_client and mqtt_client.is_connected
                 and not self._shutdown_event.is_set()):
-            self._subscribed_client_ids.add(device.client_id)
+            self._subscribed_routes.add((device.client_id, device.topic_prefix))
 
     async def _disconnect_mqtt_client(self) -> None:
         mqtt_client = self._mqtt_client
         self._mqtt_client = None
-        self._subscribed_client_ids.clear()
+        self._subscribed_routes.clear()
         had_pending = bool(self._pending_fields)
         for pending in self._pending_fields.values():
             pending.timeout.cancel()
@@ -2436,11 +2180,32 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._aws_identity = aws_identity
         self._aws_credentials = await self._aws_auth.get_credentials_for_identity(aws_identity)
 
+    async def _renew_tokens(self, expired: AuthTokens | None) -> AuthTokens:
+        """Share one re-login across REST readers and MQTT authentication recovery."""
+        async with self._auth_lock:
+            if self._shutdown_event.is_set():
+                raise VivosunAuthError("Coordinator is shutting down")
+            if self._tokens is expired or self._tokens is None:
+                tokens = await self._api.login(self._email, self._password)
+                if self._shutdown_event.is_set():
+                    raise VivosunAuthError("Coordinator is shutting down")
+                self._tokens = tokens
+            return self._tokens
+
+    async def _authenticated_read(self, read: Callable[[AuthTokens], Awaitable[_ReadResult]]) -> _ReadResult:
+        """Retry one expired REST read without depending on an MQTT connection."""
+        tokens = self._tokens
+        if tokens is None:
+            raise VivosunAuthError("Coordinator is not authenticated")
+        try:
+            return await read(tokens)
+        except VivosunAuthError:
+            return await read(await self._renew_tokens(tokens))
+
     async def _full_reauthenticate(self) -> None:
-        tokens = await self._api.login(self._email, self._password)
+        tokens = await self._renew_tokens(self._tokens)
         aws_identity = await self._api.get_aws_identity(tokens)
         aws_credentials = await self._aws_auth.get_credentials_for_identity(aws_identity)
-        self._tokens = tokens
         self._aws_identity = aws_identity
         self._aws_credentials = aws_credentials
 

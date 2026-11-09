@@ -520,18 +520,21 @@ async def test_fan_normalized_selection_and_safe_restore(
 
 async def test_rapid_acceptance_old_ack_and_rejected_new_request(hass: HomeAssistant) -> None:
     coordinator, mqtt, prefs = await _setup(hass)
-    light = VivosunLightEntity(coordinator, "device-1")
-    await light.async_turn_on(brightness=102)
-    earlier = mqtt.published[-1][1]
-    await light.async_turn_on(brightness=179)
-    later = mqtt.published[-1][1]
-    await _ack(coordinator, 1, later, 3)
-    await _ack(coordinator, 1, earlier, 2)
-    assert prefs.selection("device-1", "light") == 70
-    await light.async_turn_on(brightness=230)
-    newest = mqtt.published[-1][1]
-    await _ingress(coordinator, 1, "update/rejected", {"clientToken": newest["clientToken"], "code": 409})
-    assert prefs.selection("device-1", "light") == 70
+    try:
+        light = VivosunLightEntity(coordinator, "device-1")
+        await light.async_turn_on(brightness=102)
+        earlier = mqtt.published[-1][1]
+        await light.async_turn_on(brightness=179)
+        later = mqtt.published[-1][1]
+        await _ack(coordinator, 1, later, 3)
+        await _ack(coordinator, 1, earlier, 2)
+        assert prefs.selection("device-1", "light") == 70
+        await light.async_turn_on(brightness=230)
+        newest = mqtt.published[-1][1]
+        await _ingress(coordinator, 1, "update/rejected", {"clientToken": newest["clientToken"], "code": 409})
+        assert prefs.selection("device-1", "light") == 70
+    finally:
+        await coordinator._disconnect_mqtt_client()
 
 
 async def test_no_ack_or_publish_failure_does_not_replace_last_accepted(hass: HomeAssistant) -> None:

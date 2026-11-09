@@ -83,8 +83,12 @@ async def test_stage_info_capture_records_existing_success_only_when_enabled(ena
     client.set_support_capture(capture)
     if enabled:
         capture.start(max_events=10, devices=[], subscription_topics=[])
+
     result = await client.get_plan_stage_info(_valid_tokens(), "stage-1")
+
     assert result is not None and result.stage_name == "Dry"
+    assert result.icon == "dry"
+    assert result.content["hwId"] == "raw-hardware"
     assert len(session.calls) == 1
     assert session.calls[0]["url"].endswith("/iot/plan/stageInfo")
     saved = capture.snapshot()["stage_info_results"]
@@ -95,10 +99,13 @@ async def test_stage_info_capture_records_existing_success_only_when_enabled(ena
     assert saved[0]["stage_id"] == "stage-1"
     assert saved[0]["status"] == "success"
     assert saved[0]["stage_name"] == "Dry"
+    assert saved[0]["icon"] == "dry"
+    assert saved[0]["content_status"] == "parsed"
     assert saved[0]["content"]["duration"] == 480
     assert saved[0]["content"]["temperature"] == "18"
     assert saved[0]["content"]["hwId"] == "***"
     assert saved[0]["content"]["nested"] == {"hardwareId": "***", "userPlanId": "recipe-1"}
+    assert "raw-hardware" not in str(saved)
 
 
 async def test_stage_info_capture_failure_preserves_original_return_and_request_count() -> None:
@@ -109,9 +116,12 @@ async def test_stage_info_capture_failure_preserves_original_return_and_request_
     capture = SupportCaptureManager()
     capture.start(max_events=10, devices=[], subscription_topics=[])
     client.set_support_capture(capture)
+
     assert await client.get_plan_stage_info(_valid_tokens(), "stage-2") is None
     assert len(session.calls) == 1
-    assert capture.snapshot()["stage_info_results"][0]["status"] == "error"
+    assert capture.snapshot()["stage_info_results"] == [{
+        "stage_id": "stage-2", "status": "error", "error_type": "VivosunResponseError", "truncated": False,
+    }]
 
 
 async def test_stage_info_inflight_capture_result_cannot_enter_next_session(monkeypatch: MonkeyPatch) -> None:
@@ -881,3 +891,38 @@ async def test_malformed_payload_raises_response_error() -> None:
 
     with pytest.raises(VivosunResponseError):
         await client.get_aws_identity(_valid_tokens())
+
+
+@pytest.mark.parametrize("content", ["not-json", "[1, 2]", "{}"])
+async def test_stage_info_capture_retains_empty_or_unparsed_outcome(content: str) -> None:
+    session = _MockSession(responses=[_MockResponse(status=200, payload={
+        "success": True, "message": "success",
+        "data": {"stageName": "Cure", "icon": "", "planStageContent": content},
+    })])
+    client = VivosunApiClient(cast("aiohttp.ClientSession", session))
+    capture = SupportCaptureManager()
+    capture.start(max_events=2, devices=[], subscription_topics=[])
+    client.set_support_capture(capture)
+
+    result = await client.get_plan_stage_info(_valid_tokens(), "stage-3")
+
+    assert result is not None and result.content == {}
+    assert len(session.calls) == 1
+    assert capture.snapshot()["stage_info_results"] == [{
+        "stage_id": "stage-3", "status": "success", "stage_name": "Cure", "icon": "",
+        "content": {}, "content_status": "empty_or_unparsed", "truncated": False,
+    }]
+
+
+async def test_stage_info_capture_connection_error_preserves_return() -> None:
+    session = _MockSession(request_error=aiohttp.ClientConnectionError("offline"))
+    client = VivosunApiClient(cast("aiohttp.ClientSession", session))
+    capture = SupportCaptureManager()
+    capture.start(max_events=2, devices=[], subscription_topics=[])
+    client.set_support_capture(capture)
+
+    assert await client.get_plan_stage_info(_valid_tokens(), "stage-4") is None
+    assert len(session.calls) == 1
+    assert capture.snapshot()["stage_info_results"] == [{
+        "stage_id": "stage-4", "status": "error", "error_type": "VivosunConnectionError", "truncated": False,
+    }]

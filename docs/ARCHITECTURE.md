@@ -9,7 +9,6 @@ The integration uses REST for account discovery and climate telemetry, and AWS I
 | `api.py`, `aws_auth.py` | Account login, device discovery, REST requests and AWS credential exchange |
 | `mqtt_client.py` | MQTT transport and subscriptions |
 | `coordinator.py` | Per-device routing, reported state, pending commands, telemetry polling and connection lifecycle |
-| `garden_environment.py` | Selected garden sources and timestamped environmental samples |
 | `shadow.py`, `ports.py`, `vseed.py` | Model-scoped parsing, normalization and command payloads |
 | Entity platforms | Native Home Assistant controls and readings |
 | `manual_preferences.py` | Persistent Home Assistant manual selections |
@@ -32,12 +31,6 @@ Reported device plan changes trigger coalesced garden reads, not inferred garden
 Successful complete inventory refreshes remove deleted garden service devices and their garden entities. Physical devices are detached or reassociated without losing their identities or measurements. Failed or superseded inventory reads never remove gardens.
 
 On upgrade, exact legacy controller plan sensor registry rows are disabled and kept with their existing IDs, user metadata and historical records. Those rows no longer publish states. Dashboards and automations referencing old controller plan sensors must switch to the garden-owned IDs. Physical sensors and controls retain their IDs and behavior.
-
-### Garden environmental readings
-
-Selected climate cards resolve through garden membership, account inventory and supported temperature/humidity/VPD descriptors, without a model allowlist. Inside/outside use garden scene readings. Micro environments use the selected source's existing timestamped point-log readings, including the established inside, outside, probe and built-in metric families. Sources without a supported reader remain unavailable.
-
-Selections and samples are separate reads. Source attributes identify the current selection, not proven per-sample routing or firmware Auto inputs. Missing, invalid and stale readings stay unavailable. Source-keyed micro entities retain history when their source is replaced, while inside/outside and physical entity IDs stay unchanged. Micro VPD is source-reported, not calculated.
 
 ## State and command contracts
 
