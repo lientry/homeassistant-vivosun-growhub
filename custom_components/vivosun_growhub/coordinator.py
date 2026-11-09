@@ -312,7 +312,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._a22_reported: dict[tuple[str, str], dict[str, object]] = {}
         self._a22_provenance: dict[tuple[str, str, tuple[str, ...]], _ReportedFieldProvenance] = {}
         self._a22_last: dict[tuple[str, str, tuple[str, ...]], _ReportedFieldProvenance] = {}
-        self._a22_rebootstrap: set[tuple[str, str, tuple[str, ...]]] = set()
+        self._a22_reads: dict[str, str] = {}
         self._a22_pending: dict[tuple[str, str, tuple[str, ...]], _A22Pending] = {}
         self._a22_receipts: dict[str, _A22Receipt] = {}
         self._a22_generation: dict[tuple[str, str], int] = {}
@@ -572,7 +572,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._invalidate_a22()
             self._a22_reported.clear()
             self._a22_last.clear()
-            self._a22_rebootstrap.clear()
+            self._a22_reads.clear()
             self._last_accepted_manual_generation.clear()
             self._sensor_states.clear()
             self._client_id_to_device_id.clear()
@@ -709,7 +709,22 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._a22_provenance.pop((device_id, port, ("lv",)), None)
             raise
 
-    def _a22_expire(self, key: tuple[str, str, tuple[str, ...]], token: str) -> None:
+    def _a22_request_read(self, device_id: str) -> None:
+        """Request one fresh snapshot after uncertainty, never retry an actuator write."""
+        self._a22_reads.pop(device_id, None)
+
+        async def read() -> None:
+            try:
+                await self._async_request_shadow_refresh(device_id)
+            except (MQTTError, TimeoutError):
+                self._logger.warning("A22 recovery read unavailable; controls remain guarded")
+
+        if self.is_mqtt_connected and not self._shutdown_event.is_set():
+            self.hass.async_create_task(read())
+
+    def _a22_expire(
+        self, key: tuple[str, str, tuple[str, ...]], token: str, *, recover: bool = True,
+    ) -> None:
         pending = self._a22_pending.get(key)
         if pending is None or pending.token != token:
             return
@@ -721,6 +736,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         if key[2] == _A22_GROUPS["mode"]:
             port_key = (key[0], key[1])
             self._a22_generation[port_key] = self._a22_generation.get(port_key, 0) + 1
+        if recover:
+            self._a22_request_read(key[0])
 
     def _a22_forget_receipt(self, token: str) -> _A22Receipt | None:
         receipt = self._a22_receipts.pop(token, None)
@@ -737,12 +754,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         port_key = (device_id, receipt.port)
         for key, pending in tuple(self._a22_pending.items()):
             if pending.token == token and key[:2] == port_key:
-                self._a22_expire(key, token)
+                self._a22_expire(key, token, recover=False)
         for path in receipt.paths:
             self._a22_provenance.pop((device_id, receipt.port, path), None)
         if ("lv",) in receipt.paths:
             self._a22_provenance.pop((device_id, receipt.port, ("mode",)), None)
         self._a22_generation[port_key] = self._a22_generation.get(port_key, 0) + 1
+        self._a22_request_read(device_id)
 
     def _a22_accept_ack(self, device_id: str, document: dict[str, object]) -> None:
         """Keep desired acceptance as ordering evidence, not reported confirmation."""
@@ -821,31 +839,31 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     def _a22_recovered_get(
         self, key: tuple[str, str, tuple[str, ...]], value: object,
         previously_reported: object, incoming: _ReportedFieldProvenance,
-        last: _ReportedFieldProvenance | None, topic: str,
+        last: _ReportedFieldProvenance | None, topic: str, *, correlated_read: bool,
     ) -> bool:
         """Restore read authority from a current unchanged GET, never command confirmation.
 
         The reported leaf and its timestamp must agree with retained ordering.
-        A new session can read the same shadow version once; after an uncertain
-        command, an unchanged read requires a strictly later shadow version.
+        An unchanged snapshot requires the current session's outstanding GET token.
         """
-        if (
-            not topic.endswith("/get/accepted") or key in self._a22_provenance
-            or last is None or last.version is None or last.timestamp is None
-            or incoming.version is None or incoming.timestamp is None
-            or type(value) is not int or value != previously_reported
-            or incoming.version < last.version or incoming.timestamp < last.timestamp
-            or any(key[:2] == pending_key[:2] and key[2] in pending.expected
-                   for pending_key, pending in self._a22_pending.items())
-        ):
-            return False
-        return incoming.version > last.version or key in self._a22_rebootstrap
+        return (
+            correlated_read and topic.endswith("/get/accepted") and key not in self._a22_provenance
+            and last is not None and last.version is not None and last.timestamp is not None
+            and incoming.version is not None and incoming.timestamp is not None
+            and type(value) is int and value == previously_reported
+            and incoming.version >= last.version and incoming.timestamp >= last.timestamp
+            and not any(key[:2] == pending_key[:2] and key[2] in pending.expected
+                        for pending_key, pending in self._a22_pending.items())
+        )
 
     def _invalidate_a22(self, device_id: str | None = None) -> None:
         """Drop command authority on disconnect, cancellation or an uncertain send."""
         for key, pending in tuple(self._a22_pending.items()):
             if device_id is None or key[0] == device_id:
-                self._a22_expire(key, pending.token)
+                self._a22_expire(key, pending.token, recover=False)
+        for read_device in tuple(self._a22_reads):
+            if device_id is None or read_device == device_id:
+                del self._a22_reads[read_device]
         for key in tuple(self._a22_provenance):
             if device_id is None or key[0] == device_id:
                 del self._a22_provenance[key]
@@ -913,8 +931,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 {**payload, "clientToken": token}, device_id=device_id, qos=1,
             )
         except BaseException:
-            self._a22_expire(group, token)
+            self._a22_expire(group, token, recover=False)
             self._a22_forget_receipt(token)
+            self._a22_request_read(device_id)
             raise
         return token
 
@@ -1003,8 +1022,14 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             return
         if reported.get("connected") is False:
             self._invalidate_a22(device_id)
-            self._a22_rebootstrap.update(key for key in self._a22_last if key[0] == device_id)
             return
+        token = document.get("clientToken")
+        correlated_read = (
+            topic.endswith("/get/accepted") and isinstance(token, str)
+            and token == self._a22_reads.get(device_id)
+        )
+        if correlated_read:
+            del self._a22_reads[device_id]
         body = document.get("current", document)
         if not isinstance(body, dict):
             return
@@ -1084,10 +1109,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                         previously_reported.get(part) if isinstance(previously_reported, dict) else None
                     )
                 if not (_reported_field_is_fresh(last, incoming, topic) or self._a22_recovered_get(
-                    key, leaf, previously_reported, incoming, last, topic,
+                    key, leaf, previously_reported, incoming, last, topic, correlated_read=correlated_read,
                 )):
                     continue
-                self._a22_rebootstrap.discard(key)
                 if len(path) == 1:
                     current[path[0]] = deepcopy(leaf)
                 elif path[0] not in cleared_blocks:
@@ -1951,8 +1975,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._mqtt_client = None
         self._subscribed_routes.clear()
         self._invalidate_a22()
-        # Preserve ordering watermarks; a read in the next session may be identical.
-        self._a22_rebootstrap.update(self._a22_last)
         had_pending = bool(self._pending_fields)
         for pending in self._pending_fields.values():
             pending.timeout.cancel()
@@ -2690,7 +2712,11 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             return
         self._last_shadow_refresh_request_at[device_id] = datetime.now(tz=UTC)
         topic = TOPIC_SHADOW_GET.format(thing=device.client_id)
-        await mqtt_client.publish(topic, b"{}")
+        payload = b"{}"
+        if client_model_token(device.client_id) == "VSPLUGA22":
+            token = self._a22_reads[device_id] = uuid4().hex
+            payload = json.dumps({"clientToken": token}).encode()
+        await mqtt_client.publish(topic, payload)
         self._support_capture.record(
             "shadow_get_request",
             data={

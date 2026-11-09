@@ -38,7 +38,7 @@ class _Mqtt:
         self.failure: Exception | None = None
 
     async def publish(self, topic: str, payload: bytes, qos: int = 0) -> None:
-        assert qos == 1
+        assert qos == (0 if topic.endswith("/shadow/get") else 1)
         if self.failure:
             raise self.failure
         self.published.append((topic, json.loads(payload)))
@@ -78,6 +78,14 @@ def _report(port: str, fields: dict[str, object], version: int = 100,
         "state": {"reported": {"connected": True, port: fields}},
         "metadata": {"reported": {port: metadata(fields)}},
     }
+
+
+async def _read(coordinator: VivosunCoordinator, mqtt: _Mqtt, body: dict[str, object]) -> None:
+    """Reply to an actual outgoing shadow GET, not an unsolicited cached snapshot."""
+    await coordinator._async_request_shadow_refresh("a22-1")
+    await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", {
+        **body, "clientToken": mqtt.published[-1][1]["clientToken"],
+    })
 
 
 _FIELDS: dict[str, object] = {
@@ -300,8 +308,8 @@ async def test_manual_first_and_second_publish_failures_do_not_retry(hass: HomeA
     coordinator, mqtt = _setup(hass)
     try:
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report("usb1", _FIELDS))
-        mqtt.failure = RuntimeError("offline send failed")
-        with pytest.raises(RuntimeError, match="offline send failed"):
+        mqtt.failure = MQTTConnectionError("offline send failed")
+        with pytest.raises(MQTTConnectionError, match="offline send failed"):
             await coordinator.async_set_a22_mode("a22-1", "usb1", 0)
         assert not mqtt.published
         with pytest.raises(ServiceValidationError, match="fresh"):
@@ -321,7 +329,7 @@ async def test_manual_first_and_second_publish_failures_do_not_retry(hass: HomeA
         coordinator.async_publish_shadow_update = fail_second
         with pytest.raises(RuntimeError, match="manual target failed"):
             await coordinator.async_set_a22_mode("a22-1", "usb1", 0)
-        assert len(mqtt.published) == 1
+        assert sum(topic.endswith("/update") for topic, _ in mqtt.published) == 1
         assert mqtt.published[0][1]["state"] == {"desired": {"usb1": {"mode": 0}}}
         with pytest.raises(ServiceValidationError, match="fresh"):
             await coordinator.async_set_a22_mode("a22-1", "usb1", 1)
@@ -348,7 +356,7 @@ async def test_manual_completion_is_superseded_by_power_not_settings(hass: HomeA
 
     async def gate(topic: str, payload: bytes, qos: int = 0) -> None:
         await original(topic, payload, qos)
-        if json.loads(payload)["state"]["desired"]["usb1"].get("mode") == 0:
+        if not topic.endswith("/get") and json.loads(payload)["state"]["desired"]["usb1"].get("mode") == 0:
             mode_sent.set()
             await resume.wait()
 
@@ -405,7 +413,7 @@ async def test_manual_power_tracking_guards_preservation_and_failed_output(
             coordinator._a22_expire(key, pending.token)
         with pytest.raises(ServiceValidationError, match="fresh"):
             await coordinator.async_set_a22_mode("a22-1", "usb1", 0)
-        assert len(mqtt.published) == 1
+        assert sum(topic.endswith("/update") for topic, _ in mqtt.published) == 1
     finally:
         await coordinator.async_shutdown()
 
@@ -498,9 +506,9 @@ async def test_reconnect_identical_genuine_get_restores_a22_write_authority(hass
         coordinator._mqtt_client = cast("object", mqtt)
         with pytest.raises(ServiceValidationError):
             await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 66600)
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", baseline)
+        await _read(coordinator, mqtt, baseline)
         await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 66600)
-        assert len(mqtt.published) == 1
+        assert len(mqtt.published) == 2
     finally:
         await coordinator.async_shutdown()
 
@@ -582,7 +590,7 @@ async def test_first_manual_publish_rejection_after_report_prevents_stale_second
 
     async def gate(topic: str, payload: bytes, qos: int = 0) -> None:
         await original(topic, payload, qos)
-        if json.loads(payload)["state"]["desired"]["usb1"].get("mode") == 0:
+        if not topic.endswith("/get") and json.loads(payload)["state"]["desired"]["usb1"].get("mode") == 0:
             mode_sent.set()
             await resume.wait()
 
@@ -601,7 +609,8 @@ async def test_first_manual_publish_rejection_after_report_prevents_stale_second
         })
         resume.set()
         await task
-        assert [body["state"]["desired"]["usb1"] for _, body in mqtt.published] == [{"mode": 0}]
+        assert [body["state"]["desired"]["usb1"] for topic, body in mqtt.published
+                if topic.endswith("/update")] == [{"mode": 0}]
     finally:
         resume.set()
         if task:
@@ -617,7 +626,7 @@ async def test_second_manual_publish_rejection_invalidates_output_proof(hass: Ho
 
     async def gate(topic: str, payload: bytes, qos: int = 0) -> None:
         await original(topic, payload, qos)
-        if "manu" in json.loads(payload)["state"]["desired"]["usb1"]:
+        if not topic.endswith("/get") and "manu" in json.loads(payload)["state"]["desired"]["usb1"]:
             manual_sent.set()
             await resume.wait()
 
@@ -635,7 +644,7 @@ async def test_second_manual_publish_rejection_invalidates_output_proof(hass: Ho
         await task
         with pytest.raises(ServiceValidationError, match="fresh"):
             await coordinator.async_set_a22_mode("a22-1", "usb1", 0)
-        assert len(mqtt.published) == 2
+        assert sum(topic.endswith("/update") for topic, _ in mqtt.published) == 2
     finally:
         resume.set()
         if task:
@@ -678,7 +687,7 @@ async def test_a22_pair_recovers_after_timeout_or_rejection_with_unchanged_curre
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report("usb1", _FIELDS))
         with pytest.raises(ServiceValidationError, match="fresh"):
             await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "offDur", 120)
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
+        await _read(coordinator, mqtt, _report(
             "usb1", {"cycle": {"onDur": 300, "offDur": 300}}, 101, 1000,
         ))
         await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "offDur", 120)
@@ -688,11 +697,11 @@ async def test_a22_pair_recovers_after_timeout_or_rejection_with_unchanged_curre
         })
         with pytest.raises(ServiceValidationError, match="fresh"):
             await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "onDur", 600)
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
+        await _read(coordinator, mqtt, _report(
             "usb1", {"cycle": {"onDur": 300, "offDur": 300}}, 102, 1000,
         ))
         await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "onDur", 600)
-        assert len(mqtt.published) == 3
+        assert sum(topic.endswith("/update") for topic, _ in mqtt.published) == 3
     finally:
         await coordinator.async_shutdown()
 
@@ -818,7 +827,7 @@ async def test_a22_switch_service_cannot_use_cached_manual_facts_after_disconnec
                 "entity_id": switch.entity_id,
             }, blocking=True)
         assert replacement.published == []
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
+        await _read(coordinator, replacement, _report(
             "usb1", {**_FIELDS, "mode": 0},
         ))
         await hass.services.async_call("switch", "turn_off", {
@@ -905,13 +914,27 @@ async def test_noop_replacement_of_pending_pair_is_tracked_not_left_blocking(has
         await coordinator.async_shutdown()
 
 
-async def test_timeout_recovery_reuses_fresh_unchanged_read_without_execution_claim(hass: HomeAssistant) -> None:
+@pytest.mark.parametrize("failure", ["timeout", "rejection"])
+async def test_failure_recovery_requires_correlated_unchanged_read_without_actuation_retry(
+    hass: HomeAssistant, failure: str,
+) -> None:
     coordinator, mqtt = _setup(hass)
     try:
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report("usb1", _FIELDS))
         await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 66600)
         key, pending = next(iter(coordinator._a22_pending.items()))
-        coordinator._a22_expire(key, pending.token)
+        if failure == "timeout":
+            coordinator._a22_expire(key, pending.token)
+        else:
+            await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/rejected", {
+                "clientToken": pending.token, "code": 403,
+            })
+        await hass.async_block_till_done()
+        assert [topic.rsplit("/", 1)[-1] for topic, _ in mqtt.published] == ["update", "get"]
+        first_read_token = mqtt.published[-1][1]["clientToken"]
+        await coordinator._async_request_shadow_refresh("a22-1")
+        read_token = mqtt.published[-1][1]["clientToken"]
+        assert read_token != first_read_token
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
             "usb1", {"cycle": {"tOffset": 61200}}, 100, 1000,
         ))
@@ -922,12 +945,18 @@ async def test_timeout_recovery_reuses_fresh_unchanged_read_without_execution_cl
         ))
         with pytest.raises(ServiceValidationError, match="fresh"):
             await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 70000)
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
-            "usb1", {"cycle": {"tOffset": 61200}}, 101, 1000,
-        ))
+        snapshot = _report("usb1", {"cycle": {"tOffset": 61200}}, 100, 1000)
+        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", {
+            **snapshot, "clientToken": first_read_token,
+        })
+        with pytest.raises(ServiceValidationError, match="fresh"):
+            await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 70000)
+        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", {
+            **snapshot, "clientToken": read_token,
+        })
         assert coordinator.a22_settings("a22-1", "usb1").cycle.start == 61200
         await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 70000)
-        assert len(mqtt.published) == 2
+        assert len(mqtt.published) == 4
         assert mqtt.published[-1][1]["state"] == {"desired": {"usb1": {"cycle": {"tOffset": 70000}}}}
     finally:
         await coordinator.async_shutdown()
@@ -945,6 +974,7 @@ async def test_a22_reconnect_ignores_mqtt_callbacks_from_previous_session(
         def __init__(self, **kwargs: object) -> None:
             self.is_connected = False
             self.callback: object = None
+            self.read_token: str | None = None
             self.instances.append(self)
 
         async def connect(self) -> None:
@@ -961,6 +991,8 @@ async def test_a22_reconnect_ignores_mqtt_callbacks_from_previous_session(
 
         async def publish(self, topic: str, payload: bytes, qos: int = 0) -> None:
             assert topic.endswith("/shadow/get")
+            if "VSPLUGA22" in topic:
+                self.read_token = json.loads(payload)["clientToken"]
 
         async def emit(self, suffix: str, message: dict[str, object]) -> None:
             assert callable(self.callback)
@@ -983,7 +1015,9 @@ async def test_a22_reconnect_ignores_mqtt_callbacks_from_previous_session(
         assert ("a22-1", "usb1", ("cycle", "tOffset")) not in coordinator._a22_provenance
         await current.emit("get/accepted", _report("usb1", {"cycle": {"tOffset": 66600}}, 100, 1000))
         assert coordinator.a22_settings("a22-1", "usb1").cycle.start == 61200
-        await current.emit("get/accepted", _report("usb1", _FIELDS))
+        await current.emit("get/accepted", {**_report("usb1", _FIELDS), "clientToken": old.read_token})
+        assert ("a22-1", "usb1", ("cycle", "tOffset")) not in coordinator._a22_provenance
+        await current.emit("get/accepted", {**_report("usb1", _FIELDS), "clientToken": current.read_token})
         assert ("a22-1", "usb1", ("cycle", "tOffset")) in coordinator._a22_provenance
     finally:
         await coordinator.async_shutdown()
@@ -996,13 +1030,13 @@ async def test_manual_power_send_failure_needs_unchanged_fresh_read_before_retry
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
             "usb1", {**_FIELDS, "mode": 0},
         ))
-        mqtt.failure = RuntimeError("failed offline send")
-        with pytest.raises(RuntimeError, match="failed offline send"):
+        mqtt.failure = MQTTConnectionError("failed offline send")
+        with pytest.raises(MQTTConnectionError, match="failed offline send"):
             await switch.async_turn_off()
         mqtt.failure = None
         with pytest.raises(ServiceValidationError, match="fresh"):
             await switch.async_turn_off()
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
+        await _read(coordinator, mqtt, _report(
             "usb1", {**_FIELDS, "mode": 0}, 101, 1000,
         ))
         await switch.async_turn_off()
@@ -1070,8 +1104,8 @@ async def test_rejected_a22_mode_revokes_legacy_manual_power_until_new_read(hass
         })
         with pytest.raises(ServiceValidationError, match="fresh"):
             await switch.async_turn_off()
-        assert len(mqtt.published) == 1
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
+        assert sum(topic.endswith("/update") for topic, _ in mqtt.published) == 1
+        await _read(coordinator, mqtt, _report(
             "usb1", {"mode": 0}, 101, 1000,
         ))
         await switch.async_turn_off()
