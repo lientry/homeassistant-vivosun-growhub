@@ -172,6 +172,7 @@ class _A22Pending:
     expected: dict[tuple[str, ...], int]
     baseline: dict[tuple[str, ...], _ReportedFieldProvenance]
     confirmed: set[tuple[str, ...]]
+    reports: dict[tuple[str, ...], _ReportedFieldProvenance]
     timeout: asyncio.TimerHandle
     accepted_version: int | None = None
     accepted_timestamps: dict[tuple[str, ...], int] | None = None
@@ -750,7 +751,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         desired = state.get("desired") if isinstance(state, dict) else None
         metadata = document.get("metadata")
         desired_meta = metadata.get("desired") if isinstance(metadata, dict) else None
-        for key, pending in self._a22_pending.items():
+        for key, pending in tuple(self._a22_pending.items()):
             if key[0] != device_id or pending.token != token:
                 continue
             part = desired.get(key[1]) if isinstance(desired, dict) else None
@@ -771,6 +772,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             else:
                 pending.accepted_version = version
                 pending.accepted_timestamps = accepted
+                # Recheck genuine reports that arrived before their desired ACK.
+                for path, proof in tuple(pending.reports.items()):
+                    self._a22_reconcile_pending(
+                        device_id, key[1], path, pending.expected[path], proof.version, proof.timestamp,
+                        reported_change=True,
+                    )
+                self._a22_finish_pending(device_id, key[1])
 
     def _a22_reconcile_pending(
         self, device_id: str, port: str, path: tuple[str, ...], value: object,
@@ -782,8 +790,11 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             if key[:2] != (device_id, port) or path not in pending.expected:
                 continue
             baseline = pending.baseline[path]
+            if reported_change:
+                pending.reports[path] = _ReportedFieldProvenance(version, timestamp)
             if value != pending.expected[path]:
                 pending.confirmed.discard(path)
+                pending.reports.pop(path, None)
             elif (
                 reported_change and version is not None and timestamp is not None
                 and baseline.version is not None and version > baseline.version
@@ -889,7 +900,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     path for path in confirmed if previous.expected.get(path) == expected[path]
                 }
             self._a22_pending[group] = _A22Pending(
-                token, expected, baseline, confirmed, timeout,
+                token, expected, baseline, confirmed, {}, timeout,
             )
         receipt_timeout = asyncio.get_running_loop().call_later(
             _FIELD_CONFIRMATION_TIMEOUT, self._a22_forget_receipt, token,

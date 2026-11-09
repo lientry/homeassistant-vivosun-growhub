@@ -1015,8 +1015,9 @@ async def test_rejected_a22_mode_revokes_legacy_manual_power_until_new_read(hass
 
 @pytest.mark.parametrize("timestamp", [1000, 1001])
 @pytest.mark.parametrize("order", ["documents-first", "accepted-first", "documents-only"])
+@pytest.mark.parametrize("ack_late", [False, True])
 async def test_a22_reported_transition_confirms_in_either_topic_order(
-    hass: HomeAssistant, timestamp: int, order: str,
+    hass: HomeAssistant, timestamp: int, order: str, ack_late: bool,
 ) -> None:
     """The capture delivers genuine documents before their accepted counterpart."""
     coordinator, mqtt = _setup(hass)
@@ -1024,9 +1025,9 @@ async def test_a22_reported_transition_confirms_in_either_topic_order(
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report("usb1", _FIELDS))
         await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 66600)
         sent = mqtt.published[-1][1]
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/accepted", {
+        ack = {
             "version": 101, "clientToken": sent["clientToken"], "state": sent["state"],
-        })
+        }
         previous = _report("usb1", _FIELDS, 101, 1000)
         current = _report("usb1", {"cycle": {"tOffset": 66600}}, 102, timestamp)
         documents = {"previous": previous, "current": current}
@@ -1035,6 +1036,7 @@ async def test_a22_reported_transition_confirms_in_either_topic_order(
             messages.reverse()
         elif order == "documents-only":
             messages = messages[:1]
+        messages.insert(len(messages) if ack_late else 0, ("update/accepted", ack))
         for suffix, body in messages:
             await _receive(coordinator, "vivosun-VSPLUGA22-test", suffix, body)
         assert coordinator.a22_settings("a22-1", "usb1").cycle.start == 66600
@@ -1044,22 +1046,49 @@ async def test_a22_reported_transition_confirms_in_either_topic_order(
         await coordinator.async_shutdown()
 
 
-async def test_a22_unchanged_documents_do_not_confirm_a_pending_replacement(hass: HomeAssistant) -> None:
+@pytest.mark.parametrize("ack_late", [False, True])
+async def test_a22_unchanged_documents_do_not_confirm_a_pending_replacement(
+    hass: HomeAssistant, ack_late: bool,
+) -> None:
     coordinator, mqtt = _setup(hass)
     try:
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report("usb1", _FIELDS))
         await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 66600)
         await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 61200)
         sent = mqtt.published[-1][1]
-        await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/accepted", {
+        ack = {
             "version": 101, "clientToken": sent["clientToken"], "state": sent["state"],
-        })
+        }
+        if not ack_late:
+            await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/accepted", ack)
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/documents", {
             "previous": _report("usb1", _FIELDS, 101, 1000),
             "current": _report("usb1", _FIELDS, 102, 1000),
         })
+        if ack_late:
+            await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/accepted", ack)
         with pytest.raises(ServiceValidationError, match="pending"):
             await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 70000)
         assert len(mqtt.published) == 2
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_a22_late_ack_cannot_confirm_an_overwritten_report(hass: HomeAssistant) -> None:
+    coordinator, mqtt = _setup(hass)
+    try:
+        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report("usb1", _FIELDS))
+        await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 66600)
+        sent = mqtt.published[-1][1]
+        for version, start in ((102, 66600), (103, 61200)):
+            await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/accepted", _report(
+                "usb1", {"cycle": {"tOffset": start}}, version, 1000,
+            ))
+        await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/accepted", {
+            "version": 101, "clientToken": sent["clientToken"], "state": sent["state"],
+        })
+        with pytest.raises(ServiceValidationError, match="pending"):
+            await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 70000)
+        assert len(mqtt.published) == 1
     finally:
         await coordinator.async_shutdown()
