@@ -204,7 +204,7 @@ async def test_duct_fan_state_and_commands() -> None:
             _DEV_ID: {
                 "dFan": {
                     "level": 60,
-                    "auto_enabled": True,
+                    "mode": 2,
                     "auto": {
                         "lvMin": 20,
                         "lvMax": 90,
@@ -276,7 +276,7 @@ async def test_duct_fan_state_and_commands() -> None:
 
 async def test_duct_fan_auto_turn_on_preserves_preset_and_legacy_mode() -> None:
     coordinator = _StubCoordinator()
-    coordinator.data = {"shadows": {_DEV_ID: {"dFan": {"level": 60, "auto_enabled": False}}}}
+    coordinator.data = {"shadows": {_DEV_ID: {"dFan": {"level": 60, "mode": 0}}}}
     entity = _make_dfan(coordinator)
 
     await entity.async_turn_on(preset_mode="auto")
@@ -287,12 +287,51 @@ async def test_duct_fan_auto_turn_on_preserves_preset_and_legacy_mode() -> None:
 
     legacy = replace(_controller_device(_DEV_ID), client_id="vivosun-VSCTL001-acc-dev-1")
     old_coordinator = _StubCoordinator([legacy])
-    old_coordinator.data = {"shadows": {_DEV_ID: {"dFan": {"level": 60, "auto_enabled": False}}}}
+    old_coordinator.data = {"shadows": {_DEV_ID: {"dFan": {"level": 60, "mode": 0}}}}
     await _make_dfan(old_coordinator).async_turn_on(preset_mode="auto")
     old_coordinator.async_publish_shadow_update.assert_awaited_once_with(
         {"state": {"desired": {"dFan": {"mode": 1}}}},
         device_id=_DEV_ID,
     )
+
+
+@pytest.mark.parametrize(
+    ("model", "mode", "operation", "preset"),
+    [
+        ("VSCTLE42A", 0, "manual", "manual"),
+        ("VSCTLE42A", 1, "cycle", None),
+        ("VSCTLE42A", 2, "auto", "auto"),
+        ("VSCTLE42A", 99, None, None),
+        ("VSCTLE42A", None, None, None),
+        ("VSCTL001", 0, "manual", "manual"),
+        ("VSCTL001", 1, "auto", "auto"),
+        ("VSCTL001", 2, None, None),
+        ("VSCTL001", 99, None, None),
+        ("VSCTL001", None, None, None),
+    ],
+)
+async def test_duct_reported_operation_is_model_specific_and_read_only(
+    model: str, mode: int | None, operation: str | None, preset: str | None,
+) -> None:
+    device = replace(_controller_device(_DEV_ID), client_id=f"vivosun-{model}-acc-dev-1")
+    coordinator = _StubCoordinator([device])
+    reported = {"lv": 0}
+    if mode is not None:
+        reported["mode"] = mode
+    coordinator.data = {"shadows": {_DEV_ID: parse_shadow_document({
+        "state": {"reported": {"dFan": reported}},
+    })}}
+    fan = _make_dfan(coordinator)
+
+    assert fan.extra_state_attributes["operation_mode"] == operation
+    assert fan.preset_mode == preset
+    assert fan.preset_modes == ["manual", "auto"]
+    if operation == "auto":
+        assert fan.is_on
+    with pytest.raises(ValueError, match="Unsupported duct fan preset"):
+        # Observing Cycle must not create an unverified writable Cycle preset.
+        await fan.async_set_preset_mode("cycle")
+    coordinator.async_publish_shadow_update.assert_not_awaited()
 
 
 async def test_circulation_fan_natural_wind_maps_to_preset_and_on_state() -> None:
@@ -482,12 +521,12 @@ async def test_fan_turn_on_without_existing_level_uses_minimum_safe_default() ->
     )
 
 
-async def test_fan_toggle_bridges_plain_on_off_actions() -> None:
+async def test_fan_native_toggle_routes_plain_on_off_actions() -> None:
     coordinator = _StubCoordinator()
     coordinator.data = {
         "shadows": {
             _DEV_ID: {
-                "dFan": {"level": 0, "auto_enabled": False},
+                "dFan": {"level": 0, "mode": 0},
                 "connection": {"connected": True},
             }
         }
@@ -501,7 +540,7 @@ async def test_fan_toggle_bridges_plain_on_off_actions() -> None:
 
     coordinator.async_publish_shadow_update.reset_mock()
     coordinator.data["shadows"][_DEV_ID] = {
-        "dFan": {"level": 60, "auto_enabled": False},
+        "dFan": {"level": 60, "mode": 0},
         "connection": {"connected": True},
     }
 

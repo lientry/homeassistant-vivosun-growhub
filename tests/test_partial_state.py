@@ -82,7 +82,7 @@ def test_nested_updates_and_unrelated_components_preserve_existing_state() -> No
     assert initial["light"] == {"level": 80, "manual_level": 75, "spectrum": 20, "in_plan": True}
     assert initial["cFan"] == {"level": 70, "oscillating": True}
     assert initial["heat"] == {"on": True, "target_temp": None}
-    assert initial["dFan"] == {"mode": 2, "auto_enabled": False, "manual_level": 50, "level": 50}
+    assert initial["dFan"] == {"mode": 2, "manual_level": 50}
     assert initial["hmdf"] == {"on": True, "target_humidity": 5500}
     assert initial["aircd"] == {"state": 1, "target_temp": 2300}
     assert initial["reported_supported"]["seed"] == {"state": 1}

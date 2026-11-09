@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.light import ColorMode, LightEntity  # type: ignore[attr-defined]
+from homeassistant.helpers.entity_platform import async_get_current_platform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, LIGHT_MIN_BRIGHTNESS
+from .controls import control_is_selected, require_selected_control
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
@@ -40,7 +42,8 @@ async def async_setup_entry(
 
     watch_devices(entry, coordinator, async_add_entities, lambda device: [
         VivosunLightEntity(coordinator, device.device_id)
-    ] if device.device_type == "controller" else [])
+    ] if control_is_selected(coordinator, device.device_id, "light") else [],
+        control_platform=async_get_current_platform())
 
 
 class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  # type: ignore[misc]
@@ -74,7 +77,8 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
     @property
     def available(self) -> bool:
         """Return entity availability."""
-        return is_entity_available(self.coordinator, self._device_id)
+        return (is_entity_available(self.coordinator, self._device_id)
+                and control_is_selected(self.coordinator, self._device_id, "light"))
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -101,6 +105,7 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
 
     async def async_turn_on(self, **kwargs: object) -> None:
         """Turn on the light and optionally set brightness/spectrum."""
+        require_selected_control(self.coordinator, self._device_id, "light")
         brightness = kwargs.get("brightness")
         if isinstance(brightness, int):
             level = round(brightness * 100 / 255)
@@ -127,6 +132,7 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
 
     async def async_turn_off(self, **kwargs: object) -> None:
         """Turn off the light."""
+        require_selected_control(self.coordinator, self._device_id, "light")
         _ = kwargs
         await self.coordinator.async_publish_light_level(0, device_id=self._device_id)
 

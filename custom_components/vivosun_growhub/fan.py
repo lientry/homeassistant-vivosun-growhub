@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast
 
@@ -12,7 +11,15 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import async_get_current_platform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, E42A_DFAN_AUTO_MODE, MODE_AUTO, OPTION_CFAN_OSCILLATION_CONTROLLERS
+from .const import (
+    DOMAIN,
+    E42A_DFAN_AUTO_MODE,
+    MODE_AUTO,
+    MODE_CYCLE,
+    MODE_MANUAL,
+    OPTION_CFAN_OSCILLATION_CONTROLLERS,
+)
+from .controls import Control, control_is_selected, require_selected_control
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
@@ -42,6 +49,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.device_registry import DeviceInfo
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .models import DeviceInfo as VivosunDeviceInfo
     from .models import RuntimeData
 
 
@@ -59,12 +67,18 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    watch_devices(entry, coordinator, async_add_entities, lambda device: [
-        VivosunCirculationFanEntity(coordinator, device.device_id, entry=entry),
-        VivosunDuctFanEntity(coordinator, device.device_id),
-    ] if device.device_type == "controller" else [])
+    def factory(device: VivosunDeviceInfo) -> list[_VivosunFanBase]:
+        if device.device_type != "controller":
+            return []
+        result: list[_VivosunFanBase] = []
+        if control_is_selected(coordinator, device.device_id, "cFan"):
+            result.append(VivosunCirculationFanEntity(coordinator, device.device_id, entry=entry))
+        if control_is_selected(coordinator, device.device_id, "dFan"):
+            result.append(VivosunDuctFanEntity(coordinator, device.device_id))
+        return result
 
     platform = async_get_current_platform()
+    watch_devices(entry, coordinator, async_add_entities, factory, control_platform=platform)
     platform.async_register_entity_service(
         "set_duct_fan_auto_threshold",
         {
@@ -80,7 +94,7 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
 
     _attr_has_entity_name = True
     _attr_speed_count = 10
-    _manual_channel: str
+    _manual_channel: Control
     _enable_turn_on_off_backwards_compatibility = FanEntityFeature(0) == _EXPLICIT_TURN_FEATURES
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
@@ -91,7 +105,8 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
     @property
     def available(self) -> bool:
         """Return entity availability."""
-        return is_entity_available(self.coordinator, self._device_id)
+        return (is_entity_available(self.coordinator, self._device_id)
+                and control_is_selected(self.coordinator, self._device_id, self._manual_channel))
 
     @property
     def is_on(self) -> bool:
@@ -111,6 +126,7 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
         **kwargs: object,
     ) -> None:
         """Turn the fan on, optionally applying preset mode and target percentage."""
+        require_selected_control(self.coordinator, self._device_id, self._manual_channel)
         requested_preset = preset_mode
         if requested_preset is None:
             raw_preset = kwargs.get("preset_mode")
@@ -128,18 +144,16 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
             elif requested_preset not in (self.preset_modes or []):
                 raise ValueError(f"Unsupported {self._manual_channel} preset: {requested_preset}")
 
-        # The device chooses speed in these modes. Do not overwrite the selection.
+        # These presets select their own speed; a stale manual level would cancel them.
         if requested_preset in ("auto", "natural_wind") and requested_percentage is None:
             return
 
-        if (
-            self._manual_channel == "cFan"
-            and requested_preset is None
-            and requested_percentage is None
-            and self.preset_mode == "natural_wind"
-        ):
+        # A bare ON must not replace an already active cFan breeze with level 1.
+        if (self._manual_channel == "cFan" and requested_preset is None
+                and requested_percentage is None and self.preset_mode == "natural_wind"):
             return
 
+        # A preset-only request with no known numeric speed needs no fallback write.
         if requested_preset is not None and requested_percentage is None and self.percentage is None:
             return
 
@@ -166,52 +180,14 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
             await self._async_write_percentage(target, remember=False)
 
     async def _async_write_percentage(self, percentage: int, *, remember: bool) -> None:
-        """Publish a fan speed, distinguishing explicit selection from a bare ON."""
+        """Subclass publisher separating explicit selection from ON defaults."""
         raise NotImplementedError
 
     async def async_turn_off(self, **kwargs: object) -> None:
         """Turn the fan off."""
+        require_selected_control(self.coordinator, self._device_id, self._manual_channel)
         _ = kwargs
         await self.async_set_percentage(0)
-
-    async def async_toggle(self, **kwargs: object) -> None:
-        """Toggle the fan on/off."""
-        if self.is_on:
-            await self.async_turn_off(**kwargs)
-            return
-        requested_percentage = kwargs.get("percentage")
-        requested_preset = kwargs.get("preset_mode")
-        await self.async_turn_on(
-            percentage=requested_percentage if isinstance(requested_percentage, int) else None,
-            preset_mode=requested_preset if isinstance(requested_preset, str) else None,
-        )
-
-    def turn_on(
-        self,
-        percentage: int | None = None,
-        preset_mode: str | None = None,
-        **kwargs: object,
-    ) -> None:
-        """Synchronously bridge turn_on for HA action support detection."""
-        asyncio.run_coroutine_threadsafe(
-            self.async_turn_on(percentage=percentage, preset_mode=preset_mode, **kwargs),
-            self.hass.loop,
-        ).result()
-
-    def turn_off(self, **kwargs: object) -> None:
-        """Synchronously bridge turn_off for HA action support detection."""
-        asyncio.run_coroutine_threadsafe(
-            self.async_turn_off(**kwargs),
-            self.hass.loop,
-        ).result()
-
-    def toggle(self, **kwargs: object) -> None:  # type: ignore[misc]
-        """Synchronously bridge toggle for HA action support detection."""
-        asyncio.run_coroutine_threadsafe(
-            self.async_toggle(**kwargs),
-            self.hass.loop,
-        ).result()
-
 
 class VivosunCirculationFanEntity(_VivosunFanBase):
     """Representation of the circulation fan (cFan)."""
@@ -236,7 +212,7 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
 
     @property
     def _oscillation_enabled(self) -> bool:
-        """A controller must be opted in before exposing an oscillation control."""
+        """Consult current options so stale entity references cannot bypass the opt-in."""
         entry = self._config_entry
         if entry is None:
             return False
@@ -245,7 +221,7 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
 
     @property
     def supported_features(self) -> FanEntityFeature:
-        """Expose native oscillation only for opted-in controllers."""
+        """Advertise oscillation only when this controller was opted in."""
         if self._oscillation_enabled:
             return self._attr_supported_features | FanEntityFeature.OSCILLATE
         return self._attr_supported_features
@@ -277,6 +253,7 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
         await self._async_write_percentage(percentage, remember=True)
 
     async def _async_write_percentage(self, percentage: int, *, remember: bool) -> None:
+        require_selected_control(self.coordinator, self._device_id, "cFan")
         level = cfan_percentage_to_shadow(percentage)
         if remember and percentage > 0 and self.coordinator.manual_memory_enabled(self._device_id, "cFan"):
             await self.coordinator.async_publish_selected_fan_level(
@@ -289,6 +266,7 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
 
     async def async_oscillate(self, oscillating: bool) -> None:
         """Set circulation fan oscillation."""
+        require_selected_control(self.coordinator, self._device_id, "cFan")
         if not self._oscillation_enabled:
             raise ServiceValidationError(
                 "Oscillation control is disabled for this circulation fan. "
@@ -300,6 +278,7 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set circulation fan preset mode."""
+        require_selected_control(self.coordinator, self._device_id, "cFan")
         if preset_mode == "natural_wind":
             if self.coordinator.manual_memory_enabled(self._device_id, "cFan"):
                 await self.coordinator.async_publish_selected_fan_level(
@@ -330,7 +309,7 @@ class VivosunDuctFanEntity(_VivosunFanBase):
 
     @property
     def is_on(self) -> bool:
-        """Auto is logically enabled even when the current output is zero."""
+        """Auto is logically running even when current output is zero."""
         return self.preset_mode == "auto" or super().is_on
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
@@ -345,17 +324,29 @@ class VivosunDuctFanEntity(_VivosunFanBase):
 
     @property
     def preset_mode(self) -> str | None:
-        """Return current duct fan preset mode."""
-        auto_enabled = self._dfan_state().get("auto_enabled")
-        if isinstance(auto_enabled, bool):
-            return "auto" if auto_enabled else "manual"
+        """Expose only supported commands as selectable presets."""
+        operation = self._operation_mode
+        return operation if operation in _DUCT_PRESETS else None
+
+    @property
+    def _operation_mode(self) -> str | None:
+        """Decode the reported mode without assigning E42A Cycle to legacy Auto."""
+        mode = _as_int(self._dfan_state().get("mode"))
+        if mode is None:
+            return None
+        if mode == MODE_MANUAL:
+            return "manual"
+        if mode == self._auto_mode:
+            return "auto"
+        if mode == MODE_CYCLE and self._auto_mode == E42A_DFAN_AUTO_MODE:
+            return "cycle"
         return None
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
-        """Expose dFan auto-threshold state attributes."""
+        """Expose the read-only operation and dFan auto-threshold settings."""
         auto = self._dfan_auto_state()
-        attributes: dict[str, object] = {}
+        attributes: dict[str, object] = {"operation_mode": self._operation_mode}
         for field in (
             "lvMin",
             "lvMax",
@@ -380,6 +371,7 @@ class VivosunDuctFanEntity(_VivosunFanBase):
         await self._async_write_percentage(percentage, remember=True)
 
     async def _async_write_percentage(self, percentage: int, *, remember: bool) -> None:
+        require_selected_control(self.coordinator, self._device_id, "dFan")
         level = dfan_percentage_to_shadow(percentage)
         if remember and percentage > 0 and self.coordinator.manual_memory_enabled(self._device_id, "dFan"):
             await self.coordinator.async_publish_selected_fan_level(
@@ -392,6 +384,7 @@ class VivosunDuctFanEntity(_VivosunFanBase):
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set duct fan preset mode."""
+        require_selected_control(self.coordinator, self._device_id, "dFan")
         if preset_mode == "auto":
             await self.coordinator.async_publish_shadow_update(
                 build_dfan_auto_mode_payload(True, auto_mode=self._auto_mode), device_id=self._device_id
@@ -413,6 +406,7 @@ class VivosunDuctFanEntity(_VivosunFanBase):
 
     async def async_set_auto_threshold(self, field: str, value: int | None = None) -> None:
         """Set a duct fan auto-threshold field."""
+        require_selected_control(self.coordinator, self._device_id, "dFan")
         await self.coordinator.async_publish_shadow_update(
             build_dfan_auto_threshold_payload(field, value), device_id=self._device_id
         )

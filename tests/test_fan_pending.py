@@ -13,7 +13,7 @@ from homeassistant.setup import async_setup_component
 
 from custom_components.vivosun_growhub.fan import VivosunCirculationFanEntity, VivosunDuctFanEntity
 from custom_components.vivosun_growhub.models import DeviceInfo
-from custom_components.vivosun_growhub.shadow import parse_shadow_document
+from custom_components.vivosun_growhub.shadow import dfan_shadow_to_percentage, parse_shadow_document
 from tests.test_light_pending import _receive, _setup
 
 if TYPE_CHECKING:
@@ -234,7 +234,7 @@ async def test_fan_report_without_metadata_keeps_previous_field_freshness(
 async def test_fan_report_uses_parser_selected_level_and_its_own_metadata(
     hass: HomeAssistant, channel: str, root_level: object,
 ) -> None:
-    """cFan falls back to manual on invalid root; dFan retains explicit root null."""
+    """cFan selects manual fallback; dFan only accepts genuinely reported root output."""
     coordinator, _, _ = _setup(hass)
     fan = (VivosunCirculationFanEntity(coordinator, "light-0") if channel == "cFan"
            else VivosunDuctFanEntity(coordinator, "light-0"))
@@ -244,8 +244,11 @@ async def test_fan_report_uses_parser_selected_level_and_its_own_metadata(
         component["lv"] = root_level
     raw = {"state": {"reported": {channel: component}}}
     parsed = parse_shadow_document(raw)
-    expected = 70 if channel == "cFan" or root_level == "missing" else None
-    assert parsed[channel]["level"] == expected
+    expected = 70 if channel == "cFan" else None
+    if channel == "dFan" and root_level == "missing":
+        assert "level" not in parsed[channel]
+    else:
+        assert parsed[channel]["level"] == expected
     try:
         await _receive(coordinator, "thing-0", "get/accepted", {
             "version": 100, "state": {"reported": {channel: {"lv": 50}}},
@@ -259,11 +262,13 @@ async def test_fan_report_uses_parser_selected_level_and_its_own_metadata(
                 }},
             },
         })
-        effective = 70 if expected == 70 else 50
+        effective = 70 if channel == "cFan" else 50
         assert coordinator._shadow_states["light-0"][channel]["level"] == effective
+        if channel == "dFan":
+            assert coordinator._shadow_states["light-0"][channel]["manual_level"] == 70
         expected_percentage = {("cFan", 70): 50, ("cFan", 50): 20, ("dFan", 70): 60, ("dFan", 50): 40}
         assert fan.percentage == expected_percentage[(channel, effective)]
-        assert coordinator._reported_fields[key].timestamp == (1100 if expected == 70 else 1000)
+        assert coordinator._reported_fields[key].timestamp == (1100 if channel == "cFan" else 1000)
     finally:
         await coordinator.async_shutdown()
 
@@ -687,5 +692,153 @@ async def test_duct_mode_pending_is_isolated_from_light_and_other_controller(has
         assert ("light-0", "light", "level") in coordinator._pending_fields
         assert ("light-1", "dFan", "mode") in coordinator._pending_fields
         assert len(mqtt.published) == 3
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_e42a_reported_output_and_mode_survive_sparse_manual_updates(hass: HomeAssistant) -> None:
+    coordinator, _, _ = _setup(hass)
+    client_id = "vivosun-VSCTLE42A-test"
+    coordinator._devices = [DeviceInfo(
+        "light-0", client_id, "topic/0", "GrowHub E42A", True, 66078, "controller",
+    )]
+    coordinator._build_topic_maps()
+    fan = VivosunDuctFanEntity(coordinator, "light-0")
+    level_key = ("light-0", "dFan", "level")
+    try:
+        await _receive(coordinator, client_id, "get/accepted", {
+            "version": 100,
+            "state": {"reported": {"dFan": {"mode": 2, "lv": 30, "manu": {"lv": 35}}}},
+            "metadata": {"reported": {"dFan": {
+                "mode": {"timestamp": 1000}, "lv": {"timestamp": 1000},
+                "manu": {"lv": {"timestamp": 1000}},
+            }}},
+        })
+        assert fan.preset_mode == "auto"
+        assert fan.extra_state_attributes["operation_mode"] == "auto"
+        assert fan.percentage == 10  # root lv30, NOT stored manu.lv35 (20%)
+        assert coordinator._shadow_states["light-0"]["dFan"]["manual_level"] == 35
+        assert dfan_shadow_to_percentage(30) == 10
+        assert dfan_shadow_to_percentage(35) == 20
+        provenance = coordinator._reported_fields[level_key]
+
+        for version, selected in ((101, 50), (102, 35)):
+            await _receive(coordinator, client_id, "update/accepted", {
+                "version": version,
+                "state": {"reported": {"dFan": {"manu": {"lv": selected}}}},
+                "metadata": {"reported": {"dFan": {"manu": {"lv": {"timestamp": version + 1000}}}}},
+            })
+            assert fan.percentage == 10
+            assert coordinator._shadow_states["light-0"]["dFan"]["manual_level"] == selected
+            assert coordinator._reported_fields[level_key] == provenance
+
+        # Newer whole-shadow version with an older manual leaf must not roll back settings.
+        await _receive(coordinator, client_id, "get/accepted", {
+            "version": 103, "state": {"reported": {"dFan": {"manu": {"lv": 50}}}},
+            "metadata": {"reported": {"dFan": {"manu": {"lv": {"timestamp": 1101}}}}},
+        })
+        assert coordinator._shadow_states["light-0"]["dFan"]["manual_level"] == 35
+        assert fan.percentage == 10
+
+        # Cloud desired ACK and a mode-only report are not actual-output updates.
+        await _receive(coordinator, client_id, "update/accepted", {
+            "version": 103, "state": {"desired": {"dFan": {"mode": 0, "manu": {"lv": 0}}}},
+        })
+        assert fan.percentage == 10
+        assert fan.extra_state_attributes["operation_mode"] == "auto"
+        for version in (104, 105):
+            await _receive(coordinator, client_id, "update/accepted", {
+                "version": version,
+                "state": {"reported": {"dFan": {"mode": 1}}},
+                "metadata": {"reported": {"dFan": {"mode": {"timestamp": version + 1000}}}},
+            })
+            assert fan.extra_state_attributes["operation_mode"] == "cycle"
+            assert fan.preset_mode is None
+            assert fan.percentage == 10
+
+        await _receive(coordinator, client_id, "get/accepted", {
+            "version": 106, "state": {"reported": {"dFan": {"mode": 2}}},
+            "metadata": {"reported": {"dFan": {"mode": {"timestamp": 1104}}}},
+        })
+        assert fan.extra_state_attributes["operation_mode"] == "cycle"
+
+        await _receive(coordinator, client_id, "update/accepted", {
+            "version": 106, "state": {"reported": {"dFan": {"lv": 0}}},
+            "metadata": {"reported": {"dFan": {"lv": {"timestamp": 1200}}}},
+        })
+        assert fan.percentage == 0
+        await _receive(coordinator, client_id, "update/accepted", {
+            "version": 107, "state": {"reported": {"dFan": {"lv": None}}},
+            "metadata": {"reported": {"dFan": {"lv": {"timestamp": 1300}}}},
+        })
+        assert fan.percentage is None
+        assert coordinator._shadow_states["light-0"]["dFan"]["manual_level"] == 35
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_duct_manual_only_report_never_establishes_actual_output(hass: HomeAssistant) -> None:
+    coordinator, _, _ = _setup(hass)
+    fan = VivosunDuctFanEntity(coordinator, "light-0")
+    try:
+        await _receive(coordinator, "thing-0", "get/accepted", {
+            "version": 100,
+            "state": {"desired": {"dFan": {"mode": 1, "lv": 70, "manu": {"lv": 70}}}},
+        })
+        assert fan.percentage is None
+        assert fan.preset_mode is None
+
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "version": 101,
+            "state": {"reported": {"dFan": {"mode": 1, "manu": {"lv": 35}}}},
+            "metadata": {"reported": {"dFan": {
+                "mode": {"timestamp": 1000}, "manu": {"lv": {"timestamp": 1000}},
+            }}},
+        })
+        assert fan.preset_mode == "auto"
+        assert fan.percentage is None
+        assert coordinator._shadow_states["light-0"]["dFan"]["manual_level"] == 35
+        assert ("light-0", "dFan", "level") not in coordinator._has_reported_fields
+
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "version": 102, "state": {"reported": {"dFan": {"lv": 30}}},
+            "metadata": {"reported": {"dFan": {"lv": {"timestamp": 1010}}}},
+        })
+        assert fan.percentage == 10
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_duct_stored_manual_only_does_not_confirm_pending_actual_output(hass: HomeAssistant) -> None:
+    coordinator, mqtt, _ = _setup(hass)
+    fan = VivosunDuctFanEntity(coordinator, "light-0")
+    key = ("light-0", "dFan", "level")
+    try:
+        await _receive(coordinator, "thing-0", "get/accepted", {
+            "version": 100,
+            "state": {"reported": {"dFan": {"lv": 30, "mode": 1, "manu": {"lv": 35}}}},
+            "metadata": {"reported": {"dFan": {
+                "lv": {"timestamp": 1000}, "mode": {"timestamp": 1000},
+                "manu": {"lv": {"timestamp": 1000}},
+            }}},
+        })
+        await fan.async_set_percentage(40)
+        assert fan.percentage == 40
+        token = mqtt.published[-1][1]["clientToken"]
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "clientToken": token, "version": 101,
+            "state": {"desired": {"dFan": {"mode": 0, "manu": {"lv": 50}}}},
+        })
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "version": 102, "state": {"reported": {"dFan": {"manu": {"lv": 50}}}},
+            "metadata": {"reported": {"dFan": {"manu": {"lv": {"timestamp": 1010}}}}},
+        })
+        assert key in coordinator._pending_fields
+        assert fan.percentage == 40
+        assert coordinator._shadow_states["light-0"]["dFan"]["manual_level"] == 50
+
+        await _receive(coordinator, "thing-0", "update/rejected", {"clientToken": token, "code": 403})
+        assert key not in coordinator._pending_fields
+        assert fan.percentage == 10
     finally:
         await coordinator.async_shutdown()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.components.light import ATTR_BRIGHTNESS
@@ -81,7 +81,8 @@ async def test_light_setup_creates_one_entity(hass: HomeAssistant) -> None:
     def _add(entities: list[VivosunLightEntity]) -> None:
         added.extend(entities)
 
-    await async_setup_entry(hass, entry, _add)
+    with patch("custom_components.vivosun_growhub.light.async_get_current_platform", return_value=MagicMock()):
+        await async_setup_entry(hass, entry, _add)
 
     assert len(added) == 1
     assert added[0].unique_id == f"vivosun_growhub_{_DEV_ID}_light"
@@ -98,7 +99,8 @@ async def test_light_setup_creates_entity_for_each_controller(hass: HomeAssistan
     def _add(entities: list[VivosunLightEntity]) -> None:
         added.extend(entities)
 
-    await async_setup_entry(hass, entry, _add)
+    with patch("custom_components.vivosun_growhub.light.async_get_current_platform", return_value=MagicMock()):
+        await async_setup_entry(hass, entry, _add)
 
     assert len(added) == 2
     assert {entity.unique_id for entity in added} == {

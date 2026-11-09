@@ -74,6 +74,7 @@ async def _setup(hass: object) -> tuple[object, MockConfigEntry, DeviceInfo]:
 
 async def test_a10_creates_one_outlet_and_no_controller_entities(hass: object, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("custom_components.vivosun_growhub.fan.async_get_current_platform", MagicMock)
+    monkeypatch.setattr("custom_components.vivosun_growhub.light.async_get_current_platform", MagicMock)
     _, entry, _ = await _setup(hass)
     switches: list = []
     await setup_switches(hass, entry, switches.extend)
