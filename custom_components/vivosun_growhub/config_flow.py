@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 from typing import TYPE_CHECKING
 
-import voluptuous as vol
+import probatio as vol
 from homeassistant import config_entries
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -18,7 +18,6 @@ from .const import (
     CONF_EMAIL,
     CONF_HAS_CAMERA,
     CONF_PASSWORD,
-    DEFAULT_TEMP_UNIT,
     DOMAIN,
     OPTION_CFAN_OSCILLATION_CONTROLLERS,
     OPTION_REMEMBER_MANUAL_SETTINGS,
@@ -27,8 +26,6 @@ from .const import (
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
 from .models import DeviceInfo
-
-OPTIONS_TEMP_UNIT = "temp_unit"
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -205,16 +202,6 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
                 return self._finish_options(normalized_input)
 
         schema_fields: dict[vol.Marker, object] = {
-            vol.Required(
-                OPTIONS_TEMP_UNIT,
-                default=entry.options.get(OPTIONS_TEMP_UNIT, DEFAULT_TEMP_UNIT),
-            ): selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=["celsius", "fahrenheit"],
-                    translation_key=OPTIONS_TEMP_UNIT,
-                    mode=selector.SelectSelectorMode.DROPDOWN,
-                )
-            ),
             vol.Optional(
                 OPTION_SUPPORT_CAPTURE_ENABLED,
                 default=bool(entry.options.get(OPTION_SUPPORT_CAPTURE_ENABLED, False)),

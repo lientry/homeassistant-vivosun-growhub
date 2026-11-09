@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
 from custom_components.vivosun_growhub.garden_topology import GardenTopology, garden_membership
@@ -174,8 +174,12 @@ async def test_garden_parent_ids_are_entry_scoped(hass: HomeAssistant) -> None:
     GardenTopology(hass, first.entry_id).apply(inventory, [])
     GardenTopology(hass, second.entry_id).apply(inventory, [])
     registry = dr.async_get(hass)
-    a = registry.async_get_device(identifiers={(DOMAIN, GardenTopology(hass, first.entry_id).identifier(10))})
-    b = registry.async_get_device(identifiers={(DOMAIN, GardenTopology(hass, second.entry_id).identifier(10))})
+    a = registry.async_get_device_by_identifier(
+        (DOMAIN, GardenTopology(hass, first.entry_id).identifier(10)), first.entry_id,
+    )
+    b = registry.async_get_device_by_identifier(
+        (DOMAIN, GardenTopology(hass, second.entry_id).identifier(10)), second.entry_id,
+    )
     assert a is not None and b is not None and a.id != b.id
 
 

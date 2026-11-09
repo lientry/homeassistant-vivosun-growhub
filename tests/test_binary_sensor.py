@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.binary_sensor import VivosunConnectionBinarySensorEntity, async_setup_entry
 from custom_components.vivosun_growhub.const import DOMAIN

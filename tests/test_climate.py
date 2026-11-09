@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
@@ -9,7 +11,11 @@ import pytest
 from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.components.climate.const import HVACAction, HVACMode
 from homeassistant.const import UnitOfTemperature
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers.entity_platform import EntityPlatform
+from homeassistant.setup import async_setup_component
+from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM, UnitSystem
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.climate import (
     VivosunAirConditionerClimateEntity,
@@ -59,6 +65,10 @@ class _StubCoordinator(DiscoveryCoordinatorStub):
             return self._device
         return None
 
+    def async_add_listener(self, callback: object, context: object | None = None) -> object:
+        """Accept native entity registration without coordinator transport."""
+        return lambda: None
+
 
 def _make_entity(
     coordinator: _StubCoordinator, *, temp_unit: str = "celsius"
@@ -104,18 +114,18 @@ async def test_climate_state_mapping_in_celsius() -> None:
     }
     entity = _make_entity(coordinator)
 
-    assert entity.temperature_unit == UnitOfTemperature.CELSIUS
+    assert entity.native_temperature_unit == UnitOfTemperature.CELSIUS
     assert entity.hvac_mode == HVACMode.HEAT
     assert entity.hvac_action == HVACAction.HEATING
-    assert entity.target_temperature == 23.5
-    assert entity.current_temperature == 21.75
+    assert entity.native_target_temperature == 23.5
+    assert entity.native_current_temperature == 21.75
     assert entity.preset_mode == "auto"
     assert entity.extra_state_attributes == {"level": 7}
     assert entity.available is True
     assert entity.device_info.get("model") == "VSHEATW70"
 
 
-async def test_climate_state_mapping_in_fahrenheit() -> None:
+async def test_climate_stored_unit_preference_does_not_change_native_temperatures() -> None:
     coordinator = _StubCoordinator()
     coordinator.data = {
         "shadows": {_DEV_ID: {"heat": {"on": True, "state": 0, "mode": MODE_MANUAL, "target_temp": 2350}}},
@@ -123,20 +133,21 @@ async def test_climate_state_mapping_in_fahrenheit() -> None:
     }
     entity = _make_entity(coordinator, temp_unit="fahrenheit")
 
-    assert entity.temperature_unit == UnitOfTemperature.FAHRENHEIT
+    assert entity.native_temperature_unit == UnitOfTemperature.CELSIUS
     assert entity.hvac_mode == HVACMode.HEAT
     assert entity.hvac_action == HVACAction.IDLE
-    assert entity.target_temperature == pytest.approx(74.3)
-    assert entity.current_temperature == pytest.approx(71.15)
+    assert entity.native_target_temperature == 23.5
+    assert entity.native_current_temperature == 21.75
     assert entity.preset_mode == "manual"
 
 
-async def test_climate_fahrenheit_bounds_match_display_unit() -> None:
+async def test_climate_native_bounds_are_celsius_even_with_legacy_option() -> None:
     coordinator = _StubCoordinator()
     entity = _make_entity(coordinator, temp_unit="fahrenheit")
 
-    assert entity.min_temp == 32
-    assert entity.max_temp == 104
+    assert entity.min_temp == 0
+    assert entity.max_temp == 40
+    assert entity.target_temperature_step == 1
 
 
 async def test_climate_commands_publish_expected_shadow_payloads() -> None:
@@ -162,7 +173,7 @@ async def test_climate_commands_publish_expected_shadow_payloads() -> None:
 
     coordinator.async_publish_shadow_update.reset_mock()
     entity_f = _make_entity(coordinator, temp_unit="fahrenheit")
-    await entity_f.async_set_temperature(temperature=77.0)
+    await entity_f.async_set_temperature(temperature=25.0)
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
         build_heat_target_payload(2500), device_id=_DEV_ID
     )
@@ -211,9 +222,9 @@ async def test_c08_cooling_climate_from_captured_shadow(hass: HomeAssistant) -> 
     assert ac.hvac_modes == [HVACMode.OFF, HVACMode.COOL]
     assert ac.hvac_mode == HVACMode.COOL
     assert ac.hvac_action == HVACAction.COOLING
-    assert ac.target_temperature == 23.99
+    assert ac.native_target_temperature == 23.99
     assert ac.min_temp == 16.0
-    assert ac.current_temperature == 21.75
+    assert ac.native_current_temperature == 21.75
     assert ac.current_humidity == 61.25
 
     await ac.async_set_hvac_mode(HVACMode.COOL)
@@ -245,8 +256,152 @@ async def test_c08_cooling_climate_from_captured_shadow(hass: HomeAssistant) -> 
         MockConfigEntry(domain=DOMAIN, title="t", data={}, options={"temp_unit": "fahrenheit"}),
         _DEV_ID,
     )
-    await ac_f.async_set_temperature(temperature=77)
+    await ac_f.async_set_temperature(temperature=25)
     coordinator.async_publish_shadow_update.assert_awaited_with(
         {"state": {"desired": {"aircd": {"tTemp": 2500}}}},
         device_id=_DEV_ID,
     )
+
+
+@pytest.mark.parametrize(
+    ("device_type", "units", "expected", "input_temperature", "payload"),
+    [
+        ("heater", METRIC_SYSTEM, (21.8, 23.5, 0.0, 40.0, "°C"), 25.0, {"heat": {"targetTemp": 2500}}),
+        ("heater", US_CUSTOMARY_SYSTEM, (71.0, 74.0, 32.0, 104.0, "°F"), 77.0, {"heat": {"targetTemp": 2500}}),
+        ("air_conditioner", METRIC_SYSTEM, (21.8, 24.0, 19.5, 32.0, "°C"), 25.0, {"aircd": {"tTemp": 2500}}),
+        ("air_conditioner", US_CUSTOMARY_SYSTEM, (71.0, 75.0, 67.0, 90.0, "°F"), 77.0, {"aircd": {"tTemp": 2500}}),
+    ],
+)
+async def test_native_platform_climate_display_and_service_convert_exactly_once(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+    device_type: str,
+    units: UnitSystem,
+    expected: tuple[float, float, float, float, str],
+    input_temperature: float,
+    payload: dict[str, dict[str, int]],
+) -> None:
+    """Exercise November's real state and service conversion, not manual unit arithmetic."""
+    hass.config.units = units
+    coordinator = _StubCoordinator()
+    if device_type == "air_conditioner":
+        coordinator._device = DeviceInfo(
+            _DEV_ID, "vivosun-VSACA08-acc-device-1", "prefix/ac", "AeroLush C08", True, 66078, device_type,
+        )
+        coordinator.data = {
+            "shadows": {_DEV_ID: {"aircd": {
+                "state": 1, "func": 1, "target_temp": 2399, "min_target_temp": 1950,
+            }}},
+            "sensors": {_DEV_ID: {"pTemp": 2175}},
+        }
+        entity = VivosunAirConditionerClimateEntity(
+            cast("VivosunCoordinator", coordinator), MockConfigEntry(domain=DOMAIN, data={}), _DEV_ID,
+        )
+    else:
+        coordinator.data = {
+            "shadows": {_DEV_ID: {"heat": {"on": True, "state": 1, "target_temp": 2350}}},
+            "sensors": {_DEV_ID: {"pTemp": 2175}},
+        }
+        entity = _make_entity(coordinator, temp_unit="fahrenheit")
+
+    assert await async_setup_component(hass, "climate", {})
+    platform = EntityPlatform(
+        hass=hass, logger=logging.getLogger(__name__), domain="climate",
+        platform_name="vivosun_growhub", platform=None,
+        scan_interval=timedelta(seconds=30), entity_namespace=None,
+    )
+    try:
+        with caplog.at_level(logging.WARNING):
+            await platform.async_add_entities([entity])
+            await hass.async_block_till_done()
+        assert entity.entity_id is not None
+        state = hass.states.get(entity.entity_id)
+        assert state is not None
+        current, target, minimum, maximum, unit = expected
+        assert state.attributes["current_temperature"] == current
+        assert state.attributes["temperature"] == target
+        assert state.attributes["temperature_unit"] == unit
+        assert state.attributes["min_temp"] == minimum
+        assert state.attributes["max_temp"] == maximum
+        assert state.attributes["target_temp_step"] == 1
+        assert entity.native_temperature_unit == UnitOfTemperature.CELSIUS
+        assert not [
+            record.message for record in caplog.records
+            if "deprecated" in record.message.lower() and "vivosun" in record.message.lower()
+        ]
+
+        await hass.services.async_call(
+            "climate", "set_temperature", {"entity_id": entity.entity_id, "temperature": input_temperature},
+            blocking=True,
+        )
+        coordinator.async_publish_shadow_update.assert_awaited_once_with(
+            {"state": {"desired": payload}}, device_id=_DEV_ID,
+        )
+    finally:
+        await platform.async_reset()
+
+
+@pytest.mark.parametrize("device_type", ["heater", "air_conditioner"])
+async def test_climate_native_missing_boolean_and_sentinel_values_are_unavailable(device_type: str) -> None:
+    coordinator = _StubCoordinator()
+    if device_type == "air_conditioner":
+        entity = VivosunAirConditionerClimateEntity(
+            cast("VivosunCoordinator", coordinator), MockConfigEntry(domain=DOMAIN, data={}), _DEV_ID,
+        )
+        key = "aircd"
+    else:
+        entity = _make_entity(coordinator)
+        key = "heat"
+    for invalid in (-6666, True, False, None, "25"):
+        coordinator.data = {
+            "shadows": {_DEV_ID: {key: {"target_temp": invalid, "min_target_temp": invalid}}},
+            "sensors": {_DEV_ID: {"pTemp": invalid}},
+        }
+        assert entity.native_target_temperature is None
+        assert entity.native_current_temperature is None
+        if device_type == "air_conditioner":
+            assert entity.min_temp == 16.0
+    coordinator.data = {"shadows": {_DEV_ID: {key: {}}}, "sensors": {_DEV_ID: {}}}
+    assert entity.native_target_temperature is None
+    assert entity.native_current_temperature is None
+    await entity.async_set_temperature(temperature=True)
+    await entity.async_set_temperature(temperature="77")
+    coordinator.async_publish_shadow_update.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("device_type", "invalid_fahrenheit"), [("heater", 105.0), ("air_conditioner", 66.0)],
+)
+async def test_native_service_rejects_out_of_range_before_publishing(
+    hass: HomeAssistant, device_type: str, invalid_fahrenheit: float,
+) -> None:
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    coordinator = _StubCoordinator()
+    if device_type == "heater":
+        entity = _make_entity(coordinator)
+    else:
+        coordinator.data = {"shadows": {_DEV_ID: {"aircd": {"min_target_temp": 1950}}}}
+        coordinator._device = DeviceInfo(
+            _DEV_ID, "vivosun-VSACA08-acc-device-1", "prefix/ac", "AeroLush C08", True, 66078,
+            "air_conditioner",
+        )
+        entity = VivosunAirConditionerClimateEntity(
+            cast("VivosunCoordinator", coordinator), MockConfigEntry(domain=DOMAIN, data={}), _DEV_ID,
+        )
+    assert await async_setup_component(hass, "climate", {})
+    platform = EntityPlatform(
+        hass=hass, logger=logging.getLogger(__name__), domain="climate",
+        platform_name="vivosun_growhub", platform=None,
+        scan_interval=timedelta(seconds=30), entity_namespace=None,
+    )
+    try:
+        await platform.async_add_entities([entity])
+        await hass.async_block_till_done()
+        with pytest.raises(ServiceValidationError):
+            await hass.services.async_call(
+                "climate", "set_temperature",
+                {"entity_id": entity.entity_id, "temperature": invalid_fahrenheit}, blocking=True,
+            )
+        coordinator.async_publish_shadow_update.assert_not_awaited()
+    finally:
+        await platform.async_reset()

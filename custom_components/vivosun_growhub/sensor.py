@@ -22,7 +22,6 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CFAN_NATURAL_WIND_VALUE,
-    DEFAULT_TEMP_UNIT,
     DFAN_LEVEL_MAP,
     DOMAIN,
     DWC_WATER_LEVEL_SCALE_FACTOR,
@@ -47,9 +46,6 @@ if TYPE_CHECKING:
     from .models import DeviceInfo as VivosunDeviceInfo
     from .models import RuntimeData
 
-_OPTIONS_TEMP_UNIT = "temp_unit"
-_UNIT_CELSIUS = "celsius"
-_UNIT_FAHRENHEIT = "fahrenheit"
 _PLAN_AUTO_MODE = 2
 
 _PLAN_DEVICE_ENTITIES: tuple[tuple[str, str, str, str], ...] = (
@@ -492,7 +488,6 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
         """Initialize the sensor entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._entry = entry
         self._device_id = device_id
         self._attr_name = description.name if isinstance(description.name, str) else None
         self._attr_device_class = description.device_class
@@ -513,9 +508,7 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
     def native_unit_of_measurement(self) -> str | None:
         """Return native measurement unit."""
         if self.entity_description.quantity == "temperature":
-            if self._temp_unit() == _UNIT_FAHRENHEIT:
-                return str(UnitOfTemperature.FAHRENHEIT)
-            return str(UnitOfTemperature.CELSIUS)
+            return UnitOfTemperature.CELSIUS
         native_unit = self.entity_description.native_unit_of_measurement
         return native_unit if isinstance(native_unit, str) else None
 
@@ -532,10 +525,7 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
             return float(raw_value)
         if self.entity_description.quantity == "water_level":
             return raw_value / (self.entity_description.scale_factor or WATER_LEVEL_SCALE_FACTOR)
-        value = raw_value / (self.entity_description.scale_factor or TEMP_SCALE_FACTOR)
-        if self.entity_description.quantity == "temperature" and self._temp_unit() == _UNIT_FAHRENHEIT:
-            return (value * 9 / 5) + 32
-        return value
+        return raw_value / (self.entity_description.scale_factor or TEMP_SCALE_FACTOR)
 
     @property
     def extra_state_attributes(self) -> dict[str, str] | None:
@@ -583,13 +573,6 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
             saturation = 0.6108 * math.exp(17.27 * temp_c / (temp_c + 237.3))
             return round(saturation * (1 - humidity / (100 * TEMP_SCALE_FACTOR)), 2)
         return None
-
-    def _temp_unit(self) -> str:
-        configured_unit = self._entry.options.get(_OPTIONS_TEMP_UNIT, DEFAULT_TEMP_UNIT)
-        if configured_unit == _UNIT_FAHRENHEIT:
-            return _UNIT_FAHRENHEIT
-        return _UNIT_CELSIUS
-
 
 def _seconds_from_midnight() -> int:
     """Return seconds elapsed since midnight in Home Assistant local time."""

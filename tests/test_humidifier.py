@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
 from discovery_stubs import DiscoveryCoordinatorStub
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN, MODE_AUTO, MODE_MANUAL
 from custom_components.vivosun_growhub.humidifier import (

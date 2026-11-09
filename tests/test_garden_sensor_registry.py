@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import EntityPlatform
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub import retire_controller_plan_entities
 from custom_components.vivosun_growhub.const import DOMAIN
@@ -117,7 +117,7 @@ async def test_real_ha_registry_garden_ownership_dynamic_schedules_and_reload(ha
                                 "plan_dhmdf", "plan_drip", "plan_heat", "plan_aircd"))
         assert garden_entity(30, "plan_light") is None
 
-        g10 = devices_registry.async_get_device(identifiers={(DOMAIN, topology.identifier(10))})
+        g10 = devices_registry.async_get_device_by_identifier((DOMAIN, topology.identifier(10)), entry.entry_id)
         assert g10 is not None and g10.entry_type == dr.DeviceEntryType.SERVICE
         recipe_id = garden_entity(10, "recipe")
         assert recipe_id is not None
@@ -144,8 +144,10 @@ async def test_real_ha_registry_garden_ownership_dynamic_schedules_and_reload(ha
         assert garden_entity(20, "plan_cfan") is not None
         assert hass.states.get(garden_entity(10, "recipe")).state == "Autoflower"
         assert hass.states.get(garden_entity(20, "recipe")).state == "Photoperiod"
-        moved_parent = devices_registry.async_get_device(identifiers={(DOMAIN, topology.identifier(20))})
-        physical = devices_registry.async_get_device(identifiers={(DOMAIN, "controller-b")})
+        moved_parent = devices_registry.async_get_device_by_identifier(
+            (DOMAIN, topology.identifier(20)), entry.entry_id,
+        )
+        physical = devices_registry.async_get_device_by_identifier((DOMAIN, "controller-b"), entry.entry_id)
         assert moved_parent is not None and physical is not None and physical.via_device_id == moved_parent.id
         assert devices_registry.async_get(g10.id).name_by_user == "Tent A"
     finally:

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import EntityPlatform
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
 from custom_components.vivosun_growhub.discovery import watch_devices, watch_gardens

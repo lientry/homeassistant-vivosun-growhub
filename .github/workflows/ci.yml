@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "websockets==17.1" "pycares==5.0.1" "ruff==0.16.4" "mypy==2.3.1" "pytest==9.0.3" "pytest-cov==7.1.0" "pytest-asyncio==1.4.0" "pytest-homeassistant-custom-component==0.13.357" "homeassistant==2026.8.3" pyturbojpeg
+          pip install "websockets==17.1" "pycares==5.0.1" "ruff==0.16.4" "mypy==2.3.1" "pytest==9.0.3" "pytest-cov==7.1.0" "pytest-asyncio==1.4.0" "pytest-homeassistant==2026.11.0" "homeassistant==2026.11.0" pyturbojpeg
 
       - name: Ruff
         run: ruff check .
@@ -34,7 +34,7 @@ jobs:
         run: >-
           pytest
           -p pytest_asyncio.plugin
-          -p pytest_homeassistant_custom_component.plugins
+          -p pytest_homeassistant.plugins
           -p pytest_cov.plugin
           --cov=custom_components.vivosun_growhub.api
           --cov=custom_components.vivosun_growhub.aws_auth

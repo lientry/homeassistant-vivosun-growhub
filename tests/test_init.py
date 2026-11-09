@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.exceptions import ConfigEntryNotReady
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub import async_setup_entry, async_unload_entry
 from custom_components.vivosun_growhub.const import CONF_EMAIL, CONF_PASSWORD, DOMAIN, PLATFORMS

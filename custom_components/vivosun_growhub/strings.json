@@ -27,7 +27,6 @@
       "init": {
         "title": "Integration options",
         "data": {
-          "temp_unit": "Temperature unit",
           "support_capture_enabled": "Enable support capture for diagnostics",
           "spectrum_controllers": "Controllers with spectrum presets",
           "cfan_oscillation_controllers": "Controllers with fan oscillation",
@@ -64,14 +63,6 @@
             }
           }
         }
-      }
-    }
-  },
-  "selector": {
-    "temp_unit": {
-      "options": {
-        "celsius": "Celsius",
-        "fahrenheit": "Fahrenheit"
       }
     }
   }

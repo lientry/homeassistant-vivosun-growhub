@@ -13,7 +13,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.storage import Store
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import (
     CFAN_LEVEL_MAP,

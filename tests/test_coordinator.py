@@ -13,7 +13,7 @@ import pytest
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import EntityPlatform
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.vivosun_growhub.api import VivosunApiClient
 from custom_components.vivosun_growhub.aws_auth import AWS_CREDENTIAL_REFRESH_SKEW, AwsCredentials
@@ -1002,14 +1002,14 @@ async def test_shutdown_abandons_pending_discovery_and_restart_uses_new_lifecycl
     assert coordinator.devices == [] and coordinator.garden_inventory is None
     assert coordinator._subscribed_routes == set()
     assert received == [("device-1", "device-2")]
-    assert registry.async_get_device(identifiers={(DOMAIN, "device-3")}) is None
+    assert registry.async_get_device_by_identifier((DOMAIN, "device-3"), entry.entry_id) is None
     assert prior is not None
 
     aws.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
     await coordinator.async_start()
     coordinator.set_garden_topology(GardenTopology(hass, entry.entry_id))
     assert coordinator.garden_inventory == api.gardens
-    assert registry.async_get_device(identifiers={(DOMAIN, "device-3")}) is not None
+    assert registry.async_get_device_by_identifier((DOMAIN, "device-3"), entry.entry_id) is not None
     assert len(_MqttStub.instances) == 2
     await coordinator.async_shutdown()
 
@@ -1118,8 +1118,8 @@ async def test_verified_garden_only_account_registers_service_device(
     try:
         await coordinator.async_start()
         coordinator.set_garden_topology(GardenTopology(hass, entry.entry_id))
-        garden = dr.async_get(hass).async_get_device(
-            identifiers={(DOMAIN, f"garden:{entry.entry_id}:100")}
+        garden = dr.async_get(hass).async_get_device_by_identifier(
+            (DOMAIN, f"garden:{entry.entry_id}:100"), entry.entry_id,
         )
         assert garden is not None and garden.entry_type == dr.DeviceEntryType.SERVICE
         assert (garden.name, garden.via_device_id) == ("Empty Garden", None)

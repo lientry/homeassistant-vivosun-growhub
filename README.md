@@ -2,6 +2,8 @@
 
 Connect GrowHub controllers and supported Vivosun devices from the Vivosun app to Home Assistant.
 
+Requires Home Assistant 2026.11.0 or newer.
+
 Requires your Vivosun app account. Device control and sensor readings use the Vivosun cloud. GrowCam video streams over your local network.
 
 [![GitHub releases](https://img.shields.io/github/v/release/lientry/homeassistant-vivosun-growhub?style=flat-square&label=GitHub%20releases)](https://github.com/lientry/homeassistant-vivosun-growhub/releases)
@@ -9,7 +11,7 @@ Requires your Vivosun app account. Device control and sensor readings use the Vi
 <!-- ha-marketplace:exclude-start -->
 ## Quick Start
 
-1. On Home Assistant 2026.11 or later, install **Vivosun GrowHub** through the [Marketplace](https://www.home-assistant.io/integrations/marketplace). On 2026.3 through 2026.10, use [HACS](https://hacs.xyz/docs/use/).
+1. Install **Vivosun GrowHub** through the [Marketplace](https://www.home-assistant.io/integrations/marketplace).
 2. Restart Home Assistant.
 3. Add **Vivosun GrowHub** and sign in with your Vivosun app account.
 

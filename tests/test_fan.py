@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.exceptions import ServiceValidationError
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN, OPTION_CFAN_OSCILLATION_CONTROLLERS
 from custom_components.vivosun_growhub.fan import (

@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast
 
-import voluptuous as vol
+import probatio as vol
 from homeassistant.components.fan import FanEntity, FanEntityFeature
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import async_get_current_platform

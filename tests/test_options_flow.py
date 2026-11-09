@@ -14,7 +14,7 @@ from homeassistant.config_entries import HANDLERS
 from homeassistant.const import UnitOfTemperature
 from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers.translation import async_get_translations
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub import async_migrate_entry
 from custom_components.vivosun_growhub.config_flow import VivosunGrowhubConfigFlow, VivosunGrowhubOptionsFlow
@@ -98,7 +98,6 @@ async def test_malformed_submitted_controller_selections_return_form_errors(
     flow = VivosunGrowhubOptionsFlow(entry)
     flow.hass = hass
     result = await flow.async_step_init({
-        "temp_unit": "celsius",
         key: invalid,
         OPTION_REMEMBER_MANUAL_SETTINGS: True,
         OPTION_SUPPORT_CAPTURE_ENABLED: True,
@@ -114,7 +113,7 @@ async def test_global_manual_toggle_on_existing_options_screen_preserves_all_oth
     coordinator = _StubCoordinator()
     coordinator.camera_devices = [DeviceInfo("camera-1", "", "", "GrowCam", True, 1, "camera")]
     entry = MockConfigEntry(domain=DOMAIN, data={CONF_HAS_CAMERA: True}, options={
-        "temp_unit": "celsius", OPTION_SUPPORT_CAPTURE_ENABLED: True,
+        OPTION_SUPPORT_CAPTURE_ENABLED: True,
         OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID], CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"},
         "unrelated_future_setting": 42,
     })
@@ -126,7 +125,7 @@ async def test_global_manual_toggle_on_existing_options_screen_preserves_all_oth
             marker.schema for marker in form["data_schema"].schema if hasattr(marker, "schema")
         }
         next_form = await hass.config_entries.options.async_configure(form["flow_id"], user_input={
-            "temp_unit": "celsius", OPTION_SUPPORT_CAPTURE_ENABLED: True,
+            OPTION_SUPPORT_CAPTURE_ENABLED: True,
             OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID], OPTION_REMEMBER_MANUAL_SETTINGS: True,
         })
         await hass.config_entries.options.async_configure(
@@ -141,7 +140,7 @@ async def test_global_manual_toggle_on_existing_options_screen_preserves_all_oth
 
         form = await hass.config_entries.options.async_init(entry.entry_id)
         camera = await hass.config_entries.options.async_configure(form["flow_id"], user_input={
-            "temp_unit": "fahrenheit", OPTION_SUPPORT_CAPTURE_ENABLED: True,
+            OPTION_SUPPORT_CAPTURE_ENABLED: True,
             OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID], OPTION_REMEMBER_MANUAL_SETTINGS: False,
         })
         await hass.config_entries.options.async_configure(camera["flow_id"], user_input={CONF_CAMERA_IP: ""})
@@ -163,7 +162,7 @@ async def test_manual_options_reject_non_boolean_values(
     flow.hass = hass
     for invalid in (["dev-1:light"], "true", 1, {}):
         result = await flow.async_step_init({
-            "temp_unit": "celsius", OPTION_REMEMBER_MANUAL_SETTINGS: invalid,
+            OPTION_REMEMBER_MANUAL_SETTINGS: invalid,
         })
         assert result["errors"]["base"] == "invalid_manual_setting"
 
@@ -324,12 +323,12 @@ async def test_global_memory_toggle_preserves_form_default_when_field_omitted(
     hass: HomeAssistant, enable_custom_integrations: None,
 ) -> None:
     entry = MockConfigEntry(domain=DOMAIN, version=1, minor_version=2, data={}, options={
-        "temp_unit": "celsius", OPTION_REMEMBER_MANUAL_SETTINGS: True, "future": "preserve",
+        OPTION_REMEMBER_MANUAL_SETTINGS: True, "future": "preserve",
     })
     entry.add_to_hass(hass)
     with patch.object(hass.config_entries, "async_reload", AsyncMock(return_value=True)):
         flow = await hass.config_entries.options.async_init(entry.entry_id)
-        await hass.config_entries.options.async_configure(flow["flow_id"], user_input={"temp_unit": "celsius"})
+        await hass.config_entries.options.async_configure(flow["flow_id"], user_input={})
         await hass.async_block_till_done()
     # Core applies the form field's default=True before calling the flow.
     assert entry.options[OPTION_REMEMBER_MANUAL_SETTINGS] is True
@@ -344,7 +343,6 @@ async def test_options_flow_clear_last_camera_ip_preserves_spectrum_and_other_op
         DeviceInfo("camera-1", "", "", "GrowCam", True, 1001, "camera")
     ]
     entry = MockConfigEntry(domain=DOMAIN, data={CONF_HAS_CAMERA: True}, options={
-        "temp_unit": "celsius",
         OPTION_SUPPORT_CAPTURE_ENABLED: True,
         OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID],
         CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"},
@@ -356,7 +354,6 @@ async def test_options_flow_clear_last_camera_ip_preserves_spectrum_and_other_op
     with patch.object(hass.config_entries, "async_reload", AsyncMock(return_value=True)) as reload_mock:
         form = await hass.config_entries.options.async_init(entry.entry_id)
         cameras = await hass.config_entries.options.async_configure(form["flow_id"], user_input={
-            "temp_unit": "fahrenheit",
             OPTION_SUPPORT_CAPTURE_ENABLED: True,
             OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID],
         })
@@ -368,7 +365,6 @@ async def test_options_flow_clear_last_camera_ip_preserves_spectrum_and_other_op
         await hass.async_block_till_done()
 
     assert entry.options == {
-        "temp_unit": "fahrenheit",
         OPTION_SUPPORT_CAPTURE_ENABLED: True,
         OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID],
         "unknown_future_option": "keep",
@@ -392,7 +388,7 @@ async def test_options_flow_clears_one_camera_but_keeps_other_camera_ip(
     with patch.object(hass.config_entries, "async_reload", AsyncMock(return_value=True)):
         form = await hass.config_entries.options.async_init(entry.entry_id)
         first = await hass.config_entries.options.async_configure(
-            form["flow_id"], user_input={"temp_unit": "celsius"}
+            form["flow_id"], user_input={}
         )
         second = await hass.config_entries.options.async_configure(
             first["flow_id"], user_input={CONF_CAMERA_IP: ""}
@@ -416,7 +412,7 @@ async def test_options_flow_preserves_saved_camera_ips_when_no_cameras_discovere
     with patch.object(hass.config_entries, "async_reload", AsyncMock(return_value=True)):
         form = await hass.config_entries.options.async_init(entry.entry_id)
         await hass.config_entries.options.async_configure(
-            form["flow_id"], user_input={"temp_unit": "fahrenheit", OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID]}
+            form["flow_id"], user_input={OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID]}
         )
         await hass.async_block_till_done()
     assert entry.options[CONF_CAMERA_IPS] == {"missing-camera": "10.0.15.202"}
@@ -453,7 +449,7 @@ async def test_oscillation_option_per_controller_default_off_and_removable_with_
     coordinator = _StubCoordinator()
     coordinator.camera_devices = [DeviceInfo("camera-1", "", "", "GrowCam", True, 1, "camera")]
     entry = MockConfigEntry(domain=DOMAIN, data={CONF_HAS_CAMERA: True}, options={
-        "temp_unit": "celsius", "unrelated_future_setting": 42,
+        "unrelated_future_setting": 42,
         OPTION_SUPPORT_CAPTURE_ENABLED: True, OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID],
         OPTION_REMEMBER_MANUAL_SETTINGS: True,
         CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"},
@@ -466,10 +462,10 @@ async def test_oscillation_option_per_controller_default_off_and_removable_with_
         assert _OSC_OPTION not in entry.options
         with pytest.raises(InvalidData):
             await hass.config_entries.options.async_configure(form["flow_id"], user_input={
-                "temp_unit": "celsius", _OSC_OPTION: ["camera-1"],
+                _OSC_OPTION: ["camera-1"],
             })
         camera = await hass.config_entries.options.async_configure(form["flow_id"], user_input={
-            "temp_unit": "celsius", _OSC_OPTION: [_DEV_ID],
+            _OSC_OPTION: [_DEV_ID],
             OPTION_SUPPORT_CAPTURE_ENABLED: True, OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID],
             OPTION_REMEMBER_MANUAL_SETTINGS: True,
         })
@@ -484,7 +480,7 @@ async def test_oscillation_option_per_controller_default_off_and_removable_with_
 
         form = await hass.config_entries.options.async_init(entry.entry_id)
         camera = await hass.config_entries.options.async_configure(form["flow_id"], user_input={
-            "temp_unit": "celsius", _OSC_OPTION: [],
+            _OSC_OPTION: [],
             OPTION_SUPPORT_CAPTURE_ENABLED: True, OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID],
             OPTION_REMEMBER_MANUAL_SETTINGS: True,
         })
@@ -511,10 +507,10 @@ async def test_spectrum_opt_in_is_per_controller_and_removable(
         with pytest.raises(InvalidData):
             await hass.config_entries.options.async_configure(
                 flow["flow_id"],
-                user_input={"temp_unit": "celsius", OPTION_SPECTRUM_CONTROLLERS: ["unknown-device"]},
+                user_input={OPTION_SPECTRUM_CONTROLLERS: ["unknown-device"]},
             )
         saved = await hass.config_entries.options.async_configure(
-            flow["flow_id"], user_input={"temp_unit": "celsius", OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID]}
+            flow["flow_id"], user_input={OPTION_SPECTRUM_CONTROLLERS: [_DEV_ID]}
         )
         assert saved["type"] is FlowResultType.CREATE_ENTRY
         await hass.async_block_till_done()
@@ -522,7 +518,7 @@ async def test_spectrum_opt_in_is_per_controller_and_removable(
         assert entry.options["unrelated_setting"] == "keep"
         flow = await hass.config_entries.options.async_init(entry.entry_id)
         await hass.config_entries.options.async_configure(
-            flow["flow_id"], user_input={"temp_unit": "celsius", OPTION_SPECTRUM_CONTROLLERS: []}
+            flow["flow_id"], user_input={OPTION_SPECTRUM_CONTROLLERS: []}
         )
         await hass.async_block_till_done()
     assert OPTION_SPECTRUM_CONTROLLERS not in entry.options
@@ -557,11 +553,11 @@ class _StubCoordinator(DiscoveryCoordinatorStub):
         return None
 
 
-async def test_options_flow_updates_temp_unit_and_sensor_unit(
+async def test_options_flow_no_longer_exposes_stale_temp_unit(
     hass: HomeAssistant, enable_custom_integrations: None
 ) -> None:
     coordinator = _StubCoordinator()
-    entry = MockConfigEntry(domain=DOMAIN, title="t", data={}, options={"temp_unit": "celsius"})
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={}, options={"temp_unit": "fahrenheit"})
     entry.add_to_hass(hass)
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
@@ -580,18 +576,19 @@ async def test_options_flow_updates_temp_unit_and_sensor_unit(
         init_result = await hass.config_entries.options.async_init(entry.entry_id)
         assert init_result["type"] is FlowResultType.FORM
         assert init_result["step_id"] == "init"
+        assert "temp_unit" not in {marker.schema for marker in init_result["data_schema"].schema}
 
         finish_result = await hass.config_entries.options.async_configure(
             init_result["flow_id"],
-            user_input={"temp_unit": "fahrenheit"},
+            user_input={},
         )
         assert finish_result["type"] is FlowResultType.CREATE_ENTRY
         await hass.async_block_till_done()
 
     assert entry.options == {"temp_unit": "fahrenheit"}
-    reload_mock.assert_awaited_once_with(entry.entry_id)
-    assert in_temp.native_unit_of_measurement == UnitOfTemperature.FAHRENHEIT
-    assert in_temp.native_value == 77.0
+    reload_mock.assert_not_awaited()
+    assert in_temp.native_unit_of_measurement == UnitOfTemperature.CELSIUS
+    assert in_temp.native_value == 25.0
 
 
 async def test_options_flow_enables_support_capture_and_triggers_reload(
@@ -599,7 +596,7 @@ async def test_options_flow_enables_support_capture_and_triggers_reload(
     enable_custom_integrations: None,
 ) -> None:
     coordinator = _StubCoordinator()
-    entry = MockConfigEntry(domain=DOMAIN, title="t", data={}, options={"temp_unit": "celsius"})
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={}, options={})
     entry.add_to_hass(hass)
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
@@ -608,12 +605,12 @@ async def test_options_flow_enables_support_capture_and_triggers_reload(
         init_result = await hass.config_entries.options.async_init(entry.entry_id)
         finish_result = await hass.config_entries.options.async_configure(
             init_result["flow_id"],
-            user_input={"temp_unit": "celsius", OPTION_SUPPORT_CAPTURE_ENABLED: True},
+            user_input={OPTION_SUPPORT_CAPTURE_ENABLED: True},
         )
         assert finish_result["type"] is FlowResultType.CREATE_ENTRY
         await hass.async_block_till_done()
 
-    assert entry.options == {"temp_unit": "celsius", OPTION_SUPPORT_CAPTURE_ENABLED: True}
+    assert entry.options == {OPTION_SUPPORT_CAPTURE_ENABLED: True}
     reload_mock.assert_awaited_once_with(entry.entry_id)
 
 
@@ -622,7 +619,7 @@ async def test_options_flow_same_values_do_not_trigger_reload(
     enable_custom_integrations: None,
 ) -> None:
     coordinator = _StubCoordinator()
-    entry = MockConfigEntry(domain=DOMAIN, title="t", data={}, options={"temp_unit": "celsius"})
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={}, options={})
     entry.add_to_hass(hass)
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
@@ -631,7 +628,7 @@ async def test_options_flow_same_values_do_not_trigger_reload(
         init_result = await hass.config_entries.options.async_init(entry.entry_id)
         finish_result = await hass.config_entries.options.async_configure(
             init_result["flow_id"],
-            user_input={"temp_unit": "celsius"},
+            user_input={},
         )
         assert finish_result["type"] is FlowResultType.CREATE_ENTRY
         await hass.async_block_till_done()
@@ -666,7 +663,7 @@ async def test_options_flow_updates_camera_ip_when_camera_supported(
         domain=DOMAIN,
         title="t",
         data={CONF_HAS_CAMERA: True},
-        options={"temp_unit": "celsius"},
+        options={},
     )
     entry.add_to_hass(hass)
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
@@ -676,7 +673,7 @@ async def test_options_flow_updates_camera_ip_when_camera_supported(
         init_result = await hass.config_entries.options.async_init(entry.entry_id)
         finish_result = await hass.config_entries.options.async_configure(
             init_result["flow_id"],
-            user_input={"temp_unit": "celsius"},
+            user_input={},
         )
         assert finish_result["type"] is FlowResultType.FORM
         finish_result = await hass.config_entries.options.async_configure(
@@ -687,7 +684,6 @@ async def test_options_flow_updates_camera_ip_when_camera_supported(
         await hass.async_block_till_done()
 
     assert entry.options == {
-        "temp_unit": "celsius",
         CONF_CAMERA_IPS: {"camera-1": "10.0.15.202"},
     }
     reload_mock.assert_awaited_once_with(entry.entry_id)
@@ -713,7 +709,7 @@ async def test_options_flow_rejects_invalid_camera_ip(
         domain=DOMAIN,
         title="t",
         data={CONF_HAS_CAMERA: True},
-        options={"temp_unit": "celsius"},
+        options={},
     )
     entry.add_to_hass(hass)
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
@@ -723,7 +719,7 @@ async def test_options_flow_rejects_invalid_camera_ip(
         init_result = await hass.config_entries.options.async_init(entry.entry_id)
         finish_result = await hass.config_entries.options.async_configure(
             init_result["flow_id"],
-            user_input={"temp_unit": "celsius"},
+            user_input={},
         )
         finish_result = await hass.config_entries.options.async_configure(
             finish_result["flow_id"],
@@ -734,7 +730,7 @@ async def test_options_flow_rejects_invalid_camera_ip(
         assert finish_result["errors"] == {CONF_CAMERA_IP: "invalid_ip"}
         await hass.async_block_till_done()
 
-    assert entry.options == {"temp_unit": "celsius"}
+    assert entry.options == {}
     reload_mock.assert_not_awaited()
 
 
@@ -758,7 +754,7 @@ async def test_options_flow_blank_camera_ip_is_treated_as_noop(
         domain=DOMAIN,
         title="t",
         data={CONF_HAS_CAMERA: True},
-        options={"temp_unit": "celsius"},
+        options={},
     )
     entry.add_to_hass(hass)
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
@@ -768,7 +764,7 @@ async def test_options_flow_blank_camera_ip_is_treated_as_noop(
         init_result = await hass.config_entries.options.async_init(entry.entry_id)
         finish_result = await hass.config_entries.options.async_configure(
             init_result["flow_id"],
-            user_input={"temp_unit": "celsius"},
+            user_input={},
         )
         finish_result = await hass.config_entries.options.async_configure(
             finish_result["flow_id"],
@@ -777,7 +773,7 @@ async def test_options_flow_blank_camera_ip_is_treated_as_noop(
         assert finish_result["type"] is FlowResultType.CREATE_ENTRY
         await hass.async_block_till_done()
 
-    assert entry.options == {"temp_unit": "celsius"}
+    assert entry.options == {}
     reload_mock.assert_not_awaited()
 
 
@@ -802,7 +798,7 @@ async def test_options_flow_converts_legacy_camera_ip_and_configures_second_came
         domain=DOMAIN,
         title="t",
         data={CONF_HAS_CAMERA: True},
-        options={"temp_unit": "celsius", CONF_CAMERA_IP: "10.0.15.202"},
+        options={CONF_CAMERA_IP: "10.0.15.202"},
     )
     entry.add_to_hass(hass)
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
@@ -812,7 +808,7 @@ async def test_options_flow_converts_legacy_camera_ip_and_configures_second_came
         init_result = await hass.config_entries.options.async_init(entry.entry_id)
         first_camera = await hass.config_entries.options.async_configure(
             init_result["flow_id"],
-            user_input={"temp_unit": "celsius"},
+            user_input={},
         )
         second_camera = await hass.config_entries.options.async_configure(
             first_camera["flow_id"],
@@ -826,7 +822,6 @@ async def test_options_flow_converts_legacy_camera_ip_and_configures_second_came
         await hass.async_block_till_done()
 
     assert entry.options == {
-        "temp_unit": "celsius",
         CONF_CAMERA_IPS: {
             "camera-1": "10.0.15.202",
             "camera-2": "10.0.15.203",
@@ -840,7 +835,7 @@ async def test_options_flow_false_support_capture_is_treated_as_noop(
     enable_custom_integrations: None,
 ) -> None:
     coordinator = _StubCoordinator()
-    entry = MockConfigEntry(domain=DOMAIN, title="t", data={}, options={"temp_unit": "celsius"})
+    entry = MockConfigEntry(domain=DOMAIN, title="t", data={}, options={})
     entry.add_to_hass(hass)
     runtime = RuntimeData(entry_id=entry.entry_id, coordinator=cast("object", coordinator))
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
@@ -849,10 +844,10 @@ async def test_options_flow_false_support_capture_is_treated_as_noop(
         init_result = await hass.config_entries.options.async_init(entry.entry_id)
         finish_result = await hass.config_entries.options.async_configure(
             init_result["flow_id"],
-            user_input={"temp_unit": "celsius", OPTION_SUPPORT_CAPTURE_ENABLED: False},
+            user_input={OPTION_SUPPORT_CAPTURE_ENABLED: False},
         )
         assert finish_result["type"] is FlowResultType.CREATE_ENTRY
         await hass.async_block_till_done()
 
-    assert entry.options == {"temp_unit": "celsius"}
+    assert entry.options == {}
     reload_mock.assert_not_awaited()

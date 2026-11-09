@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import timedelta
 from typing import TYPE_CHECKING, cast
 
+import pytest
 from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.components.sensor import SensorStateClass
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.helpers.entity_platform import EntityPlatform
+from homeassistant.setup import async_setup_component
+from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM, UnitSystem
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub import sensor as sensor_module
 from custom_components.vivosun_growhub.const import DOMAIN
@@ -55,6 +61,10 @@ class _StubCoordinator(DiscoveryCoordinatorStub):
         if device_id == self._device.device_id:
             return self._device
         return None
+
+    def async_add_listener(self, callback: object, context: object | None = None) -> object:
+        """Register native platform entities without live coordinator updates."""
+        return lambda: None
 
 
 async def test_sensor_setup_creates_eight_physical_entities(hass: HomeAssistant) -> None:
@@ -264,7 +274,7 @@ async def test_sensor_normalized_sentinel_none_maps_to_unavailable(hass: HomeAss
     )
 
 
-async def test_sensor_temperature_options_celsius_and_fahrenheit(hass: HomeAssistant) -> None:
+async def test_sensor_ignores_stale_unit_option_and_keeps_celsius_native(hass: HomeAssistant) -> None:
     coordinator = _StubCoordinator()
     coordinator.data = {"sensors": {_DEV_ID: {"inTemp": 2500, "outTemp": 1000}}}
 
@@ -294,8 +304,46 @@ async def test_sensor_temperature_options_celsius_and_fahrenheit(hass: HomeAssis
 
     await async_setup_entry(hass, fahrenheit_entry, _add_fahrenheit)
     in_temp_f = next(entity for entity in fahrenheit_entities if entity.unique_id.endswith("_inTemp"))
-    assert in_temp_f.native_unit_of_measurement == UnitOfTemperature.FAHRENHEIT
-    assert in_temp_f.native_value == 77.0
+    assert in_temp_f.native_unit_of_measurement == UnitOfTemperature.CELSIUS
+    assert in_temp_f.native_value == 25.0
+
+
+@pytest.mark.parametrize(
+    ("units", "expected", "unit"),
+    [(METRIC_SYSTEM, 25.0, "°C"), (US_CUSTOMARY_SYSTEM, 77.0, "°F")],
+)
+async def test_native_sensor_platform_uses_home_assistant_display_units(
+    hass: HomeAssistant, units: UnitSystem, expected: float, unit: str,
+) -> None:
+    hass.config.units = units
+    coordinator = _StubCoordinator()
+    coordinator.data = {"sensors": {_DEV_ID: {"inTemp": 2500}}}
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={"temp_unit": "fahrenheit"})
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(
+        entry_id=entry.entry_id, coordinator=cast("object", coordinator),
+    )
+    added: list[VivosunChannelSensorEntity] = []
+    await async_setup_entry(hass, entry, added.extend)
+    entity = next(item for item in added if item.unique_id == f"vivosun_growhub_{_DEV_ID}_inTemp")
+    assert entity.native_value == 25.0
+    assert entity.native_unit_of_measurement == UnitOfTemperature.CELSIUS
+    assert await async_setup_component(hass, "sensor", {})
+    platform = EntityPlatform(
+        hass=hass, logger=logging.getLogger(__name__), domain="sensor",
+        platform_name="vivosun_growhub", platform=None,
+        scan_interval=timedelta(seconds=30), entity_namespace=None,
+    )
+    try:
+        await platform.async_add_entities([entity])
+        await hass.async_block_till_done()
+        assert entity.entity_id is not None
+        state = hass.states.get(entity.entity_id)
+        assert state is not None
+        assert float(state.state) == expected
+        assert state.attributes["unit_of_measurement"] == unit
+        assert entity.unique_id == f"vivosun_growhub_{_DEV_ID}_inTemp"
+    finally:
+        await platform.async_reset()
 
 
 def test_compute_light_schedule_handles_wraparound_window(monkeypatch: MonkeyPatch) -> None:

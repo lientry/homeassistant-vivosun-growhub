@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import CONF_EMAIL, CONF_PASSWORD, DOMAIN, PLATFORMS
 from custom_components.vivosun_growhub.models import RuntimeData
