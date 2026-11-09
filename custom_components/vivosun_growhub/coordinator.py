@@ -224,6 +224,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._unsub_inventory_refresh: Callable[[], None] | None = None
         self._unsub_garden_tick: Callable[[], None] | None = None
         self._inventory_apply_lock = asyncio.Lock()
+        self._forced_inventory_task: asyncio.Task[None] | None = None
         self._device_listeners: list[tuple[Callable[[list[DeviceInfo]], None], bool]] = []
         self._subscribed_routes: set[tuple[str, str]] = set()
         self._capture_devices: list[CaptureDevice] = []
@@ -409,7 +410,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._shutdown_event.clear()
             self._reconnect_event.clear()
             await self._bootstrap_chain()
-            await self.async_refresh_inventory(initial_devices=self._all_devices)
+            await self.async_refresh_inventory(initial_devices=self._all_devices, wait_for_plans=False)
             if (not self._all_devices and not self._capture_devices and not self.skipped_devices_snapshot()
                     and not (self._garden_inventory and self._garden_inventory.gardens)):
                 raise VivosunResponseError("No devices found for this account")
@@ -438,6 +439,11 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._shutdown_event.set()
             self._reconnect_event.set()
             self._inventory_generation += 1
+            if self._forced_inventory_task is not None:
+                self._forced_inventory_task.cancel()
+                await asyncio.gather(self._forced_inventory_task, return_exceptions=True)
+                self._forced_inventory_task = None
+            self._debounced_refresh.async_cancel()
             for task in self._garden_read_tasks.values():
                 task.cancel()
             self._physical_sample_versions.clear()
@@ -1008,11 +1014,19 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
     async def async_request_refresh(self) -> None:
         """The explicit HA refresh path also checks inventory, regardless of cadence."""
-        await self.async_refresh_inventory(force=True)
+        if self._shutdown_event.is_set():
+            return
+        task = self._forced_inventory_task
+        if task is None or task.done():
+            task = self._forced_inventory_task = asyncio.create_task(self.async_refresh_inventory(force=True))
+        await asyncio.shield(task)
+        if self._shutdown_event.is_set():
+            return
         await super().async_request_refresh()
 
     async def async_refresh_inventory(
         self, *, force: bool = False, initial_devices: list[DeviceInfo] | None = None,
+        wait_for_plans: bool = True,
     ) -> None:
         """Observe account garden membership without writes or destructive discovery."""
         tokens = self._tokens
@@ -1035,7 +1049,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     return
                 await self._accept_inventory(inventory, devices, generation)
             if self._inventory_is_current(generation):
-                await self._refresh_garden_plans(inventory, generation)
+                await self._refresh_garden_plans(inventory, generation, wait=wait_for_plans)
         except asyncio.CancelledError:
             # A cancelled read has no successful outcome. Do not leave its
             # previous snapshot labelled as an active in-flight refresh.
@@ -1061,9 +1075,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             )
 
     async def _refresh_garden_plans(
-        self, inventory: GardenInventory, generation: int,
+        self, inventory: GardenInventory, generation: int, *, wait: bool = True,
     ) -> None:
-        """Wait for the same per-garden workers used by MQTT and periodic reads."""
+        """Share per-garden workers; startup queues them without delaying physical controls."""
         if not self._inventory_is_current(generation):
             return
         tasks: dict[int, asyncio.Task[None]] = {}
@@ -1079,6 +1093,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             versions[scene_id] = self._garden_read_versions[scene_id]
             if prior is None or prior.done():
                 started[scene_id] = task
+        if not wait:
+            return
         try:
             # Caller cancellation must not erase a later MQTT invalidation
             # already queued on one of these shared workers.

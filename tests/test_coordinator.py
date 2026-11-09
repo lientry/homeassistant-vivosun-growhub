@@ -367,7 +367,7 @@ async def test_reported_mqtt_plan_change_refetches_only_its_garden_without_inven
     api = _GardenApiStub()
     api.plans[66078] = _seedling_garden_recipe(66078, active=False)
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     entry, platform = await _setup_native_garden_sensors(hass, coordinator)
     try:
         assert _garden_sensor_state(hass, entry, 66078, "stage").state == "Inactive"
@@ -407,7 +407,7 @@ async def test_mqtt_plan_change_during_read_replays_latest_and_recovers_from_fai
 ) -> None:
     api = _GardenApiStub()
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     mqtt = _MqttStub.instances[0]
     entered, resume = asyncio.Event(), asyncio.Event()
     reads = 0
@@ -446,7 +446,7 @@ async def test_no_mqtt_stage_changes_are_refreshed_without_account_inventory(
 ) -> None:
     api = _GardenApiStub()
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     try:
         api.plans[66080] = _seedling_garden_recipe(66080, active=True)
         coordinator._garden_read_last_attempt[66080] = datetime.now(tz=UTC) - timedelta(minutes=2)
@@ -498,7 +498,7 @@ async def test_garden_plan_reads_fail_independently_and_recover_without_mqtt(
     api = _GardenApiStub()
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         assert {g: coordinator.garden_plan_read(g).status for g in (66078, 66079, 66080)} == {
             66078: "current", 66079: "current", 66080: "current",
         }
@@ -523,7 +523,7 @@ async def test_garden_plan_refresh_keeps_snapshot_until_result(
     api = _GardenApiStub()
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         before = coordinator.garden_plan_read(66078).plans
         entered, release = asyncio.Event(), asyncio.Event()
         original = api.get_garden_plans
@@ -567,7 +567,7 @@ async def test_native_garden_entities_preserve_valid_reads_without_reviving_fail
     refresh: asyncio.Task[None] | None = None
     entered, release = asyncio.Event(), asyncio.Event()
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         entry, platform = await _setup_native_garden_sensors(hass, coordinator)
         assert _garden_sensor_state(hass, entry, 66078, "recipe").state == "Photoperiod"
         assert _garden_sensor_state(hass, entry, 66078, "stage").state == "Vegetative"
@@ -640,7 +640,7 @@ async def test_native_garden_first_failure_removal_and_inventory_failure(
     entry: MockConfigEntry | None = None
     platform: EntityPlatform | None = None
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         entry, platform = await _setup_native_garden_sensors(hass, coordinator)
         first = _garden_sensor_state(hass, entry, 66078, "recipe")
         assert first.state == "unavailable"
@@ -712,7 +712,7 @@ async def test_cancelled_garden_read_does_not_leave_native_entities_refreshing(
     refresh: asyncio.Task[None] | None = None
     entered, resume = asyncio.Event(), asyncio.Event()
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         entry, platform = await _setup_native_garden_sensors(hass, coordinator)
         original = api.get_garden_plans
 
@@ -764,7 +764,7 @@ async def test_garden_read_failure_logs_bounded_category_only(
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
     try:
         with caplog.at_level(logging.WARNING):
-            await coordinator.async_start()
+            await _start_gardens(coordinator)
         messages = [record.getMessage() for record in caplog.records
                     if record.message.startswith("Garden recipe read unavailable")]
         assert messages == [
@@ -783,7 +783,7 @@ async def test_late_plan_response_cannot_replace_newer_garden_read(
     api = _GardenApiStub()
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         waiting, proceed = asyncio.Event(), asyncio.Event()
         original = api.get_garden_plans
 
@@ -826,7 +826,7 @@ async def test_runtime_garden_discovery_preserves_mqtt_and_known_entities(
     aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
     _patch_coordinator_deps(monkeypatch, api, aws_auth)
     coordinator = VivosunCoordinator(hass, object(), email="test@example.com", password="secret")
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     mqtt = _MqttStub.instances[0]
     assert coordinator.garden_inventory == _garden_inventory()
 
@@ -873,7 +873,7 @@ async def test_stale_garden_read_cannot_override_newer_complete_refresh(
     aws_auth.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
     _patch_coordinator_deps(monkeypatch, api, aws_auth)
     coordinator = VivosunCoordinator(hass, object(), email="test@example.com", password="secret")
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     blocked = asyncio.Event()
     proceed = asyncio.Event()
     original_get_gardens = api.get_gardens
@@ -907,7 +907,7 @@ async def test_invalid_and_superseded_inventory_cannot_remove_registry_rows(
     resume = asyncio.Event()
     stale: asyncio.Task[None] | None = None
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         entry, platform = await _setup_native_garden_sensors(hass, coordinator)
         registry = er.async_get(hass)
         uid = f"vivosun_growhub_{entry.entry_id}_garden_66080_recipe"
@@ -954,6 +954,113 @@ async def test_invalid_and_superseded_inventory_cannot_remove_registry_rows(
         await coordinator.async_shutdown()
 
 
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+async def test_forced_refreshes_share_inventory_and_survive_cancelled_waiter(
+    hass: HomeAssistant, monkeypatch: MonkeyPatch, cancel_waiter: bool,
+) -> None:
+    api = _GardenApiStub()
+    coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
+    entered, release = asyncio.Event(), asyncio.Event()
+    requests: list[asyncio.Task[None]] = []
+    try:
+        await _start_gardens(coordinator)
+        original = api.get_gardens
+
+        async def paused(tokens: AuthTokens) -> GardenInventory:
+            result = await original(tokens)
+            entered.set()
+            await release.wait()
+            return result
+
+        monkeypatch.setattr(api, "get_gardens", paused)
+        before = api.calls.count("get_gardens")
+        requests = [asyncio.create_task(coordinator.async_request_refresh()) for _ in range(3)]
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        if cancel_waiter:
+            requests[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await requests[0]
+        release.set()
+        await asyncio.gather(*requests[int(cancel_waiter):])
+        assert api.calls.count("get_gardens") == before + 1
+    finally:
+        release.set()
+        await asyncio.gather(*requests, return_exceptions=True)
+        await coordinator.async_shutdown()
+
+
+async def test_physical_startup_does_not_wait_for_optional_recipe_reads(
+    hass: HomeAssistant, monkeypatch: MonkeyPatch,
+) -> None:
+    api = _GardenApiStub()
+    api.point_log = {"inTemp": 1948}
+    api.plans[66078] = _running_garden_recipe(66078)
+    coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = api.get_garden_plans
+
+    async def paused(tokens: AuthTokens, scene_id: int) -> GardenPlans:
+        entered.set()
+        await release.wait()
+        return await original(tokens, scene_id)
+
+    monkeypatch.setattr(api, "get_garden_plans", paused)
+    startup = asyncio.create_task(coordinator.async_start())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.wait_for(asyncio.shield(startup), timeout=1)
+        assert not release.is_set() and coordinator.is_mqtt_connected
+        assert coordinator.get_device("device-1") is not None
+        assert coordinator._sensor_states["device-1"]["inTemp"] == 1948
+        assert coordinator.garden_plan_read(66078).status == "unknown"
+        release.set()
+        await asyncio.gather(*coordinator._garden_read_tasks.values())
+        read = coordinator.garden_plan_read(66078)
+        assert read.status == "current" and read.plans is not None
+        assert read.plans.plans[0].name == "Photoperiod"
+    finally:
+        release.set()
+        await startup
+        await coordinator.async_shutdown()
+
+
+async def _start_gardens(coordinator: VivosunCoordinator) -> None:
+    """Wait for optional startup reads only when testing completed recipe snapshots."""
+    await coordinator.async_start()
+    await asyncio.gather(*coordinator._garden_read_tasks.values())
+
+
+async def test_shutdown_cancels_shared_forced_inventory_read(
+    hass: HomeAssistant, monkeypatch: MonkeyPatch,
+) -> None:
+    api = _GardenApiStub()
+    coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
+    entered = asyncio.Event()
+    request: asyncio.Task[None] | None = None
+    try:
+        await _start_gardens(coordinator)
+
+        async def blocked(tokens: AuthTokens) -> GardenInventory:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("Cancelled inventory must not resume")
+
+        monkeypatch.setattr(api, "get_gardens", blocked)
+        request = asyncio.create_task(coordinator.async_request_refresh())
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await coordinator.async_shutdown()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert coordinator._forced_inventory_task is None
+        assert coordinator.garden_inventory is None
+        await coordinator.async_request_refresh()
+    finally:
+        if request is not None:
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+        await coordinator.async_shutdown()
+
+
 def _garden_coordinator(
     hass: HomeAssistant, monkeypatch: MonkeyPatch, api: _GardenApiStub,
 ) -> tuple[VivosunCoordinator, _AwsAuthStub]:
@@ -971,7 +1078,7 @@ async def test_shutdown_abandons_pending_discovery_and_restart_uses_new_lifecycl
     coordinator, aws = _garden_coordinator(hass, monkeypatch, api)
     entry = MockConfigEntry(domain=DOMAIN, title="Gardens", data={})
     entry.add_to_hass(hass)
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     coordinator.set_garden_topology(GardenTopology(hass, entry.entry_id))
     prior = coordinator.garden_inventory
     received: list[tuple[str, ...]] = []
@@ -1006,7 +1113,7 @@ async def test_shutdown_abandons_pending_discovery_and_restart_uses_new_lifecycl
     assert prior is not None
 
     aws.queue_credentials(_credentials(datetime.now(tz=UTC) + timedelta(hours=1)))
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     coordinator.set_garden_topology(GardenTopology(hass, entry.entry_id))
     assert coordinator.garden_inventory == api.gardens
     assert registry.async_get_device_by_identifier((DOMAIN, "device-3"), entry.entry_id) is not None
@@ -1019,7 +1126,7 @@ async def test_superseded_subscription_cannot_commit_and_recovery_adds_once(
 ) -> None:
     api = _GardenApiStub()
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     original_inventory = coordinator.garden_inventory
     new_device = DeviceInfo("device-3", "thing-3", "topic/3", "Third", True, 66079, "controller")
     api.devices.append(new_device)
@@ -1066,7 +1173,7 @@ async def test_retained_routes_cannot_be_reassigned_to_different_device(
 ) -> None:
     api = _GardenApiStub()
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     before = coordinator.garden_inventory
     mqtt = _MqttStub.instances[0]
     subscribed_before = tuple(mqtt.subscribed_topics)
@@ -1099,7 +1206,7 @@ async def test_empty_account_needs_verified_garden_to_bootstrap(
     coordinator, aws = _garden_coordinator(hass, monkeypatch, api)
     try:
         with pytest.raises(VivosunResponseError, match="No devices found"):
-            await coordinator.async_start()
+            await _start_gardens(coordinator)
         assert "get_aws_identity" not in api.calls
         assert aws.calls == []
     finally:
@@ -1116,7 +1223,7 @@ async def test_verified_garden_only_account_registers_service_device(
     entry = MockConfigEntry(domain=DOMAIN, title="Account", data={})
     entry.add_to_hass(hass)
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         coordinator.set_garden_topology(GardenTopology(hass, entry.entry_id))
         garden = dr.async_get(hass).async_get_device_by_identifier(
             (DOMAIN, f"garden:{entry.entry_id}:100"), entry.entry_id,
@@ -1138,7 +1245,7 @@ async def test_garden_only_expired_auth_recovers_without_mqtt(
     api.gardens = GardenInventory((Garden(100, 600, "Empty Garden", "UTC", ()),))
     coordinator, aws = _garden_coordinator(hass, monkeypatch, api)
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         old = api.tokens
         api.tokens = replace(old, access_token="renewed")
         attempts: list[AuthTokens] = []
@@ -1173,7 +1280,7 @@ async def test_concurrent_garden_reads_share_authentication_recovery(
     api.gardens = GardenInventory(tuple(Garden(i, 600, "Garden", "UTC", ()) for i in (10, 20, 30)))
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         old = api.tokens
         api.tokens = replace(old, access_token="renewed")
         login = api.login
@@ -1202,7 +1309,7 @@ async def test_inventory_topic_prefix_change_subscribes_new_route(
     api = _GardenApiStub()
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         mqtt = coordinator._mqtt_client
         assert isinstance(mqtt, _MqttStub)
         api.devices = [replace(device, topic_prefix="replacement/topic") if device.device_id == "device-1"
@@ -1226,7 +1333,7 @@ async def test_periodic_discovery_runs_without_coordinator_entities_and_cancels_
                    if initial_kind == "camera" else [])
     api.gardens = GardenInventory((Garden(10, 600, "Empty", "UTC", ()),))
     coordinator, aws = _garden_coordinator(hass, monkeypatch, api)
-    await coordinator.async_start()
+    await _start_gardens(coordinator)
     received: list[tuple[str, ...]] = []
     coordinator.async_add_discovery_listener(lambda devices: received.append(tuple(d.device_id for d in devices)))
     assert received == [()]
@@ -1576,7 +1683,7 @@ async def test_latest_mqtt_event_survives_newer_manual_inventory_during_blocked_
     entry: MockConfigEntry | None = None
     platform: EntityPlatform | None = None
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         entry, platform = await _setup_native_garden_sensors(hass, coordinator)
         old = api.plans[66078]
         latest = _seedling_garden_recipe(66078, active=True)
@@ -1635,7 +1742,7 @@ async def test_cancelling_inventory_waiter_does_not_cancel_later_mqtt_stage_chan
     coordinator, _ = _garden_coordinator(hass, monkeypatch, api)
     entered, release = asyncio.Event(), asyncio.Event()
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         previous = api.plans[66078]
         latest = _seedling_garden_recipe(66078, active=True)
         real_read = api.get_garden_plans
@@ -1680,7 +1787,7 @@ async def test_mixed_inventory_and_event_garden_reads_share_three_slots(
     active = peak = 0
     refresh: asyncio.Task[None] | None = None
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         api.gardens = GardenInventory((*api.gardens.gardens, *(
             Garden(66081 + i, 600, f"Additional {i}", "UTC", ()) for i in range(4)
         )))
@@ -1740,7 +1847,7 @@ async def test_capture_restores_bounded_known_stage_api_evidence_without_normal_
     monkeypatch.setattr(client, "_request_json", response)
     api.get_plan_stage_info = client.get_plan_stage_info  # type: ignore[method-assign]
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         mqtt = _MqttStub.instances[0]
         topic = TOPIC_SHADOW_UPDATE_ACCEPTED.format(thing="thing-1")
         reported = b'{"state":{"reported":{"plan":{"stage1":{"startT":1,"contId":"abc+seed"}}}}}'
@@ -1801,7 +1908,7 @@ async def test_capture_known_stage_failures_bounds_and_stop_cancel_pending_reads
 
     api.get_plan_stage_info = blocked  # type: ignore[method-assign]
     try:
-        await coordinator.async_start()
+        await _start_gardens(coordinator)
         await coordinator.async_start_support_capture(max_events=10)
         mqtt = _MqttStub.instances[0]
         topic = TOPIC_SHADOW_UPDATE_ACCEPTED.format(thing="thing-1")
