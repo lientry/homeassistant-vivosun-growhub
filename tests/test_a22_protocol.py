@@ -8,8 +8,6 @@ import pytest
 
 from custom_components.vivosun_growhub.a22 import (
     a22_offset_to_time,
-    a22_temperature_from_raw,
-    a22_temperature_to_raw,
     a22_time_to_offset,
     build_a22_auto_setting,
     build_a22_cycle_setting,
@@ -226,17 +224,3 @@ def test_a22_clock_is_unzoned_wallclock_seconds_of_day() -> None:
         a22_time_to_offset(time(17, tzinfo=UTC))
     with pytest.raises(ValueError):
         a22_time_to_offset(time(17, 0, 0, 1))
-
-
-def test_a22_temperature_scales_celsius_and_fahrenheit() -> None:
-    assert a22_temperature_to_raw(21.1, "°C") == 2110
-    assert a22_temperature_to_raw(70, "°F") == 2110
-    assert a22_temperature_to_raw(-5, "°C") == -500
-    assert a22_temperature_from_raw(2110, "°C") == 21.1
-    assert a22_temperature_from_raw(2110, "°F") == 70.0
-    assert a22_temperature_from_raw(a22_temperature_to_raw(70, "°F"), "°F") == 70.0
-    for value in (float("nan"), float("inf"), True, -50, 200):
-        with pytest.raises(ValueError):
-            a22_temperature_to_raw(value, "°C")
-    with pytest.raises(ValueError):
-        a22_temperature_to_raw(20, "K")

@@ -9,16 +9,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import time
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from .ports import A22_PORTS, PortReport, reported_port
 
 _MODEL = "VSPLUGA22"
 _MODES = (0, 1, 2)  # Manual, Cycle, Auto; Recipe is not part of this API.
 _MAX_DURATION_SECONDS = 86_400
-_TEMP_MIN_C = Decimal("-40")
-_TEMP_MAX_C = Decimal("125")
-_TENTH = Decimal("0.1")
+_TEMP_MIN_C = -40
+_TEMP_MAX_C = 125
 
 
 @dataclass(frozen=True)
@@ -183,36 +181,6 @@ def a22_offset_to_time(seconds: int) -> time:
     return time(seconds // 3600, seconds // 60 % 60, seconds % 60)
 
 
-def a22_temperature_to_raw(value: int | float | Decimal, unit: str) -> int:
-    """Convert UI temperature into captured 0.1°C steps stored as centi-Celsius.
-
-    The -40..125°C input envelope is a conservative sensor-based UI safeguard,
-    not a verified device firmware threshold-setter range.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
-        raise ValueError("Invalid A22 temperature")
-    try:
-        degrees = Decimal(str(value))
-        if not degrees.is_finite():
-            raise ValueError("Invalid A22 temperature")
-        celsius = degrees if unit == "°C" else (degrees - 32) * 5 / 9 if unit == "°F" else None
-        if celsius is None or not _TEMP_MIN_C <= celsius <= _TEMP_MAX_C:
-            raise ValueError("A22 temperature outside conservative supported display range")
-        return int(celsius.quantize(_TENTH, rounding=ROUND_HALF_UP) * 100)
-    except InvalidOperation as exc:
-        raise ValueError("Invalid A22 temperature") from exc
-
-
-def a22_temperature_from_raw(raw: int, unit: str) -> float:
-    """Display genuine raw centi-Celsius thresholds in HA Celsius or Fahrenheit."""
-    _validate_threshold("tMax", raw)
-    celsius = Decimal(raw) / 100
-    degrees = celsius if unit == "°C" else celsius * 9 / 5 + 32 if unit == "°F" else None
-    if degrees is None:
-        raise ValueError("Unsupported A22 temperature unit")
-    return float(degrees.quantize(_TENTH, rounding=ROUND_HALF_UP))
-
-
 def _integer(mapping: Mapping[str, object], field: str) -> int | None:
     value = mapping.get(field)
     return value if type(value) is int else None
@@ -242,7 +210,7 @@ def _validate_threshold(field: str, raw: int) -> None:
     if type(raw) is not int:
         raise ValueError("A22 threshold requires an integer")
     if field in ("tMin", "tMax"):
-        if not int(_TEMP_MIN_C * 100) <= raw <= int(_TEMP_MAX_C * 100):
+        if not _TEMP_MIN_C * 100 <= raw <= _TEMP_MAX_C * 100:
             raise ValueError("A22 temperature outside conservative sensor envelope")
     elif field in ("hMin", "hMax"):
         if not 0 <= raw <= 10_000:

@@ -123,6 +123,8 @@ class VivosunA22Number(CoordinatorEntity[VivosunCoordinator], NumberEntity):  # 
         raw = round(value * scale)
         if abs(value * scale - raw) > 1e-6:
             raise ValueError("A22 setting precision is invalid")
+        if self._field in ("tMin", "tMax") and raw % 10:
+            raise ValueError("A22 temperature step must be 0.1°C")
         await self.coordinator.async_set_a22_setting(
             self._device_id, self._port, "cycle" if self._field.endswith("Dur") else "auto", self._field, raw,
         )

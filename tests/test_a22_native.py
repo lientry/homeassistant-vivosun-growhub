@@ -12,7 +12,7 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
 from custom_components.vivosun_growhub.coordinator import VivosunCoordinator
@@ -250,6 +250,17 @@ async def test_native_ha_time_number_select_services_and_manual_sequence(hass: H
         await coordinator.async_shutdown()
         for platform in platforms:
             await platform.async_reset()
+
+
+async def test_temperature_native_write_rejects_sub_tenth_celsius(hass: HomeAssistant) -> None:
+    coordinator, mqtt = _setup(hass)
+    try:
+        threshold = VivosunA22Number(coordinator, "a22-1", "usb1", "tMax")
+        with pytest.raises(ValueError, match=r"0\.1°C"):
+            await threshold.async_set_native_value(21.11)
+        assert mqtt.published == []
+    finally:
+        await coordinator.async_shutdown()
 
 
 async def test_manual_first_and_second_publish_failures_do_not_retry(hass: HomeAssistant) -> None:
