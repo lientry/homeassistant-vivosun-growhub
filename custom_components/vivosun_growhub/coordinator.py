@@ -936,13 +936,17 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         timestamp = raw_timestamp if type(raw_timestamp) is int and raw_timestamp >= 0 else None
         previous = self._e25_selection_provenance.get(device_id)
         incoming = _ReportedFieldProvenance(version, timestamp)
-        if not _reported_field_is_fresh(previous, incoming, topic):
+        # A newer shadow version orders selection changes within the same second.
+        if not _reported_field_is_fresh(previous, incoming, topic) and not (
+            previous is not None and previous.version is not None
+            and version is not None and version > previous.version
+            and timestamp is not None and timestamp == previous.timestamp
+        ):
             return
         selection = reported["ctrlTyp"]
-        # Unknown control types do not prove any terminal has been deselected.
-        # Still advance ordering so an older report cannot undo this observation.
         self._e25_selection_provenance[device_id] = incoming
-        if type(selection) is not int or selection not in (2, 4, 5):
+        # Malformed data keeps the last selection; unknown integers map to no controls.
+        if type(selection) is not int:
             return
         changed = self._e25_selection.get(device_id) != selection
         self._e25_selection[device_id] = selection

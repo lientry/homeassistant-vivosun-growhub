@@ -35,12 +35,10 @@ def watch_devices(
     factory: Callable[[DeviceInfo], Sequence[Entity]],
     *,
     cameras: bool = False,
-    incremental: bool = False,
     control_platform: EntityPlatform | None = None,
 ) -> None:
     """Add discoveries, retiring only confirmed deselected E25 platform controls."""
     seen: set[str] = set()
-    identities: set[str] = set()
     active_e25: dict[str, dict[str, Entity]] = {}
     pending_e25: dict[str, DeviceInfo] = {}
     retry_e25: dict[str, DeviceInfo] = {}
@@ -136,13 +134,10 @@ def watch_devices(
                 retry_counts.pop(device.device_id, None)
                 pending_e25[device.device_id] = device
                 continue
-            if not incremental and device.device_id in seen:
+            if device.device_id in seen:
                 continue
             try:
                 candidates = list(factory(device))
-                if incremental:
-                    candidates = [entity for entity in candidates
-                                  if entity.unique_id is not None and entity.unique_id not in identities]
                 if not candidates:
                     continue
                 async_add_entities(candidates)
@@ -150,7 +145,6 @@ def watch_devices(
                 _LOGGER.exception("Device entity discovery failed; will retry on next inventory")
                 continue
             seen.add(device.device_id)
-            identities.update(entity.unique_id for entity in candidates if entity.unique_id is not None)
         if not retry_e25 and retry_cancel is not None:
             retry_cancel()
             retry_cancel = None

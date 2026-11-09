@@ -78,7 +78,7 @@ async def async_setup_entry(
         return result
 
     platform = async_get_current_platform()
-    watch_devices(entry, coordinator, async_add_entities, factory, incremental=True, control_platform=platform)
+    watch_devices(entry, coordinator, async_add_entities, factory, control_platform=platform)
     platform.async_register_entity_service(
         "set_duct_fan_auto_threshold",
         {

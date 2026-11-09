@@ -134,9 +134,39 @@ async def test_sparse_desired_stale_and_invalid_e25_reports(hass: HomeAssistant)
     await _report(coordinator, "4", version=5, timestamp=500)
     assert coordinator.supports_control(DEVICE.device_id, "dFan")
     await _report(coordinator, True, version=6, timestamp=600)
-    await _report(coordinator, 3, version=7, timestamp=700)
     assert coordinator.supports_control(DEVICE.device_id, "dFan")
-    assert not coordinator.supports_control(DEVICE.device_id, "light")
+    await _report(coordinator, 3, version=7, timestamp=700)
+    assert coordinator.selected_controls(DEVICE.device_id) == frozenset()
+
+
+@pytest.mark.parametrize(("selection", "timestamp", "expected"), [
+    (4, 1000, VivosunCirculationFanEntity), (3, 1001, None),
+])
+async def test_new_e25_selection_withdraws_stale_terminal_and_recovers(
+    hass: HomeAssistant, selection: int, timestamp: int, expected: type[VivosunCirculationFanEntity] | None,
+) -> None:
+    coordinator = _coordinator(hass)
+    await _report(coordinator, 5, version=20, timestamp=1000)
+    async with _platforms(hass, coordinator) as (_, fan_platform, _):
+        old = next(iter(fan_platform.entities.values()))
+        await _report(coordinator, selection, version=21, timestamp=timestamp)
+        await hass.async_block_till_done()
+        assert {type(entity) for entity in fan_platform.entities.values()} == ({expected} if expected else set())
+        assert old.entity_id not in fan_platform.entities and not old.available
+        assert er.async_get(hass).async_get(old.entity_id) is not None
+        with pytest.raises(ServiceValidationError):
+            await old.async_set_percentage(30)
+        coordinator.async_publish_selected_fan_level.assert_not_awaited()
+
+        await _report(coordinator, 5, version=20, timestamp=1000)
+        await _report(coordinator, 5, version=22, timestamp=999)
+        await hass.async_block_till_done()
+        assert old.entity_id not in fan_platform.entities
+
+        await _report(coordinator, 4, version=23, timestamp=timestamp)
+        await hass.async_block_till_done()
+        assert len(fan_platform.entities) == 1
+        assert isinstance(next(iter(fan_platform.entities.values())), VivosunCirculationFanEntity)
 
 
 async def test_e25_discovery_is_incremental_and_retains_native_registry(
@@ -494,7 +524,6 @@ async def test_e25_sparse_invalid_stale_and_disconnected_reports_preserve_platfo
         await _report(coordinator, 5, desired=True, version=3, timestamp=300)
         await _report(coordinator, include_selection=False, version=4, timestamp=400)
         await _report(coordinator, "5", version=5, timestamp=500)
-        await _report(coordinator, 3, version=6, timestamp=600)
         coordinator._mqtt_client.is_connected = False
         coordinator._notify_shadow_changed()
         await hass.async_block_till_done()

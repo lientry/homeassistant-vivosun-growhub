@@ -43,7 +43,7 @@ async def async_setup_entry(
     watch_devices(entry, coordinator, async_add_entities, lambda device: [
         VivosunLightEntity(coordinator, device.device_id)
     ] if control_is_selected(coordinator, device.device_id, "light") else [],
-        incremental=True, control_platform=async_get_current_platform())
+        control_platform=async_get_current_platform())
 
 
 class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  # type: ignore[misc]
