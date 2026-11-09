@@ -96,7 +96,7 @@ def test_parse_shadow_document_full_reported_state() -> None:
         "manual_level": 35,
         "oscillating": True,
     }
-    assert parsed["dFan"]["auto_enabled"] is True
+    assert parsed["dFan"]["mode"] == 1
     assert parsed["dFan"]["auto"]["tMin"] is None
     assert parsed["dFan"]["auto"]["hMin"] is None
     assert parsed["dFan"]["auto"]["vpdMax"] is None
@@ -153,6 +153,14 @@ def test_parse_shadow_document_falls_back_to_desired_when_reported_missing() -> 
         "on": True,
         "target_humidity": 5500,
     }
+
+
+def test_desired_only_duct_fan_is_not_classified_as_reported_state() -> None:
+    parsed = parse_shadow_document({"state": {"desired": {
+        "dFan": {"mode": 2, "lv": 30, "manu": {"lv": 35}},
+    }}})
+    assert "dFan" not in parsed
+    assert "dFan" not in parsed["reported_supported"]
 
 
 def test_parse_shadow_delta_fragment_for_partial_updates() -> None:

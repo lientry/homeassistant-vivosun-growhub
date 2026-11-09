@@ -131,7 +131,6 @@ class DuctFanState(TypedDict, total=False):
     mode: int | None
     level: int | None
     manual_level: int | None
-    auto_enabled: bool
     auto: DuctFanAutoState
 
 
@@ -234,10 +233,10 @@ class ChannelSensorState(TypedDict, total=False):
     rssi: int | None
 
 
-def parse_shadow_document(document: dict[str, object], *, dfan_auto_mode: int = MODE_AUTO) -> ShadowV1State:
+def parse_shadow_document(document: dict[str, object]) -> ShadowV1State:
     """Parse a full shadow payload (`get/accepted` or `update/documents`)."""
     reported = _extract_reported(document)
-    return parse_reported_fragment(reported, dfan_auto_mode=dfan_auto_mode)
+    return parse_reported_fragment(reported)
 
 
 def extract_shadow_reported(document: dict[str, object]) -> dict[str, object] | None:
@@ -299,9 +298,7 @@ def accepted_desired_light_level_timestamp(document: dict[str, object]) -> int |
     return response_timestamp if type(response_timestamp) is int and response_timestamp >= 0 else None
 
 
-def parse_reported_fragment(
-    reported_fragment: dict[str, object], *, dfan_auto_mode: int = MODE_AUTO
-) -> ShadowV1State:
+def parse_reported_fragment(reported_fragment: dict[str, object]) -> ShadowV1State:
     """Parse partial/full reported-like fragments into normalized v1 state."""
     parsed: ShadowV1State = {
         "reported_supported": {
@@ -326,7 +323,7 @@ def parse_reported_fragment(
 
     dfan_raw = _as_dict(reported_fragment.get(SHADOW_KEY_DUCT_FAN))
     if dfan_raw is not None:
-        parsed["dFan"] = _parse_dfan_state(dfan_raw, auto_mode=dfan_auto_mode)
+        parsed["dFan"] = _parse_dfan_state(dfan_raw)
 
     hmdf_raw = _as_dict(reported_fragment.get(SHADOW_KEY_HUMIDIFIER))
     if hmdf_raw is not None:
@@ -558,29 +555,19 @@ def build_dhmdf_on_payload(on: bool) -> dict[str, object]:
 
 
 def _extract_reported(document: dict[str, object]) -> dict[str, object]:
-    state = _as_dict(document.get(SHADOW_ROOT_STATE))
-    if state is not None:
-        reported = _as_dict(state.get(SHADOW_ROOT_REPORTED))
-        if reported is not None:
-            return reported
+    reported = extract_shadow_reported(document)
+    if reported is not None:
+        return reported
 
-    current = _as_dict(document.get("current"))
-    if current is not None:
-        current_state = _as_dict(current.get(SHADOW_ROOT_STATE))
-        if current_state is not None:
-            reported = _as_dict(current_state.get(SHADOW_ROOT_REPORTED))
-            if reported is not None:
-                return reported
+    state = _as_dict(document.get(SHADOW_ROOT_STATE))
 
     if state is not None:
         desired = _as_dict(state.get("desired"))
         if desired is not None:
-            # Existing light/fan controls retain their legacy desired-only fallback.
-            # Physical output and VSeed state require device-reported values.
-            return {
-                key: value for key, value in desired.items()
-                if key not in ("seed", "usb1", "usb2", "plug1", "plug2")
-            }
+            # Preserve legacy desired-only startup state for other channels.
+            # Duct fan output/mode, VSeed and physical ports need real reports.
+            return {key: value for key, value in desired.items()
+                    if key not in ("dFan", "seed", "usb1", "usb2", "plug1", "plug2")}
 
     raise ShadowParseError("Shadow payload does not include state.reported or state.desired")
 
@@ -625,20 +612,16 @@ def _parse_cfan_state(cfan: dict[str, object]) -> CirculatorFanState:
     return result
 
 
-def _parse_dfan_state(dfan: dict[str, object], *, auto_mode: int) -> DuctFanState:
-    """Keep absent fields out of partial reported updates."""
+def _parse_dfan_state(dfan: dict[str, object]) -> DuctFanState:
+    """Keep actual root output separate from the stored manual selection."""
     result: DuctFanState = {}
     if SHADOW_KEY_MODE in dfan:
-        mode = _as_int(dfan[SHADOW_KEY_MODE])
-        result["mode"] = mode
-        result["auto_enabled"] = mode == auto_mode
+        result["mode"] = _as_int(dfan[SHADOW_KEY_MODE])
     manu = _as_dict(dfan.get(SHADOW_KEY_MANU))
     if manu is not None and SHADOW_KEY_LEVEL in manu:
         result["manual_level"] = _as_int(manu[SHADOW_KEY_LEVEL])
     if SHADOW_KEY_LEVEL in dfan:
         result["level"] = _as_int(dfan[SHADOW_KEY_LEVEL])
-    elif "manual_level" in result:
-        result["level"] = result["manual_level"]
 
     auto = _as_dict(dfan.get(SHADOW_KEY_AUTO))
     if auto is not None:

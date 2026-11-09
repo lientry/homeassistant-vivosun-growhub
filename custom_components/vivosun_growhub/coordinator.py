@@ -100,7 +100,7 @@ def _garden_read_failure_category(error: Exception) -> str:
     return "unexpected"
 
 _Channel: TypeAlias = Literal["light", "cFan", "dFan"]
-_Field: TypeAlias = Literal["level", "mode"]
+_Field: TypeAlias = Literal["level", "mode", "manual_level"]
 _FieldKey: TypeAlias = tuple[str, _Channel, _Field]
 _CONTROLLER_CHANNELS: tuple[_Channel, ...] = ("light", "cFan", "dFan")
 
@@ -241,6 +241,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
         # Per-device state keyed by device_id
         self._shadow_states: dict[str, dict[str, object]] = {}
+        self._e25_selection: dict[str, int | None] = {}
+        self._e25_selection_provenance: dict[str, _ReportedFieldProvenance] = {}
         self._pending_fields: dict[_FieldKey, _PendingField] = {}
         self._reported_fields: dict[_FieldKey, _ReportedFieldProvenance] = {}
         self._has_reported_fields: set[_FieldKey] = set()
@@ -389,6 +391,17 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 return d
         return None
 
+    def selected_controls(self, device_id: str) -> frozenset[str]:
+        """Resolve E25 controls from last ordered reported port selection."""
+        from .controls import selected_controls
+
+        device = self.get_device(device_id)
+        return selected_controls(device, self._e25_selection.get(device_id)) if device is not None else frozenset()
+
+    def supports_control(self, device_id: str, control: str) -> bool:
+        """Expose selected control eligibility to discovery and retained entities."""
+        return control in self.selected_controls(device_id)
+
     @property
     def is_mqtt_connected(self) -> bool:
         """Return MQTT transport connectivity state."""
@@ -486,6 +499,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._devices.clear()
             self._camera_devices.clear()
             self._shadow_states.clear()
+            self._e25_selection.clear()
+            self._e25_selection_provenance.clear()
             for pending in self._pending_fields.values():
                 pending.timeout.cancel()
             self._pending_fields.clear()
@@ -727,10 +742,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             # Desired-only startup fallback is not confirmed physical readback.
             if key not in self._has_reported_fields and isinstance(confirmed, dict):
                 confirmed.pop(field, None)
-                if field == "level":
+                if field == "level" and channel != "dFan":
                     confirmed.pop("manual_level", None)
-                elif channel == "dFan":
-                    confirmed.pop("auto_enabled", None)
             previous = self._pending_fields.pop(key, None)
             superseded: frozenset[int] = frozenset()
             if previous is not None:
@@ -838,7 +851,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             if not isinstance(component, dict):
                 # Legacy desired-only startup values remain visible until
                 # a real report or local command establishes the boundary.
-                if any(
+                # Duct output and mode must always come from genuine reported state.
+                if channel == "dFan" or any(
                     key[0] == device_id and key[1] == channel
                     for key in self._has_reported_fields | self._locally_commanded_fields
                 ):
@@ -856,7 +870,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             ):
                 cast("dict[str, object]", parsed).pop("light", None)
                 continue
-            fields: tuple[_Field, ...] = ("level", "mode") if channel == "dFan" else ("level",)
+            fields: tuple[_Field, ...] = (
+                ("level", "mode", "manual_level") if channel == "dFan" else ("level",)
+            )
             for field in fields:
                 if field not in projected:
                     continue
@@ -887,10 +903,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 )
                 if ambiguous_get or stale:
                     cast("dict[str, object]", projected).pop(field, None)
-                    if field == "level":
+                    if field == "level" and channel != "dFan":
                         cast("dict[str, object]", projected).pop("manual_level", None)
-                    elif channel == "dFan":
-                        cast("dict[str, object]", projected).pop("auto_enabled", None)
                     continue
                 # Missing metadata cannot erase previously known leaf ordering.
                 self._reported_fields[key] = _ReportedFieldProvenance(
@@ -904,6 +918,41 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self.data = self._build_state_snapshot()
         self._notify_garden_listeners()
         self.async_update_listeners()
+
+    def _record_e25_selection(self, device_id: str, document: dict[str, object], topic: str) -> None:
+        """Accept only ordered reported ctrlTyp, not desired or projected component blocks."""
+        reported = extract_shadow_reported(document)
+        if not isinstance(reported, dict) or "ctrlTyp" not in reported:
+            return
+        body = document.get("current", document)
+        if not isinstance(body, dict):
+            return
+        raw_version = body.get("version")
+        version = raw_version if type(raw_version) is int and raw_version >= 0 else None
+        metadata = body.get("metadata")
+        metadata = metadata.get("reported") if isinstance(metadata, dict) else None
+        field = metadata.get("ctrlTyp") if isinstance(metadata, dict) else None
+        raw_timestamp = field.get("timestamp") if isinstance(field, dict) else None
+        timestamp = raw_timestamp if type(raw_timestamp) is int and raw_timestamp >= 0 else None
+        previous = self._e25_selection_provenance.get(device_id)
+        incoming = _ReportedFieldProvenance(version, timestamp)
+        if not _reported_field_is_fresh(previous, incoming, topic):
+            return
+        selection = reported["ctrlTyp"]
+        # Unknown control types do not prove any terminal has been deselected.
+        # Still advance ordering so an older report cannot undo this observation.
+        self._e25_selection_provenance[device_id] = incoming
+        if type(selection) is not int or selection not in (2, 4, 5):
+            return
+        changed = self._e25_selection.get(device_id) != selection
+        self._e25_selection[device_id] = selection
+        if changed:
+            for callback, cameras_only in tuple(self._device_listeners):
+                if not cameras_only:
+                    try:
+                        callback(self.devices)
+                    except Exception:
+                        self._logger.exception("E25 control discovery callback failed")
 
     def _resolve_device(self, device_id: str | None) -> DeviceInfo:
         """Resolve a device_id to DeviceInfo, defaulting to primary."""
@@ -1423,13 +1472,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 ):
                     document = self._parse_json_object(payload)
                     device = self.get_device(device_id)
-                    auto_mode = (
-                        E42A_DFAN_AUTO_MODE
-                        if device and client_model_token(device.client_id) == "VSCTLE42A"
-                        else MODE_AUTO
-                    )
-                    parsed_shadow = parse_shadow_document(document, dfan_auto_mode=auto_mode)
+                    parsed_shadow = parse_shadow_document(document)
                     if device is not None and device.device_type == "controller":
+                        if client_model_token(device.client_id) == "VSCTL002":
+                            self._record_e25_selection(device_id, document, topic)
                         reported = extract_shadow_reported(document)
                         self._record_reported_spectrum(device_id, document, reported, topic)
                         self._record_reported_manual_facts(device_id, document, reported, topic)
@@ -2046,14 +2092,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             if not isinstance(component, dict):
                 continue
             component[field] = pending.value
-            if channel == "dFan" and field == "mode":
-                device = self.get_device(device_id)
-                auto_mode = (
-                    E42A_DFAN_AUTO_MODE
-                    if device is not None and client_model_token(device.client_id) == "VSCTLE42A"
-                    else MODE_AUTO
-                )
-                component["auto_enabled"] = pending.value == auto_mode
         return snapshot
 
     async def _async_refresh_stale_shadow_states(self) -> None:
@@ -2259,14 +2297,16 @@ def _fan_level_timestamp(document: dict[str, object], channel: str, *, reported:
     state_root = state.get("reported" if reported else "desired") if isinstance(state, dict) else None
     raw_component = state_root.get(channel) if isinstance(state_root, dict) else None
     raw_manual = raw_component.get("manu") if isinstance(raw_component, dict) else None
-    # Duct fan treats any present root lv (including explicit null) as final.
-    # Circulation fan falls back to manu.lv when root lv is invalid.
+    # Duct actual output exists only at reported root lv, including explicit null.
+    # Circulation fan may select manu.lv when root lv is missing/invalid.
     use_direct = reported and isinstance(raw_component, dict) and "lv" in raw_component and (
         channel == "dFan"
         or type(raw_component["lv"]) is int
         or not isinstance(raw_manual, dict)
         or "lv" not in raw_manual
     )
+    if reported and channel == "dFan" and not use_direct:
+        return None
     metadata = document.get("metadata")
     root = metadata.get("reported" if reported else "desired") if isinstance(metadata, dict) else None
     component = root.get(channel) if isinstance(root, dict) else None
@@ -2290,6 +2330,14 @@ def _mode_timestamp(document: dict[str, object], channel: str, *, reported: bool
 def _reported_field_timestamp(document: dict[str, object], channel: _Channel, field: _Field) -> int | None:
     if field == "mode":
         return _mode_timestamp(document, channel, reported=True)
+    if field == "manual_level":
+        metadata = document.get("metadata")
+        reported = metadata.get("reported") if isinstance(metadata, dict) else None
+        raw_channel = reported.get(channel) if isinstance(reported, dict) else None
+        manual = raw_channel.get("manu") if isinstance(raw_channel, dict) else None
+        leaf = manual.get("lv") if isinstance(manual, dict) else None
+        timestamp = leaf.get("timestamp") if isinstance(leaf, dict) else None
+        return timestamp if type(timestamp) is int and timestamp >= 0 else None
     if channel == "light":
         return reported_light_level_timestamp(document)
     return _fan_level_timestamp(document, channel, reported=True)

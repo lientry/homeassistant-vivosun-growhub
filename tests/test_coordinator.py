@@ -1608,7 +1608,6 @@ async def test_e42a_auto_mode_survives_level_only_accepted_update(
     )
     dfan = coordinator.data["shadows"][device.device_id]["dFan"]
     assert dfan["mode"] == 2
-    assert dfan["auto_enabled"] is True
     assert dfan["level"] == 20
     assert dfan["auto"]["tMax"] == 2797
 
