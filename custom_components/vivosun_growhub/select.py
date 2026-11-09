@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.const import EntityCategory
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -14,6 +15,8 @@ from .const import DOMAIN, OPTION_SPECTRUM_CONTROLLERS
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
+from .models import client_model_token
+from .ports import A22_PORTS
 from .shadow import build_light_spectrum_payload
 from .vseed import STAGES, command, reported_seed, stage_name
 
@@ -60,6 +63,8 @@ async def async_setup_entry(
     if coordinator is None:
         return
     def factory(device: VivosunDeviceInfo) -> list[SelectEntity]:
+        if client_model_token(device.client_id) == "VSPLUGA22":
+            return [VivosunA22ModeSelect(coordinator, device.device_id, port) for port in A22_PORTS]
         if device.device_type == "curing_box":
             return [VivosunCureModeSelect(coordinator, device.device_id)]
         if device.device_type == "vseed":
@@ -70,6 +75,43 @@ async def async_setup_entry(
         return []
 
     watch_devices(entry, coordinator, async_add_entities, factory)
+
+
+class VivosunA22ModeSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]
+    """Configure the A22 firmware mode for one physical output."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:cog-outline"
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str, port: str) -> None:
+        super().__init__(coordinator)
+        if port not in A22_PORTS:
+            raise ValueError("Unknown A22 port")
+        self._device_id = device_id
+        self._port = port
+        self._attr_options = ["Manual", "Cycle", "Auto"]
+        label = port.upper() if port.startswith("usb") else f"Outlet {port[-1]}"
+        self._attr_name = f"{label} Mode"
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_{port}_mode"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(self.coordinator, self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return is_entity_available(self.coordinator, self._device_id)
+
+    @property
+    def current_option(self) -> str | None:
+        mode = self.coordinator.a22_settings(self._device_id, self._port).status.mode
+        return self._attr_options[mode] if type(mode) is int and mode in (0, 1, 2) else None
+
+    async def async_select_option(self, option: str) -> None:
+        if option not in self._attr_options:
+            raise ServiceValidationError("Unsupported A22 mode")
+        await self.coordinator.async_set_a22_mode(self._device_id, self._port, self._attr_options.index(option))
 
 
 class VivosunSpectrumSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]

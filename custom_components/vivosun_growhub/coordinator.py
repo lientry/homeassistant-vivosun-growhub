@@ -12,9 +12,18 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar, cast
 from uuid import uuid4
 
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .a22 import (
+    A22Settings,
+    build_a22_auto_setting,
+    build_a22_cycle_setting,
+    finish_a22_manual_change,
+    make_a22_mode_change,
+    read_a22_settings,
+)
 from .api import VivosunApiClient
 from .aws_auth import AWS_CREDENTIAL_REFRESH_SKEW, AwsAuthClient, AwsCredentials
 from .const import (
@@ -39,6 +48,7 @@ from .gardens import GardenPlanRead
 from .model_metadata import support_capture_model_metadata
 from .models import CaptureDevice, client_model_token
 from .mqtt_client import MQTTClient, MQTTConnectionError, MQTTError
+from .ports import A22_PORTS, build_manual_port_payload
 from .redaction import redact_identifier
 from .shadow import (
     ChannelSensorState,
@@ -135,6 +145,48 @@ class _ReportedFieldProvenance:
 
     version: int | None
     timestamp: int | None
+
+
+_A22_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
+    ("mode",), ("inPlan",), ("lv",), ("dev",), ("manu", "lv"),
+    ("cycle", "tOffset"), ("cycle", "onDur"), ("cycle", "offDur"),
+    ("auto", "tMin"), ("auto", "tMax"), ("auto", "hMin"), ("auto", "hMax"),
+)
+_A22_GUARDS = (("mode",), ("inPlan",))
+_A22_STATE_ROOTS = frozenset({path[0] for path in _A22_FIELD_PATHS})
+_A22_GROUPS = {
+    "mode": ("mode",),
+    "manual": ("manu", "lv"),
+    "tOffset": ("cycle", "tOffset"),
+    "onDur": ("cycle", "onDur"), "offDur": ("cycle", "onDur"),
+    "tMin": ("auto", "tMin"), "tMax": ("auto", "tMin"),
+    "hMin": ("auto", "hMin"), "hMax": ("auto", "hMin"),
+}
+
+
+@dataclass(slots=True)
+class _A22Pending:
+    """Requested leaves and genuine readback progress for one atomic device edit."""
+
+    token: str
+    expected: dict[tuple[str, ...], int]
+    baseline: dict[tuple[str, ...], _ReportedFieldProvenance]
+    confirmed: set[tuple[str, ...]]
+    reports: dict[tuple[str, ...], _ReportedFieldProvenance]
+    timeout: asyncio.TimerHandle
+    accepted_version: int | None = None
+    accepted_timestamps: dict[tuple[str, ...], int] | None = None
+
+
+@dataclass(slots=True)
+class _A22Receipt:
+    """A bounded token receipt survives report settlement for delayed rejection."""
+
+    device_id: str
+    port: str
+    group: tuple[str, ...]
+    paths: tuple[tuple[str, ...], ...]
+    timeout: asyncio.TimerHandle
 
 
 def _reported_field_is_fresh(
@@ -257,6 +309,14 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._manual_choice_lock = asyncio.Lock()
         self._confirmed_manual_facts: dict[tuple[str, str], dict[str, int | None]] = {}
         self._manual_fact_provenance: dict[tuple[str, str, str], _ReportedFieldProvenance] = {}
+        self._a22_reported: dict[tuple[str, str], dict[str, object]] = {}
+        self._a22_provenance: dict[tuple[str, str, tuple[str, ...]], _ReportedFieldProvenance] = {}
+        self._a22_last: dict[tuple[str, str, tuple[str, ...]], _ReportedFieldProvenance] = {}
+        self._a22_reads: dict[str, str] = {}
+        self._a22_pending: dict[tuple[str, str, tuple[str, ...]], _A22Pending] = {}
+        self._a22_receipts: dict[str, _A22Receipt] = {}
+        self._a22_generation: dict[tuple[str, str], int] = {}
+        self._a22_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._field_generation = 0
         self._sensor_states: dict[str, dict[str, object]] = {}
 
@@ -509,6 +569,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._locally_commanded_fields.clear()
             self._confirmed_spectrum.clear()
             self._spectrum_report_provenance.clear()
+            self._invalidate_a22()
+            self._a22_reported.clear()
+            self._a22_last.clear()
+            self._a22_reads.clear()
             self._last_accepted_manual_generation.clear()
             self._sensor_states.clear()
             self._client_id_to_device_id.clear()
@@ -590,6 +654,500 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 "qos": qos,
                 **summarize_support_capture_payload(encoded),
             },
+        )
+
+    def a22_settings(self, device_id: str, port: str) -> A22Settings:
+        """Read the independently confirmed A22 port projection, excluding desired state."""
+        self._check_a22_device(device_id, port)
+        return read_a22_settings("VSPLUGA22", self._a22_reported.get((device_id, port)))
+
+    def _check_a22_device(self, device_id: str, port: str) -> None:
+        device = self.get_device(device_id)
+        if device is None or client_model_token(device.client_id) != "VSPLUGA22" or port not in A22_PORTS:
+            raise ServiceValidationError("A22 settings require an exact VSPLUGA22 physical port")
+
+    def _a22_fresh(self, device_id: str, port: str, *paths: tuple[str, ...]) -> bool:
+        """Require versioned and timestamped genuine reports for every guarded leaf."""
+        return all(
+            (proof := self._a22_provenance.get((device_id, port, path))) is not None
+            and proof.version is not None and proof.timestamp is not None
+            for path in (*_A22_GUARDS, *paths)
+        )
+
+    def _a22_available(self, device_id: str) -> None:
+        if not self.is_mqtt_connected or self._shadow_connection_state(device_id) is False:
+            raise HomeAssistantError("A22 port is unavailable")
+
+    def _a22_require(self, device_id: str, port: str, *paths: tuple[str, ...]) -> A22Settings:
+        self._check_a22_device(device_id, port)
+        self._a22_available(device_id)
+        if not self._a22_fresh(device_id, port, *paths):
+            raise ServiceValidationError("A22 command requires fresh genuine reported facts")
+        settings = self.a22_settings(device_id, port)
+        if settings.status.mode not in (0, 1, 2) or settings.status.in_plan != 0:
+            raise ServiceValidationError("A22 command requires known mode and no active plan")
+        return settings
+
+    def _a22_pending_key(self, device_id: str, port: str, field: str) -> tuple[str, str, tuple[str, ...]]:
+        return (device_id, port, _A22_GROUPS[field])
+
+    async def async_set_a22_manual_power(self, device_id: str, port: str, on: bool) -> None:
+        """Route legacy physical power through the same per-port intent generation."""
+        settings = self._a22_require(device_id, port, ("lv",))
+        if settings.status.is_on is None:
+            raise HomeAssistantError("A22 port has no reported output level")
+        if not settings.status.can_write:
+            raise ServiceValidationError("A22 manual power requires reported Manual and no active plan")
+        key = (device_id, port)
+        self._a22_generation[key] = self._a22_generation.get(key, 0) + 1
+        try:
+            await self._publish_a22(
+                device_id, port, "manual", {("lv",): 100 if on else 0},
+                build_manual_port_payload(port, on), supersede=True,
+            )
+        except BaseException:
+            self._a22_provenance.pop((device_id, port, ("lv",)), None)
+            raise
+
+    def _a22_request_read(self, device_id: str) -> None:
+        """Request one fresh snapshot after uncertainty, never retry an actuator write."""
+        self._a22_reads.pop(device_id, None)
+
+        async def read() -> None:
+            try:
+                await self._async_request_shadow_refresh(device_id)
+            except (MQTTError, TimeoutError):
+                self._logger.warning("A22 recovery read unavailable; controls remain guarded")
+
+        if self.is_mqtt_connected and not self._shutdown_event.is_set():
+            self.hass.async_create_task(read())
+
+    def _a22_expire(
+        self, key: tuple[str, str, tuple[str, ...]], token: str, *, recover: bool = True,
+    ) -> None:
+        pending = self._a22_pending.get(key)
+        if pending is None or pending.token != token:
+            return
+        pending.timeout.cancel()
+        del self._a22_pending[key]
+        # An unconfirmed pair cannot justify another write using cached counterparts.
+        for path in pending.expected:
+            self._a22_provenance.pop((key[0], key[1], path), None)
+        if key[2] == _A22_GROUPS["mode"]:
+            port_key = (key[0], key[1])
+            self._a22_generation[port_key] = self._a22_generation.get(port_key, 0) + 1
+        if recover:
+            self._a22_request_read(key[0])
+
+    def _a22_forget_receipt(self, token: str) -> _A22Receipt | None:
+        receipt = self._a22_receipts.pop(token, None)
+        if receipt is not None:
+            receipt.timeout.cancel()
+        return receipt
+
+    def _a22_reject(self, device_id: str, token: str) -> None:
+        """Invalidate only the current request, including one already reported."""
+        receipt = self._a22_receipts.get(token)
+        if receipt is None or receipt.device_id != device_id:
+            return
+        self._a22_forget_receipt(token)
+        port_key = (device_id, receipt.port)
+        for key, pending in tuple(self._a22_pending.items()):
+            if pending.token == token and key[:2] == port_key:
+                self._a22_expire(key, token, recover=False)
+        for path in receipt.paths:
+            self._a22_provenance.pop((device_id, receipt.port, path), None)
+        if ("lv",) in receipt.paths:
+            self._a22_provenance.pop((device_id, receipt.port, ("mode",)), None)
+        self._a22_generation[port_key] = self._a22_generation.get(port_key, 0) + 1
+        self._a22_request_read(device_id)
+
+    def _a22_accept_ack(self, device_id: str, document: dict[str, object]) -> None:
+        """Keep desired acceptance as ordering evidence, not reported confirmation."""
+        token = document.get("clientToken")
+        version = document.get("version")
+        if not isinstance(token, str) or type(version) is not int:
+            return
+        state = document.get("state")
+        desired = state.get("desired") if isinstance(state, dict) else None
+        metadata = document.get("metadata")
+        desired_meta = metadata.get("desired") if isinstance(metadata, dict) else None
+        for key, pending in tuple(self._a22_pending.items()):
+            if key[0] != device_id or pending.token != token:
+                continue
+            part = desired.get(key[1]) if isinstance(desired, dict) else None
+            meta = desired_meta.get(key[1]) if isinstance(desired_meta, dict) else None
+            accepted: dict[tuple[str, ...], int] = {}
+            for path, expected in pending.expected.items():
+                desired_path = ("manu", "lv") if key[2] == _A22_GROUPS["manual"] else path
+                leaf: object = part
+                leaf_meta: object = meta
+                for component in desired_path:
+                    leaf = leaf.get(component) if isinstance(leaf, dict) else None
+                    leaf_meta = leaf_meta.get(component) if isinstance(leaf_meta, dict) else None
+                if leaf != expected:
+                    break
+                stamp = leaf_meta.get("timestamp") if isinstance(leaf_meta, dict) else None
+                if type(stamp) is int and stamp >= 0:
+                    accepted[path] = stamp
+            else:
+                pending.accepted_version = version
+                pending.accepted_timestamps = accepted
+                # Recheck genuine reports that arrived before their desired ACK.
+                for path, proof in tuple(pending.reports.items()):
+                    self._a22_reconcile_pending(
+                        device_id, key[1], path, pending.expected[path], proof.version, proof.timestamp,
+                        reported_change=True,
+                    )
+                self._a22_finish_pending(device_id, key[1])
+
+    def _a22_reconcile_pending(
+        self, device_id: str, port: str, path: tuple[str, ...], value: object,
+        version: int | None, timestamp: int | None, *, reported_change: bool,
+    ) -> None:
+        # A desired ACK orders requests but never proves physical execution.
+        # A later genuine reported write may share its one-second leaf timestamp.
+        for key, pending in tuple(self._a22_pending.items()):
+            if key[:2] != (device_id, port) or path not in pending.expected:
+                continue
+            baseline = pending.baseline[path]
+            if reported_change:
+                pending.reports[path] = _ReportedFieldProvenance(version, timestamp)
+            if value != pending.expected[path]:
+                pending.confirmed.discard(path)
+                pending.reports.pop(path, None)
+            elif (
+                reported_change and version is not None and timestamp is not None
+                and baseline.version is not None and version > baseline.version
+                and baseline.timestamp is not None and timestamp >= baseline.timestamp
+                and (pending.accepted_version is None or version > pending.accepted_version)
+                and (
+                    # Without desired ordering, a later leaf timestamp is required.
+                    timestamp > baseline.timestamp if pending.accepted_version is None
+                    else timestamp >= (pending.accepted_timestamps or {}).get(path, baseline.timestamp)
+                )
+            ):
+                pending.confirmed.add(path)
+
+    def _a22_finish_pending(self, device_id: str, port: str) -> None:
+        """Settle a pair only after every leaf in the same report is reconciled."""
+        for key, pending in tuple(self._a22_pending.items()):
+            if key[:2] == (device_id, port) and pending.confirmed == pending.expected.keys():
+                pending.timeout.cancel()
+                del self._a22_pending[key]
+
+    def _a22_recovered_get(
+        self, key: tuple[str, str, tuple[str, ...]], value: object,
+        previously_reported: object, incoming: _ReportedFieldProvenance,
+        last: _ReportedFieldProvenance | None, topic: str, *, correlated_read: bool,
+    ) -> bool:
+        """Restore read authority from a current unchanged GET, never command confirmation.
+
+        The reported leaf and its timestamp must agree with retained ordering.
+        An unchanged snapshot requires the current session's outstanding GET token.
+        """
+        return (
+            correlated_read and topic.endswith("/get/accepted") and key not in self._a22_provenance
+            and last is not None and last.version is not None and last.timestamp is not None
+            and incoming.version is not None and incoming.timestamp is not None
+            and type(value) is int and value == previously_reported
+            and incoming.version >= last.version and incoming.timestamp >= last.timestamp
+            and not any(key[:2] == pending_key[:2] and key[2] in pending.expected
+                        for pending_key, pending in self._a22_pending.items())
+        )
+
+    def _invalidate_a22(self, device_id: str | None = None) -> None:
+        """Drop command authority on disconnect, cancellation or an uncertain send."""
+        for key, pending in tuple(self._a22_pending.items()):
+            if device_id is None or key[0] == device_id:
+                self._a22_expire(key, pending.token, recover=False)
+        for read_device in tuple(self._a22_reads):
+            if device_id is None or read_device == device_id:
+                del self._a22_reads[read_device]
+        for key in tuple(self._a22_provenance):
+            if device_id is None or key[0] == device_id:
+                del self._a22_provenance[key]
+        for token, receipt in tuple(self._a22_receipts.items()):
+            if device_id is None or receipt.device_id == device_id:
+                self._a22_forget_receipt(token)
+        for generation_key in tuple(self._a22_generation):
+            if device_id is None or generation_key[0] == device_id:
+                self._a22_generation[generation_key] += 1
+
+    async def _publish_a22(
+        self, device_id: str, port: str, field: str, expected: dict[tuple[str, ...], int],
+        payload: dict[str, object], *, supersede: bool = False,
+    ) -> str:
+        group = self._a22_pending_key(device_id, port, field)
+        previous = self._a22_pending.get(group)
+        baseline: dict[tuple[str, ...], _ReportedFieldProvenance] = {}
+        confirmed: set[tuple[str, ...]] = set()
+        reported = self._a22_reported.get((device_id, port), {})
+        already_reported = True
+        for path, value in expected.items():
+            proof = self._a22_provenance.get((device_id, port, path))
+            if proof is None or proof.version is None or proof.timestamp is None:
+                raise ServiceValidationError("A22 command requires fresh genuine reported facts")
+            baseline[path] = proof
+            observed: object = reported
+            for part in path:
+                observed = observed.get(part) if isinstance(observed, dict) else None
+            if observed != value:
+                already_reported = False
+            if observed == value and len(expected) > 1:
+                # The unchanged mate was already genuinely reported before this edit.
+                confirmed.add(path)
+        if previous is not None and not supersede and not already_reported:
+            raise ServiceValidationError("A22 paired setting has a pending reported update")
+        if previous is not None:
+            previous.timeout.cancel()
+            del self._a22_pending[group]
+        # Forget old same-group receipts only after the replacement can be staged.
+        for old_token, receipt in tuple(self._a22_receipts.items()):
+            if (receipt.device_id, receipt.port, receipt.group) == group:
+                self._a22_forget_receipt(old_token)
+        token = uuid4().hex
+        if not already_reported or previous is not None:
+            timeout = asyncio.get_running_loop().call_later(
+                _FIELD_CONFIRMATION_TIMEOUT, self._a22_expire, group, token,
+            )
+            if previous is not None:
+                # A replacement still needs readback for fields the older in-flight
+                # request could change; the untouched mate retains its valid proof.
+                confirmed = {
+                    path for path in confirmed if previous.expected.get(path) == expected[path]
+                }
+            self._a22_pending[group] = _A22Pending(
+                token, expected, baseline, confirmed, {}, timeout,
+            )
+        receipt_timeout = asyncio.get_running_loop().call_later(
+            _FIELD_CONFIRMATION_TIMEOUT, self._a22_forget_receipt, token,
+        )
+        self._a22_receipts[token] = _A22Receipt(
+            device_id, port, group[2], tuple(expected), receipt_timeout,
+        )
+        try:
+            await self.async_publish_shadow_update(
+                {**payload, "clientToken": token}, device_id=device_id, qos=1,
+            )
+        except BaseException:
+            self._a22_expire(group, token, recover=False)
+            self._a22_forget_receipt(token)
+            self._a22_request_read(device_id)
+            raise
+        return token
+
+    async def async_set_a22_setting(
+        self, device_id: str, port: str, kind: str, field: str, value: int,
+    ) -> None:
+        """Publish one Cycle/Auto setting with both reported counterpart facts guarded."""
+        if kind == "cycle" and field in ("tOffset", "onDur", "offDur"):
+            paths = (("cycle", "onDur"), ("cycle", "offDur")) if field != "tOffset" else (("cycle", "tOffset"),)
+            builder = build_a22_cycle_setting
+        elif kind == "auto" and field in ("tMin", "tMax", "hMin", "hMax"):
+            paths = (("auto", "tMin"), ("auto", "tMax")) if field.startswith("t") else (
+                ("auto", "hMin"), ("auto", "hMax"),
+            )
+            builder = build_a22_auto_setting
+        else:
+            raise ServiceValidationError("Unsupported A22 setting")
+        settings = self._a22_require(device_id, port, *paths)
+        if (device_id, port, _A22_GROUPS["mode"]) in self._a22_pending:
+            raise ServiceValidationError("A22 mode has a pending reported update")
+        try:
+            payload = builder("VSPLUGA22", port, field, value, settings, fresh=True)
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+        state = cast("dict[str, object]", payload["state"])
+        changes = cast("dict[str, object]", state["desired"])
+        target = cast("dict[str, object]", changes[port])
+        expected: dict[tuple[str, ...], int] = {}
+        for path in paths:
+            value_at_path: object = target
+            for part in path:
+                value_at_path = value_at_path.get(part) if isinstance(value_at_path, dict) else None
+            if type(value_at_path) is not int:
+                raise ServiceValidationError("A22 setting payload is invalid")
+            expected[path] = value_at_path
+        await self._publish_a22(device_id, port, field, expected, payload)
+
+    async def async_set_a22_mode(self, device_id: str, port: str, mode: int) -> None:
+        """Follow firmware's two-write Manual exit without waiting for a cloud ACK."""
+        key = (device_id, port)
+        self._check_a22_device(device_id, port)
+        if type(mode) is not int or mode not in (0, 1, 2):
+            raise ServiceValidationError("Unsupported A22 mode")
+        self._a22_generation[key] = self._a22_generation.get(key, 0) + 1
+        generation = self._a22_generation[key]
+        async with self._a22_locks.setdefault(key, asyncio.Lock()):
+            if self._a22_generation[key] != generation:
+                raise ServiceValidationError("A22 mode request superseded")
+            settings = self._a22_require(device_id, port, ("lv",) if mode == 0 else ("mode",))
+            try:
+                change = make_a22_mode_change("VSPLUGA22", port, mode, settings, fresh=True)
+            except ValueError as err:
+                raise ServiceValidationError(str(err)) from err
+            if (change.preserved_level is not None
+                    and self._a22_pending_key(device_id, port, "manual") in self._a22_pending):
+                raise ServiceValidationError("A22 output has a pending reported update")
+            token = await self._publish_a22(
+                device_id, port, "mode", {("mode",): mode}, change.command, supersede=True,
+            )
+            if (change.preserved_level is None or self._a22_generation[key] != generation
+                    or token not in self._a22_receipts):
+                return
+            # Never infer a reported mode or output from the desired acknowledgement.
+            latest = self._a22_require(device_id, port, ("lv",))
+            try:
+                second = finish_a22_manual_change("VSPLUGA22", port, change, latest, fresh=True)
+            except ValueError as err:
+                raise ServiceValidationError(str(err)) from err
+            try:
+                await self._publish_a22(
+                    device_id, port, "manual", {("lv",): change.preserved_level}, second,
+                )
+            except BaseException:
+                self._a22_provenance.pop((device_id, port, ("mode",)), None)
+                raise
+
+    def _record_a22_reported(
+        self, device_id: str, document: dict[str, object], topic: str,
+    ) -> None:
+        """Apply only newer, genuine A22 leaf reports and retain independent write proof."""
+        device = self.get_device(device_id)
+        if device is None or client_model_token(device.client_id) != "VSPLUGA22":
+            return
+        reported = extract_shadow_reported(document)
+        if not isinstance(reported, dict):
+            return
+        if reported.get("connected") is False:
+            self._invalidate_a22(device_id)
+            return
+        token = document.get("clientToken")
+        correlated_read = (
+            topic.endswith("/get/accepted") and isinstance(token, str)
+            and token == self._a22_reads.get(device_id)
+        )
+        if correlated_read:
+            del self._a22_reads[device_id]
+        body = document.get("current", document)
+        if not isinstance(body, dict):
+            return
+        raw_version = body.get("version")
+        version = raw_version if type(raw_version) is int and raw_version >= 0 else None
+        metadata = body.get("metadata")
+        metadata = metadata.get("reported") if isinstance(metadata, dict) else None
+        for port in A22_PORTS:
+            if port not in reported:
+                continue
+            raw = reported[port]
+            port_meta = metadata.get(port) if isinstance(metadata, dict) else None
+            current = self._a22_reported.setdefault((device_id, port), {})
+            if not isinstance(raw, dict):
+                # A whole-port null/invalid report clears every previously known child.
+                if not self._a22_accept_parent(device_id, port, version, port_meta, topic):
+                    continue
+                current.clear()
+            else:
+                # Keep accessory/manual metadata and unrelated firmware settings across sparse reports.
+                for extra, value in raw.items():
+                    if extra not in _A22_STATE_ROOTS:
+                        if isinstance(value, dict) and isinstance(current.get(extra), dict):
+                            _deep_merge_mapping(cast("dict[str, object]", current[extra]), value)
+                        else:
+                            current[extra] = deepcopy(value)
+                for block_name in ("cycle", "auto"):
+                    block = raw.get(block_name)
+                    if not isinstance(block, dict):
+                        continue
+                    nested = current.setdefault(block_name, {})
+                    if not isinstance(nested, dict):
+                        nested = current[block_name] = {}
+                    for name, value in block.items():
+                        if (block_name, name) not in _A22_FIELD_PATHS:
+                            nested[name] = deepcopy(value)
+            cleared_blocks: set[str] = set()
+            if isinstance(raw, dict):
+                for block_name in ("cycle", "auto"):
+                    if block_name not in raw or isinstance(raw[block_name], dict):
+                        continue
+                    block_meta = port_meta.get(block_name) if isinstance(port_meta, dict) else None
+                    if self._a22_accept_parent(
+                        device_id, port, version, block_meta, topic, prefix=block_name,
+                    ):
+                        # Check the complete block before removing any of its children.
+                        current.pop(block_name, None)
+                        cleared_blocks.add(block_name)
+            for path in _A22_FIELD_PATHS:
+                leaf: object = raw
+                meta: object = port_meta
+                if isinstance(raw, dict):
+                    parent = raw.get(path[0])
+                    if path[0] not in raw or (len(path) == 2 and isinstance(parent, dict)
+                                                  and path[1] not in parent):
+                        continue
+                    if len(path) == 2 and not isinstance(parent, dict) and path[0] not in cleared_blocks:
+                        continue
+                for part in path:
+                    leaf = leaf.get(part) if isinstance(leaf, dict) else None
+                    meta = meta.get(part) if isinstance(meta, dict) else None
+                timestamp_raw = meta.get("timestamp") if isinstance(meta, dict) else None
+                if timestamp_raw is None and (not isinstance(raw, dict) or (
+                    len(path) == 2 and not isinstance(raw.get(path[0]), dict)
+                )):
+                    parent_meta = port_meta if not isinstance(raw, dict) else (
+                        port_meta.get(path[0]) if isinstance(port_meta, dict) else None
+                    )
+                    timestamp_raw = parent_meta.get("timestamp") if isinstance(parent_meta, dict) else None
+                timestamp = timestamp_raw if type(timestamp_raw) is int and timestamp_raw >= 0 else None
+                incoming = _ReportedFieldProvenance(version, timestamp)
+                key = (device_id, port, path)
+                last = self._a22_last.get(key)
+                previously_reported: object = current
+                for part in path:
+                    previously_reported = (
+                        previously_reported.get(part) if isinstance(previously_reported, dict) else None
+                    )
+                if not (_reported_field_is_fresh(last, incoming, topic) or self._a22_recovered_get(
+                    key, leaf, previously_reported, incoming, last, topic, correlated_read=correlated_read,
+                )):
+                    continue
+                if len(path) == 1:
+                    current[path[0]] = deepcopy(leaf)
+                elif path[0] not in cleared_blocks:
+                    nested = current.setdefault(path[0], {})
+                    if isinstance(nested, dict):
+                        nested[path[1]] = deepcopy(leaf)
+                # Preserve the last known timestamp when a newer report omits metadata.
+                self._a22_last[key] = _ReportedFieldProvenance(
+                    version if version is not None else last.version if last else None,
+                    timestamp if timestamp is not None else last.timestamp if last else None,
+                )
+                if version is not None and timestamp is not None and type(leaf) is int:
+                    self._a22_provenance[key] = incoming
+                else:
+                    self._a22_provenance.pop(key, None)
+                reported_change = topic.endswith("/update/accepted") or (
+                    topic.endswith("/update/documents")
+                    and _a22_documents_changed_leaf(document, port, path, leaf, timestamp)
+                )
+                self._a22_reconcile_pending(
+                    device_id, port, path, leaf, version, timestamp, reported_change=reported_change,
+                )
+            self._a22_finish_pending(device_id, port)
+
+    def _a22_accept_parent(
+        self, device_id: str, port: str, version: int | None, metadata: object, topic: str,
+        *, prefix: str | None = None,
+    ) -> bool:
+        """A whole-port or nested clear must be later than every affected leaf."""
+        stamp = metadata.get("timestamp") if isinstance(metadata, dict) else None
+        timestamp = stamp if type(stamp) is int and stamp >= 0 else None
+        return all(
+            _reported_field_is_fresh(last, _ReportedFieldProvenance(version, timestamp), topic)
+            for (known_device, known_port, path), last in self._a22_last.items()
+            if (known_device, known_port) == (device_id, port)
+            and (prefix is None or path[0] == prefix)
         )
 
     def manual_memory_enabled(self, device_id: str, channel: str) -> bool:
@@ -1348,7 +1906,13 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             label="main",
         )
         await mqtt_client.connect()
-        mqtt_client.add_message_callback(self._handle_mqtt_publish)
+
+        async def receive_current_session(topic: str, payload: bytes, qos: int) -> None:
+            """Ignore delayed publishes from a disconnected MQTT session."""
+            if self._mqtt_client is mqtt_client:
+                await self._handle_mqtt_publish(topic, payload, qos)
+
+        mqtt_client.add_message_callback(receive_current_session)
         self._mqtt_client = mqtt_client
         self._subscribed_routes.add((primary.client_id, primary.topic_prefix))
 
@@ -1361,7 +1925,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         # Rejection monitoring is optional: missing cloud permissions must not
         # prevent normal MQTT state and commands from working.
         for device in self._devices:
-            if device.device_type != "controller" or device.client_id != primary.client_id:
+            if device.client_id != primary.client_id or (
+                device.device_type != "controller"
+                and client_model_token(device.client_id) != "VSPLUGA22"
+            ):
                 continue
             try:
                 await mqtt_client.subscribe([(TOPIC_SHADOW_UPDATE_REJECTED.format(thing=device.client_id), 1)])
@@ -1394,7 +1961,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 or self._shutdown_event.is_set()
                 or (generation is not None and not self._inventory_is_current(generation))):
             return
-        if device.device_type == "controller":
+        if device.device_type == "controller" or client_model_token(device.client_id) == "VSPLUGA22":
             try:
                 await mqtt_client.subscribe([(TOPIC_SHADOW_UPDATE_REJECTED.format(thing=device.client_id), 1)])
             except (MQTTError, TimeoutError):
@@ -1407,6 +1974,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         mqtt_client = self._mqtt_client
         self._mqtt_client = None
         self._subscribed_routes.clear()
+        self._invalidate_a22()
         had_pending = bool(self._pending_fields)
         for pending in self._pending_fields.values():
             pending.timeout.cancel()
@@ -1460,6 +2028,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     document = self._parse_json_object(payload)
                     token = document.get("clientToken")
                     if isinstance(token, str):
+                        self._a22_reject(device_id, token)
                         self._discard_manual_choice(token, device_id)
                         rejected_channels = self._clear_pending_token(device_id, token)
                         receipt_channel = self._forget_confirmed_receipt(device_id, token)
@@ -1477,6 +2046,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     document = self._parse_json_object(payload)
                     device = self.get_device(device_id)
                     parsed_shadow = parse_shadow_document(document)
+                    if topic.endswith("/update/accepted"):
+                        self._a22_accept_ack(device_id, document)
+                    self._record_a22_reported(device_id, document, topic)
                     if device is not None and device.device_type == "controller":
                         if client_model_token(device.client_id) == "VSCTL002":
                             self._record_e25_selection(device_id, document, topic)
@@ -1490,6 +2062,11 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                         if topic.endswith("/update/accepted") and isinstance(response_token, str):
                             self._forget_confirmed_receipt(device_id, response_token)
                     self._merge_shadow_state(device_id, parsed_shadow)
+                    if device and client_model_token(device.client_id) == "VSPLUGA22":
+                        self._shadow_states.setdefault(device_id, {})["ports"] = {
+                            port: deepcopy(raw) for (owner, port), raw in self._a22_reported.items()
+                            if owner == device_id
+                        }
                     reported = extract_shadow_reported(document)
                     plan = reported.get("plan") if isinstance(reported, dict) else None
                     if isinstance(plan, dict):
@@ -2135,7 +2712,11 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             return
         self._last_shadow_refresh_request_at[device_id] = datetime.now(tz=UTC)
         topic = TOPIC_SHADOW_GET.format(thing=device.client_id)
-        await mqtt_client.publish(topic, b"{}")
+        payload = b"{}"
+        if client_model_token(device.client_id) == "VSPLUGA22":
+            token = self._a22_reads[device_id] = uuid4().hex
+            payload = json.dumps({"clientToken": token}).encode()
+        await mqtt_client.publish(topic, payload)
         self._support_capture.record(
             "shadow_get_request",
             data={
@@ -2353,6 +2934,26 @@ def _desired_field_timestamp(document: dict[str, object], channel: _Channel, fie
     if channel == "light":
         return accepted_desired_light_level_timestamp(document)
     return _fan_level_timestamp(document, channel, reported=False)
+
+
+def _a22_documents_changed_leaf(
+    document: dict[str, object], port: str, path: tuple[str, ...],
+    value: object, timestamp: int | None,
+) -> bool:
+    """Use a documents transition, not its unchanged snapshot, as A22 write evidence."""
+    previous = document.get("previous")
+    if not isinstance(previous, dict):
+        return False
+    old: object = extract_shadow_reported(previous)
+    metadata = previous.get("metadata")
+    old_meta: object = metadata.get("reported") if isinstance(metadata, dict) else None
+    for part in (port, *path):
+        old = old.get(part) if isinstance(old, dict) else None
+        old_meta = old_meta.get(part) if isinstance(old_meta, dict) else None
+    old_stamp = old_meta.get("timestamp") if isinstance(old_meta, dict) else None
+    return old != value or (
+        type(old_stamp) is int and timestamp is not None and timestamp > old_stamp
+    )
 
 
 def _documents_changed_reported_field(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -52,23 +52,14 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
 
     device = DeviceInfo("a22-1", "vivosun-VSPLUGA22-account-a22", "topic/a22", "GrowHub A22", True, 42, "a22")
     assert infer_device_type("GrowHub A22", device.client_id) == "a22"
-    coordinator = object.__new__(VivosunCoordinator)
-    coordinator._device_listeners = []
-    coordinator._garden_inventory = None
-    coordinator._garden_listeners = []
+    coordinator = VivosunCoordinator(hass, object(), email="offline@example.com", password="unused")
     coordinator._devices = [device]
-    coordinator._client_id_to_device_id = {device.client_id: device.device_id}
-    coordinator._topic_prefix_to_device_id = {device.topic_prefix: device.device_id}
-    coordinator._shadow_states = {}
-    coordinator._pending_fields = {}
-    coordinator._sensor_states = {}
-    coordinator._plan_stage_cache = {}
-    coordinator._tokens = None
-    coordinator._support_capture = type("Capture", (), {"record": lambda *a, **kw: None})()
-    coordinator.async_update_listeners = lambda: None
+    coordinator._build_topic_maps()
     coordinator._refresh_plan_stages = AsyncMock()
     coordinator.async_publish_shadow_update = AsyncMock()
-    coordinator._mqtt_client = type("ConnectedMqtt", (), {"is_connected": True})()
+    mqtt = AsyncMock()
+    mqtt.is_connected = True
+    coordinator._mqtt_client = mqtt
     coordinator.data = coordinator._build_state_snapshot()
     entry = MockConfigEntry(domain=DOMAIN, title="a22", data={})
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(entry_id=entry.entry_id, coordinator=coordinator)
@@ -94,8 +85,28 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
         "Probe VPD": 1.23,
     }
     topic = f"$aws/things/{device.client_id}/shadow/update/accepted"
+    report_version = 100
+
+    def reported_metadata(fields: dict[str, object], timestamp: int) -> dict[str, object]:
+        return {
+            key: reported_metadata(value, timestamp) if isinstance(value, dict) else {"timestamp": timestamp}
+            for key, value in fields.items()
+        }
 
     async def deliver(document: dict[str, object], incoming_topic: str = topic) -> None:
+        nonlocal report_version
+        body = document.get("current", document)
+        state = body.get("state") if isinstance(body, dict) else None
+        reported = state.get("reported") if isinstance(state, dict) else None
+        if isinstance(reported, dict) and not incoming_topic.endswith("/rejected"):
+            # Synthetic ordering metadata preserves the captured field shapes while
+            # proving fresh leaf reports for commands in this integration test.
+            report_version += 1
+            supplied = {
+                **body, "version": report_version,
+                "metadata": {"reported": reported_metadata(reported, report_version)},
+            }
+            document = {**document, "current": supplied} if "current" in document else supplied
         await coordinator._handle_mqtt_publish(incoming_topic, json.dumps(document).encode(), 1)
 
     usb1 = next(item for item in added if item.unique_id.endswith("_usb1"))
@@ -156,14 +167,14 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
     await deliver({"state": {"reported": {"plug1": {"mode": 0, "inPlan": 0}}}})
     await plug.async_turn_off()
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_manual_port_payload("plug1", False), device_id="a22-1", qos=1
+        {"state": {"desired": {"plug1": {"manu": {"lv": 0}}}}, "clientToken": ANY}, device_id="a22-1", qos=1
     )
 
     coordinator.async_publish_shadow_update.reset_mock()
     await deliver({"state": {"reported": {"usb1": {"inPlan": 0}}}})
     await usb1.async_turn_off()
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_manual_port_payload("usb1", False), device_id="a22-1", qos=1
+        {"state": {"desired": {"usb1": {"manu": {"lv": 0}}}}, "clientToken": ANY}, device_id="a22-1", qos=1
     )
     await deliver({"state": {"reported": {"plug1": {"lv": 0}}}})
     assert plug.is_on is False

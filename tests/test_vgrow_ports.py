@@ -95,26 +95,14 @@ async def test_vgrow_port_refuses_unsafe_manual_and_unknown_outputs(hass: object
 
 async def test_vgrow_usb_capture_ingress_to_switches(hass: object) -> None:
     device = DeviceInfo("vgrow-1", "vivosun-VSCTLY18-account", "topic/vgrow", "VGrow", True, 42, "controller")
-    coordinator = object.__new__(VivosunCoordinator)
-    coordinator._device_listeners = []
-    coordinator._garden_inventory = None
-    coordinator._garden_listeners = []
+    coordinator = VivosunCoordinator(hass, object(), email="offline@example.com", password="unused")
     coordinator._devices = [device]
-    coordinator._client_id_to_device_id = {device.client_id: device.device_id}
-    coordinator._topic_prefix_to_device_id = {device.topic_prefix: device.device_id}
-    coordinator._shadow_states = {}
-    coordinator._pending_fields = {}
-    coordinator._reported_fields = {}
-    coordinator._has_reported_fields = set()
-    coordinator._locally_commanded_fields = set()
-    coordinator._sensor_states = {}
-    coordinator._plan_stage_cache = {}
-    coordinator._tokens = None
-    coordinator._support_capture = type("Capture", (), {"record": lambda *a, **kw: None})()
-    coordinator.async_update_listeners = lambda: None
+    coordinator._build_topic_maps()
     coordinator._refresh_plan_stages = AsyncMock()
     coordinator.async_publish_shadow_update = AsyncMock()
-    coordinator._mqtt_client = type("ConnectedMqtt", (), {"is_connected": True})()
+    mqtt = AsyncMock()
+    mqtt.is_connected = True
+    coordinator._mqtt_client = mqtt
     coordinator.data = coordinator._build_state_snapshot()
     entry = MockConfigEntry(domain=DOMAIN, title="VGrow", data={})
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = RuntimeData(entry_id=entry.entry_id, coordinator=coordinator)
@@ -174,8 +162,7 @@ async def test_vgrow_usb_capture_ingress_to_switches(hass: object) -> None:
 
 async def test_vgrow_usb_exact_model_only(hass: object) -> None:
     device = DeviceInfo("other-1", "vivosun-VSCTLY19-account", "topic/other", "Other", True, 42, "controller")
-    coordinator = object.__new__(VivosunCoordinator)
-    coordinator._device_listeners = []
+    coordinator = VivosunCoordinator(hass, object(), email="offline@example.com", password="unused")
     coordinator._devices = [device]
     coordinator.data = {}
     entry = MockConfigEntry(domain=DOMAIN, title="Other", data={})

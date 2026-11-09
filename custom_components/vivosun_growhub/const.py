@@ -136,4 +136,5 @@ PLATFORMS: list[Platform] = [
     Platform.CLIMATE,
     Platform.CAMERA,
     Platform.NUMBER,
+    Platform.TIME,
 ]

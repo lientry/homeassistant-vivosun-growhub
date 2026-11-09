@@ -79,6 +79,10 @@ Oscillation opt-in exposes the native fan feature and existing Boolean `cFan.osc
 
 A22 has physical `usb1`, `usb2`, `plug1` and `plug2` switches. A10 `VSPLUGA10` has one AC outlet, `plug1`, with the same port schema as the A22 outlets. VGrow `VSCTLY18` has `usb1` and `usb2`. Stable identities follow the physical port, not its accessory selection.
 
+Exact `VSPLUGA22` exposes native per-port Manual/Cycle/Auto selects, Cycle start times, on/off durations and low/high temperature/humidity thresholds. Firmware owns execution. Start times use device-local seconds since midnight without timezone conversion. Temperatures use native Celsius and HA's display conversion; outgoing threshold writes round to 0.1°C without rounding reported readings. HA's bounds are conservative structural limits, not verified firmware setter ranges.
+
+Writes require genuine reported mode/no-plan facts; duration and threshold edits also require fresh counterparts. Ordered reports, not desired ACKs or GET snapshots, confirm execution. Failed or expired commands trigger one correlated shadow GET, never an automatic actuation retry. Its current-session reply can restore unchanged read authority while retaining per-leaf ordering, but cannot confirm the failed command. Old-session, mismatched and unsolicited unchanged replies cannot restore authority. Manual exit publishes mode, then the captured reported binary output as `manu.lv`. Newer power or mode actions supersede that completion; unrelated setting edits do not. Existing A22 power switches use the same guarded lifecycle, while VGrow keeps its original implementation.
+
 Current output comes from genuine reported root `lv`: exactly zero or 100. The stored manual level may differ during a plan. Output remains readable across modes and partial reports; unknown/nonbinary output makes the switch unavailable.
 
 Writes require an available binary output and explicit reported manual mode with no plan. They change only `manu.lv` to zero or 100, never mode, plan or accessory type. Numeric `dev` is an accessory-code attribute, not a verified accessory name or a speed contract.
