@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -167,14 +167,14 @@ async def test_a22_actual_ingress_and_physical_port_entities(hass: object) -> No
     await deliver({"state": {"reported": {"plug1": {"mode": 0, "inPlan": 0}}}})
     await plug.async_turn_off()
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_manual_port_payload("plug1", False), device_id="a22-1", qos=1
+        {"state": {"desired": {"plug1": {"manu": {"lv": 0}}}}, "clientToken": ANY}, device_id="a22-1", qos=1
     )
 
     coordinator.async_publish_shadow_update.reset_mock()
     await deliver({"state": {"reported": {"usb1": {"inPlan": 0}}}})
     await usb1.async_turn_off()
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_manual_port_payload("usb1", False), device_id="a22-1", qos=1
+        {"state": {"desired": {"usb1": {"manu": {"lv": 0}}}}, "clientToken": ANY}, device_id="a22-1", qos=1
     )
     await deliver({"state": {"reported": {"plug1": {"lv": 0}}}})
     assert plug.is_on is False

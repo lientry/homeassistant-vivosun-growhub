@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTemperature, UnitOfTime
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -121,10 +122,11 @@ class VivosunA22Number(CoordinatorEntity[VivosunCoordinator], NumberEntity):  # 
     async def async_set_native_value(self, value: float) -> None:
         scale = 100 if self._field.startswith(("t", "h")) else 1
         raw = round(value * scale)
-        if abs(value * scale - raw) > 1e-6:
-            raise ValueError("A22 setting precision is invalid")
-        if self._field in ("tMin", "tMax") and raw % 10:
-            raise ValueError("A22 temperature step must be 0.1°C")
+        if self._field in ("tMin", "tMax"):
+            # HA converts display units before this call, which can produce fractions of a native step.
+            raw = round(value * 10) * 10
+        elif abs(value * scale - raw) > 1e-6:
+            raise ServiceValidationError("A22 setting precision is invalid")
         await self.coordinator.async_set_a22_setting(
             self._device_id, self._port, "cycle" if self._field.endswith("Dur") else "auto", self._field, raw,
         )

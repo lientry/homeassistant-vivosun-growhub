@@ -701,7 +701,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         key = (device_id, port)
         self._a22_generation[key] = self._a22_generation.get(key, 0) + 1
         try:
-            await self.async_publish_shadow_update(build_manual_port_payload(port, on), device_id=device_id, qos=1)
+            await self._publish_a22(
+                device_id, port, "manual", {("lv",): 100 if on else 0},
+                build_manual_port_payload(port, on), supersede=True,
+            )
         except BaseException:
             self._a22_provenance.pop((device_id, port, ("lv",)), None)
             raise
@@ -855,7 +858,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
     async def _publish_a22(
         self, device_id: str, port: str, field: str, expected: dict[tuple[str, ...], int],
-        payload: dict[str, object], *, supersede: bool = False, new_intent: bool = False,
+        payload: dict[str, object], *, supersede: bool = False,
     ) -> str:
         group = self._a22_pending_key(device_id, port, field)
         previous = self._a22_pending.get(group)
@@ -885,9 +888,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         for old_token, receipt in tuple(self._a22_receipts.items()):
             if (receipt.device_id, receipt.port, receipt.group) == group:
                 self._a22_forget_receipt(old_token)
-        if new_intent:
-            port_key = (device_id, port)
-            self._a22_generation[port_key] = self._a22_generation.get(port_key, 0) + 1
         token = uuid4().hex
         if not already_reported or previous is not None:
             timeout = asyncio.get_running_loop().call_later(
@@ -950,7 +950,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             if type(value_at_path) is not int:
                 raise ServiceValidationError("A22 setting payload is invalid")
             expected[path] = value_at_path
-        await self._publish_a22(device_id, port, field, expected, payload, new_intent=True)
+        await self._publish_a22(device_id, port, field, expected, payload)
 
     async def async_set_a22_mode(self, device_id: str, port: str, mode: int) -> None:
         """Follow firmware's two-write Manual exit without waiting for a cloud ACK."""
@@ -968,6 +968,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 change = make_a22_mode_change("VSPLUGA22", port, mode, settings, fresh=True)
             except ValueError as err:
                 raise ServiceValidationError(str(err)) from err
+            if (change.preserved_level is not None
+                    and self._a22_pending_key(device_id, port, "manual") in self._a22_pending):
+                raise ServiceValidationError("A22 output has a pending reported update")
             token = await self._publish_a22(
                 device_id, port, "mode", {("mode",): mode}, change.command, supersede=True,
             )

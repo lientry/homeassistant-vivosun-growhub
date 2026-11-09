@@ -12,6 +12,7 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.setup import async_setup_component
+from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM, UnitSystem
 from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
@@ -252,15 +253,47 @@ async def test_native_ha_time_number_select_services_and_manual_sequence(hass: H
             await platform.async_reset()
 
 
-async def test_temperature_native_write_rejects_sub_tenth_celsius(hass: HomeAssistant) -> None:
+@pytest.mark.parametrize(("units", "field", "value", "expected_pair"), [
+    (METRIC_SYSTEM, "tMin", 21.1, {"tMin": 2110, "tMax": 2110}),
+    (METRIC_SYSTEM, "tMin", -5.1, {"tMin": -510, "tMax": 2110}),
+    (METRIC_SYSTEM, "tMin", -40.0, {"tMin": -4000, "tMax": 2110}),
+    (METRIC_SYSTEM, "tMax", 125.0, {"tMin": 0, "tMax": 12500}),
+    (US_CUSTOMARY_SYSTEM, "tMin", 69.98, {"tMin": 2110, "tMax": 2110}),
+    (US_CUSTOMARY_SYSTEM, "tMin", 22.82, {"tMin": -510, "tMax": 2110}),
+    (US_CUSTOMARY_SYSTEM, "tMin", -40.0, {"tMin": -4000, "tMax": 2110}),
+    (US_CUSTOMARY_SYSTEM, "tMax", 257.0, {"tMin": 0, "tMax": 12500}),
+    (METRIC_SYSTEM, "hMin", 52.35, {"hMin": 5235, "hMax": 0}),
+    (METRIC_SYSTEM, "tMax", 21.11, {"tMin": 0, "tMax": 2110}),
+    (METRIC_SYSTEM, "tMin", -5.04, {"tMin": -500, "tMax": 2110}),
+    (US_CUSTOMARY_SYSTEM, "tMax", 70.0, {"tMin": 0, "tMax": 2110}),
+    (US_CUSTOMARY_SYSTEM, "tMin", 22.9, {"tMin": -510, "tMax": 2110}),
+])
+async def test_a22_number_service_rounds_native_temperature_without_losing_humidity_precision(
+    hass: HomeAssistant, units: UnitSystem, field: str, value: float,
+    expected_pair: dict[str, int],
+) -> None:
+    hass.config.units = units
     coordinator, mqtt = _setup(hass)
+    assert await async_setup_component(hass, "number", {})
+    platform = EntityPlatform(
+        hass=hass, logger=logging.getLogger(__name__), domain="number",
+        platform_name="vivosun_growhub", platform=None,
+        scan_interval=timedelta(seconds=30), entity_namespace=None,
+    )
+    entity = VivosunA22Number(coordinator, "a22-1", "usb1", field)
     try:
-        threshold = VivosunA22Number(coordinator, "a22-1", "usb1", "tMax")
-        with pytest.raises(ValueError, match=r"0\.1°C"):
-            await threshold.async_set_native_value(21.11)
-        assert mqtt.published == []
+        await platform.async_add_entities([entity])
+        await hass.async_block_till_done()
+        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report("usb1", _FIELDS))
+        assert entity.entity_id is not None
+        assert entity.native_step == (0.01 if field.startswith("h") else 0.1)
+        call = {"entity_id": entity.entity_id, "value": value}
+        await hass.services.async_call("number", "set_value", call, blocking=True)
+        assert len(mqtt.published) == 1
+        assert mqtt.published[0][1]["state"] == {"desired": {"usb1": {"auto": expected_pair}}}
     finally:
         await coordinator.async_shutdown()
+        await platform.async_reset()
 
 
 async def test_manual_first_and_second_publish_failures_do_not_retry(hass: HomeAssistant) -> None:
@@ -296,7 +329,8 @@ async def test_manual_first_and_second_publish_failures_do_not_retry(hass: HomeA
         await coordinator.async_shutdown()
 
 
-async def test_newer_manual_off_supersedes_delayed_mode_completion(hass: HomeAssistant) -> None:
+@pytest.mark.parametrize("action", ["power", "setting"])
+async def test_manual_completion_is_superseded_by_power_not_settings(hass: HomeAssistant, action: str) -> None:
     coordinator, mqtt = _setup(hass)
     assert await async_setup_component(hass, "switch", {})
     platform = EntityPlatform(
@@ -327,20 +361,53 @@ async def test_newer_manual_off_supersedes_delayed_mode_completion(hass: HomeAss
         await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/accepted", _report(
             "usb1", {"mode": 0, "lv": 100}, 101, 1001,
         ))
-        await hass.services.async_call("switch", "turn_off", {
-            "entity_id": switch.entity_id,
-        }, blocking=True)
+        if action == "power":
+            await hass.services.async_call("switch", "turn_off", {
+                "entity_id": switch.entity_id,
+            }, blocking=True)
+            expected = [{"mode": 0}, {"manu": {"lv": 0}}]
+        else:
+            await coordinator.async_set_a22_setting("a22-1", "usb1", "cycle", "tOffset", 66600)
+            expected = [{"mode": 0}, {"cycle": {"tOffset": 66600}}, {"manu": {"lv": 100}}]
         resume.set()
         await task
-        assert [body["state"]["desired"]["usb1"] for _, body in mqtt.published] == [
-            {"mode": 0}, {"manu": {"lv": 0}},
-        ]
+        assert [body["state"]["desired"]["usb1"] for _, body in mqtt.published] == expected
     finally:
         resume.set()
         if task:
             await asyncio.gather(task, return_exceptions=True)
         await coordinator.async_shutdown()
         await platform.async_reset()
+
+
+@pytest.mark.parametrize("failure", ["rejection", "timeout"])
+async def test_manual_power_tracking_guards_preservation_and_failed_output(
+    hass: HomeAssistant, failure: str,
+) -> None:
+    coordinator, mqtt = _setup(hass)
+    try:
+        await _receive(coordinator, "vivosun-VSPLUGA22-test", "get/accepted", _report(
+            "usb1", {**_FIELDS, "mode": 0},
+        ))
+        await coordinator.async_set_a22_manual_power("a22-1", "usb1", False)
+        sent = mqtt.published[-1][1]
+        await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/accepted", _report(
+            "usb1", {"mode": 2}, 101, 1001,
+        ))
+        with pytest.raises(ServiceValidationError, match="pending"):
+            await coordinator.async_set_a22_mode("a22-1", "usb1", 0)
+        if failure == "rejection":
+            await _receive(coordinator, "vivosun-VSPLUGA22-test", "update/rejected", {
+                "clientToken": sent["clientToken"], "code": 403,
+            })
+        else:
+            key, pending = next(iter(coordinator._a22_pending.items()))
+            coordinator._a22_expire(key, pending.token)
+        with pytest.raises(ServiceValidationError, match="fresh"):
+            await coordinator.async_set_a22_mode("a22-1", "usb1", 0)
+        assert len(mqtt.published) == 1
+    finally:
+        await coordinator.async_shutdown()
 
 
 async def test_partial_metadata_never_reopens_stale_no_plan_guard(hass: HomeAssistant) -> None:
