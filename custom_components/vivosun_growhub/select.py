@@ -12,6 +12,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, OPTION_SPECTRUM_CONTROLLERS
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .shadow import build_light_spectrum_payload
 from .vseed import STAGES, command, reported_seed, stage_name
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.device_registry import DeviceInfo
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .models import DeviceInfo as VivosunDeviceInfo
     from .models import RuntimeData
 
 OPTION_STOPPED = "Stopped"
@@ -57,22 +59,17 @@ async def async_setup_entry(
     coordinator = _runtime(hass, entry).coordinator
     if coordinator is None:
         return
-    async_add_entities(
-        [
-            VivosunCureModeSelect(coordinator, device.device_id)
-            for device in coordinator.devices
-            if device.device_type == "curing_box"
-        ] + [
-            VivosunSeedStageSelect(coordinator, device.device_id)
-            for device in coordinator.devices
-            if device.device_type == "vseed"
-        ] + [
-            VivosunSpectrumSelect(coordinator, device.device_id)
-            for device in coordinator.devices
-            if device.device_type == "controller"
-            and device.device_id in entry.options.get(OPTION_SPECTRUM_CONTROLLERS, [])
-        ]
-    )
+    def factory(device: VivosunDeviceInfo) -> list[SelectEntity]:
+        if device.device_type == "curing_box":
+            return [VivosunCureModeSelect(coordinator, device.device_id)]
+        if device.device_type == "vseed":
+            return [VivosunSeedStageSelect(coordinator, device.device_id)]
+        if (device.device_type == "controller"
+                and device.device_id in entry.options.get(OPTION_SPECTRUM_CONTROLLERS, [])):
+            return [VivosunSpectrumSelect(coordinator, device.device_id)]
+        return []
+
+    watch_devices(entry, coordinator, async_add_entities, factory)
 
 
 class VivosunSpectrumSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]

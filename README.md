@@ -2,23 +2,33 @@
 
 Connect GrowHub controllers and supported Vivosun devices from the Vivosun app to Home Assistant.
 
+Requires Home Assistant 2026.11.0 or newer.
+
 Requires your Vivosun app account. Device control and sensor readings use the Vivosun cloud. GrowCam video streams over your local network.
 
 [![GitHub releases](https://img.shields.io/github/v/release/lientry/homeassistant-vivosun-growhub?style=flat-square&label=GitHub%20releases)](https://github.com/lientry/homeassistant-vivosun-growhub/releases)
 
+<!-- ha-marketplace:exclude-start -->
 ## Quick Start
 
-1. Install **Vivosun GrowHub** through [HACS](https://hacs.xyz/docs/use/).
+1. Install **Vivosun GrowHub** through the [Marketplace](https://www.home-assistant.io/integrations/marketplace).
 2. Restart Home Assistant.
 3. Add **Vivosun GrowHub** and sign in with your Vivosun app account.
 
-[![Install with HACS](https://img.shields.io/badge/Install_with-HACS-41BDF5?style=for-the-badge)](https://my.home-assistant.io/redirect/hacs_repository/?owner=lientry&repository=homeassistant-vivosun-growhub&category=integration) [![Add Integration](https://img.shields.io/badge/Add-Integration-18BCF2?style=for-the-badge)](https://my.home-assistant.io/redirect/config_flow_start/?domain=vivosun_growhub)
+[![Install with Marketplace](https://img.shields.io/badge/Install_with-Marketplace-41BDF5?style=for-the-badge)](https://my.home-assistant.io/redirect/hacs_repository/?owner=lientry&repository=homeassistant-vivosun-growhub&category=integration) [![Add Integration](https://img.shields.io/badge/Add-Integration-18BCF2?style=for-the-badge)](https://my.home-assistant.io/redirect/config_flow_start/?domain=vivosun_growhub)
+<!-- ha-marketplace:exclude-end -->
+
+## Gardens
+
+Each garden in the Vivosun app appears as a native Home Assistant service device, with its connected physical devices beneath it. Garden sensors show the configured recipe and stage, plus equipment schedules where available, including for gardens without a connected controller.
+
+**Upgrading?** Controller plan sensors now belong to gardens. If automations or dashboards reference the old controller plan sensors, update those references to garden sensors after upgrading. Physical controls keep their entity IDs.
 
 ## Supported devices
 
 | Device | Controls | Sensors |
 | --- | --- | --- |
-| GrowHub E42, E42A, E42A+, E25 | Grow light brightness, circulation and duct fans, fan presets, spectrum, oscillation | Temperature, humidity, VPD, connection, grow-plan stage and schedules |
+| GrowHub E42, E42A, E42A+, E25 | Grow light brightness, circulation and duct fans, fan presets, spectrum, oscillation | Temperature, humidity, VPD and connection |
 | GrowHub A10 | One AC outlet | Connection |
 | GrowHub A22 | Two USB outputs and two AC outlets | Probe temperature, humidity and VPD |
 | VGrow | Grow light, fans, spectrum and two USB outputs | Temperature, humidity, VPD, DWC water level and temperature |

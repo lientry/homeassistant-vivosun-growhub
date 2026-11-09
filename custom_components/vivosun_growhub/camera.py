@@ -10,6 +10,7 @@ from homeassistant.components.camera import Camera, CameraEntityFeature
 
 from .camera_config import camera_ips_from_options
 from .const import DOMAIN
+from .discovery import watch_devices
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -37,26 +38,20 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    camera_devices = coordinator.camera_devices
-    if not camera_devices:
-        return
-    camera_ips = camera_ips_from_options(entry.options, camera_devices)
-
-    entities: list[VivosunGrowCamEntity] = []
-    for camera_device in camera_devices:
+    def factory(camera_device: DeviceInfo) -> list[VivosunGrowCamEntity]:
+        camera_ips = camera_ips_from_options(entry.options, coordinator.camera_devices)
         camera_ip = camera_ips.get(camera_device.device_id)
         if not camera_ip:
-            continue
+            return []
         if not camera_device.camera_username or not camera_device.camera_password:
             _LOGGER.warning(
                 "Skipping Vivosun camera %s because LAN credentials are missing",
                 camera_device.name,
             )
-            continue
-        entities.append(VivosunGrowCamEntity(device=camera_device, camera_ip=camera_ip))
+            return []
+        return [VivosunGrowCamEntity(device=camera_device, camera_ip=camera_ip)]
 
-    if entities:
-        async_add_entities(entities)
+    watch_devices(entry, coordinator, async_add_entities, factory, cameras=True)
 
 
 class VivosunGrowCamEntity(Camera):  # type: ignore[misc]

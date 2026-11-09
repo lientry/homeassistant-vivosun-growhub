@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 from homeassistant.const import Platform
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub import async_setup, async_setup_entry, async_unload_entry
 from custom_components.vivosun_growhub.const import (
@@ -62,6 +62,9 @@ class _StubCoordinator:
     async def async_start(self) -> None:
         self.started = True
 
+    def set_garden_topology(self, _topology: object) -> None:
+        """Allow registry initialization in setup tests."""
+
     async def async_shutdown(self) -> None:
         self.stopped = True
 
@@ -105,8 +108,9 @@ async def test_constants_match_wp1_spec() -> None:
 
     assert DESIRED_LEVEL_PATH_NOTE == "desired.<key>.manu.lv"
     assert PLATFORMS == [
-        Platform.NUMBER, Platform.SELECT, Platform.SWITCH, Platform.LIGHT, Platform.FAN, Platform.SENSOR,
+        Platform.SELECT, Platform.SWITCH, Platform.LIGHT, Platform.FAN, Platform.SENSOR,
         Platform.BINARY_SENSOR, Platform.HUMIDIFIER, Platform.CLIMATE, Platform.CAMERA,
+        Platform.NUMBER,
     ]
 
 

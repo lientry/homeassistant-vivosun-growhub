@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import CONF_CAMERA_IPS, DOMAIN, OPTION_SUPPORT_CAPTURE_ENABLED
 from custom_components.vivosun_growhub.diagnostics import async_get_config_entry_diagnostics

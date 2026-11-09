@@ -11,6 +11,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
 from .ports import PORTS_BY_MODEL, PortReport, build_manual_port_payload, reported_port
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.device_registry import DeviceInfo
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .models import DeviceInfo as VivosunDeviceInfo
     from .models import RuntimeData
 
 
@@ -59,25 +61,27 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    entities: list[SwitchEntity] = []
-    for device in coordinator.devices:
+    def factory(device: VivosunDeviceInfo) -> list[SwitchEntity]:
+        entities: list[SwitchEntity] = []
         model = client_model_token(device.client_id)
         if model in PORTS_BY_MODEL:
             entities.extend(
                 VivosunPortSwitch(coordinator, device.device_id, port, model) for port in PORTS_BY_MODEL[model]
             )
             if model in _PORT_ONLY_MODELS:
-                continue
+                return entities
         if device.device_type == "vseed":
             entities.append(VivosunSeedIrrigationSwitch(coordinator, device.device_id))
             for phase in (1, 2, 3):
                 for key in ("lgtEn", "pumpEn"):
                     entities.append(VivosunSeedStageSwitch(coordinator, device.device_id, phase, key))
         if device.device_type != "curing_box":
-            continue
+            return entities
         for description in _CURING_BOX_SWITCHES:
             entities.append(VivosunControlSwitch(coordinator, device.device_id, description))
-    async_add_entities(entities)
+        return entities
+
+    watch_devices(entry, coordinator, async_add_entities, factory)
 
 
 class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  # type: ignore[misc]

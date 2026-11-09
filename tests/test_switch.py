@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from discovery_stubs import DiscoveryCoordinatorStub
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 _DEV_ID = "vcure-1"
 
 
-class _StubCoordinator:
+class _StubCoordinator(DiscoveryCoordinatorStub):
     def __init__(self) -> None:
         self.data: dict[str, object] = {
             "shadows": {

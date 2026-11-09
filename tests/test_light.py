@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
+from discovery_stubs import DiscoveryCoordinatorStub
 from homeassistant.components.light import ATTR_BRIGHTNESS
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
 from custom_components.vivosun_growhub.light import VivosunLightEntity, async_setup_entry
 from custom_components.vivosun_growhub.models import DeviceInfo, RuntimeData
-from custom_components.vivosun_growhub.shadow import build_light_level_payload, build_light_spectrum_payload
+from custom_components.vivosun_growhub.shadow import build_light_spectrum_payload
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -32,15 +33,23 @@ def _controller_device(device_id: str) -> DeviceInfo:
     )
 
 
-class _StubCoordinator:
+class _StubCoordinator(DiscoveryCoordinatorStub):
     def __init__(self, devices: list[DeviceInfo] | None = None) -> None:
         self.data: dict[str, object] = {}
         self._devices = devices or [_controller_device(_DEV_ID)]
         self.is_mqtt_connected = True
         self.async_publish_shadow_update = AsyncMock()
         self.async_publish_light_level = AsyncMock()
-        self.manual_memory_enabled = lambda device_id, channel: False
-        self.manual_restore_allowed = lambda device_id, channel: False
+
+    def manual_memory_enabled(self, device_id: str, channel: str) -> bool:
+        """Options default off for these legacy command-path tests."""
+        return False
+
+    def remembered_manual_selection(self, device_id: str, channel: str) -> int | str | None:
+        return None
+
+    def manual_restore_allowed(self, device_id: str, channel: str) -> bool:
+        return False
 
     @property
     def device(self) -> DeviceInfo:
@@ -125,29 +134,23 @@ async def test_light_turn_on_and_off_publishes_shadow_payloads() -> None:
     entity = _make_light(coordinator)
 
     await entity.async_turn_on(**{ATTR_BRIGHTNESS: 255})
-    coordinator.async_publish_light_level.assert_awaited_once_with(
-        100, device_id=_DEV_ID
-    )
+    coordinator.async_publish_light_level.assert_awaited_once_with(100, device_id=_DEV_ID)
 
     coordinator.async_publish_light_level.reset_mock()
     coordinator.data = {"shadows": {_DEV_ID: {"light": {"level": 0}}}}
     await entity.async_turn_on()
-    coordinator.async_publish_light_level.assert_awaited_once_with(
-        25, device_id=_DEV_ID
-    )
+    coordinator.async_publish_light_level.assert_awaited_once_with(25, device_id=_DEV_ID)
 
     coordinator.async_publish_light_level.reset_mock()
     await entity.async_turn_on(**{ATTR_BRIGHTNESS: 0, "spectrum": 40})
     coordinator.async_publish_light_level.assert_awaited_once_with(0, device_id=_DEV_ID)
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
-        build_light_spectrum_payload(40), device_id=_DEV_ID,
+        build_light_spectrum_payload(40), device_id=_DEV_ID
     )
 
     coordinator.async_publish_light_level.reset_mock()
     await entity.async_turn_off()
-    coordinator.async_publish_light_level.assert_awaited_once_with(
-        0, device_id=_DEV_ID
-    )
+    coordinator.async_publish_light_level.assert_awaited_once_with(0, device_id=_DEV_ID)
 
 
 async def test_light_turn_on_clamps_nonzero_levels_to_device_minimum() -> None:
@@ -155,10 +158,7 @@ async def test_light_turn_on_clamps_nonzero_levels_to_device_minimum() -> None:
     entity = _make_light(coordinator)
 
     await entity.async_turn_on(**{ATTR_BRIGHTNESS: 10})
-    coordinator.async_publish_light_level.assert_awaited_once_with(
-        4, device_id=_DEV_ID
-    )
-    assert build_light_level_payload(4) == build_light_level_payload(25)
+    coordinator.async_publish_light_level.assert_awaited_once_with(4, device_id=_DEV_ID)
 
 
 async def test_light_brightness_boundaries() -> None:

@@ -9,6 +9,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, LIGHT_MIN_BRIGHTNESS
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .shadow import build_light_spectrum_payload
 
@@ -37,11 +38,9 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    for device in coordinator.devices:
-        if device.device_type == "controller":
-
-            device_id = device.device_id
-            async_add_entities([VivosunLightEntity(coordinator, device_id)])
+    watch_devices(entry, coordinator, async_add_entities, lambda device: [
+        VivosunLightEntity(coordinator, device.device_id)
+    ] if device.device_type == "controller" else [])
 
 
 class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  # type: ignore[misc]

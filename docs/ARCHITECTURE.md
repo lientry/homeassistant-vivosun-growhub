@@ -20,6 +20,18 @@ One coordinator routes devices by their device ID, client ID and topic prefix. D
 
 VSeed S40 discovery and point-log requests accept a device without a garden scene. A10 discovery also accepts a device without a garden scene, and the A10 makes no point-log requests. Cameras use account discovery and optional per-camera LAN IP configuration, but remain outside the MQTT device path. RTSP credentials are URL-encoded when building stream URLs.
 
+### Garden recipe schedules
+
+Garden recipes use independently read garden plan data, not a controller's shadow as the authoritative recipe. The app's `planStageContent` slot times are seconds from stage-relative midnight, with `86400` as the day endpoint. The verified zero-`timeOffset` projection adds the configured stage start's garden-local hour and minute to those slot times. Nonzero `timeOffset` and unresolved DST transitions remain unknown rather than guessed; no app maintenance or synchronization actions are copied.
+
+Garden recipe, current-stage and configured equipment schedules belong only to garden service devices. Schedule families follow configured recipe slots, including gardens without a connected controller; they do not prove accessory attachment or execution. Empty gardens keep recipe/stage sensors without invented schedules. Failed reads stay unavailable until recovery.
+
+Reported device plan changes trigger coalesced garden reads, not inferred garden state. Manual entity refresh and integration reload also refresh garden data. Without a device event, the periodic fallback can take roughly three minutes plus API latency and cloud propagation. All garden recipe and capture-stage reads share a three-request limit, with per-garden ordering preventing stale results from winning.
+
+Successful complete inventory refreshes remove deleted garden service devices and their garden entities. Physical devices are detached or reassociated without losing their identities or measurements. Failed or superseded inventory reads never remove gardens.
+
+On upgrade, exact legacy controller plan sensor registry rows are disabled and kept with their existing IDs, user metadata and historical records. Those rows no longer publish states. Dashboards and automations referencing old controller plan sensors must switch to the garden-owned IDs. Physical sensors and controls retain their IDs and behavior.
+
 ## State and command contracts
 
 The integration uses the classic unnamed AWS shadow: `get`, `get/accepted`, `update`, `update/accepted` and `update/documents`. Controller `update/rejected` subscriptions are best effort: missing permission must not disrupt primary control. `update/delta` is not projected as live state because it describes desired/reported drift.
@@ -107,7 +119,7 @@ Capture initializes asynchronously, exposes partial/failure outcomes and stops i
 
 Collection is bounded by device count, payload size, nesting, collection length and traversal budgets. The rolling buffer reports eviction and truncation. Latest shadow-read outcomes, REST results/samples and existing stage-info outcomes remain outside that ring under their own caps.
 
-REST and `/iot/plan/stageInfo` capture observes existing requests only. Stage results preserve known stage ID correlation, name, icon and parsed object content, or bounded failure status. It neither adds requests nor edits programs. Known-stage results do not enumerate saved recipes or intercept proprietary app REST calls.
+REST telemetry capture observes existing requests. While capture is enabled, genuinely reported stage IDs trigger at most one `/iot/plan/stageInfo` read per ID, capped at 25 IDs per session. Results preserve stage ID correlation, name, icon and parsed object content, or bounded failure status. Stop or restart rejects late results from earlier sessions. Capture does not edit programs, enumerate saved recipes or intercept proprietary app REST calls.
 
 Capture preserves useful telemetry and device/scene/program identifiers. Recognized credentials, account identities, hardware/network identifiers and location fields are masked recursively. Client/topic pseudonyms preserve routing correlation. Normal inventory/debug output uses stricter identifier filtering. Unknown fields and free-form text can still contain personal information, so users must review exports before sharing.
 

@@ -8,9 +8,11 @@ import logging
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal, TypeAlias, cast
+from functools import partial
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar, cast
 from uuid import uuid4
 
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import VivosunApiClient
@@ -31,7 +33,9 @@ from .const import (
     TOPIC_SHADOW_UPDATE_DOCUMENTS,
     TOPIC_SHADOW_UPDATE_REJECTED,
 )
-from .exceptions import VivosunAuthError, VivosunResponseError
+from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
+from .garden_topology import GardenTopology, garden_membership
+from .gardens import GardenPlanRead
 from .model_metadata import support_capture_model_metadata
 from .models import CaptureDevice, client_model_token
 from .mqtt_client import MQTTClient, MQTTConnectionError, MQTTError
@@ -54,19 +58,24 @@ from .shadow import (
 from .support_capture import (
     SUPPORT_CAPTURE_MAX_DEVICES,
     SUPPORT_CAPTURE_MAX_PAYLOAD_BYTES,
+    SUPPORT_CAPTURE_MAX_STAGE_RESULTS,
     SupportCaptureManager,
     summarize_support_capture_payload,
 )
 from .vseed import POINT_LOG_KEYS
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     import aiohttp
     from homeassistant.core import HomeAssistant
 
+    from .gardens import GardenInventory
     from .manual_preferences import ManualPreferences, ManualSelection
     from .models import AuthTokens, AwsIdentity, DeviceInfo
 
 _LOGGER = logging.getLogger(__name__)
+_ReadResult = TypeVar("_ReadResult")
 _RECONNECT_BACKOFF_INITIAL = 1.0
 _RECONNECT_BACKOFF_MAX = 60.0
 _RECONNECT_HEALTH_CHECK_SECONDS = 2.0
@@ -74,12 +83,26 @@ _POINT_LOG_WINDOW_SECONDS = 300
 _SHADOW_REFRESH_INTERVAL_SECONDS = 30.0
 _SUPPORT_SHADOW_READ_TIMEOUT = 10.0
 _FIELD_CONFIRMATION_TIMEOUT = 15.0
+_INVENTORY_REFRESH_INTERVAL = timedelta(minutes=10)
+_GARDEN_TICK_INTERVAL = timedelta(minutes=1)
+_GARDEN_READ_INTERVAL = timedelta(minutes=2)
+_GARDEN_EVENT_COALESCE_SECONDS = 0.05
+
+
+def _garden_read_failure_category(error: Exception) -> str:
+    """Classify a cloud read without logging untrusted exception details."""
+    if isinstance(error, VivosunAuthError):
+        return "authentication"
+    if isinstance(error, (VivosunConnectionError, TimeoutError)):
+        return "transport"
+    if isinstance(error, VivosunResponseError):
+        return "response_or_schema"
+    return "unexpected"
 
 _Channel: TypeAlias = Literal["light", "cFan", "dFan"]
 _Field: TypeAlias = Literal["level", "mode"]
 _FieldKey: TypeAlias = tuple[str, _Channel, _Field]
 _CONTROLLER_CHANNELS: tuple[_Channel, ...] = ("light", "cFan", "dFan")
-
 
 @dataclass(slots=True)
 class _PendingField:
@@ -117,7 +140,11 @@ class _ReportedFieldProvenance:
 def _reported_field_is_fresh(
     previous: _ReportedFieldProvenance | None, incoming: _ReportedFieldProvenance, topic: str,
 ) -> bool:
-    """Reject stale per-leaf reads without blocking independent partial reports."""
+    """Reject stale per-leaf reads without imposing whole-shadow ordering.
+
+    Equal-version reports can supply different fields. Metadata timestamps have
+    one-second precision, so same-time GETs cannot override known reports.
+    """
     if previous is None:
         return True
     if previous.version is not None and (incoming.version is None or incoming.version < previous.version):
@@ -139,7 +166,7 @@ def _reported_field_is_fresh(
 
 @dataclass(slots=True)
 class _PendingManualChoice:
-    """Explicit HA input awaiting its matching cloud shadow acceptance."""
+    """One explicit HA input awaiting its matching cloud shadow acknowledgement."""
 
     device_id: str
     channel: str
@@ -176,13 +203,35 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._password = password
 
         self._tokens: AuthTokens | None = None
+        self._auth_lock = asyncio.Lock()
         self._aws_identity: AwsIdentity | None = None
         self._aws_credentials: AwsCredentials | None = None
         self._devices: list[DeviceInfo] = []
         self._camera_devices: list[DeviceInfo] = []
+        self._all_devices: list[DeviceInfo] = []
+        self._garden_inventory: GardenInventory | None = None
+        self._garden_topology: GardenTopology | None = None
+        self._garden_reads: dict[int, GardenPlanRead] = {}
+        self._garden_read_limit = asyncio.Semaphore(3)
+        self._garden_read_tasks: dict[int, asyncio.Task[None]] = {}
+        self._garden_read_versions: dict[int, int] = {}
+        self._garden_read_last_attempt: dict[int, datetime] = {}
+        self._physical_sample_versions: dict[str, int] = {}
+        self._reported_plan_signatures: dict[str, str] = {}
+        self._garden_listeners: list[Callable[[GardenInventory], None]] = []
+        self._inventory_generation = 0
+        self._inventory_last_attempt: datetime | None = None
+        self._unsub_inventory_refresh: Callable[[], None] | None = None
+        self._unsub_garden_tick: Callable[[], None] | None = None
+        self._inventory_apply_lock = asyncio.Lock()
+        self._forced_inventory_task: asyncio.Task[None] | None = None
+        self._device_listeners: list[tuple[Callable[[list[DeviceInfo]], None], bool]] = []
+        self._subscribed_routes: set[tuple[str, str]] = set()
         self._capture_devices: list[CaptureDevice] = []
         self._support_shadow_waiters: dict[tuple[str, str], asyncio.Future[dict[str, object]]] = {}
         self._support_capture_task: asyncio.Task[None] | None = None
+        self._support_stage_tasks: set[asyncio.Task[None]] = set()
+        self._support_stage_seen: set[str] = set()
         self._mqtt_client: MQTTClient | None = None
         self._support_capture_probe_client: MQTTClient | None = None
         self._support_capture = SupportCaptureManager()
@@ -208,7 +257,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._manual_fact_provenance: dict[tuple[str, str, str], _ReportedFieldProvenance] = {}
         self._field_generation = 0
         self._sensor_states: dict[str, dict[str, object]] = {}
-        self._plan_stage_cache: dict[str, object] = {}  # stage_id -> PlanStageInfo
 
         # Reverse lookups for MQTT topic routing
         self._client_id_to_device_id: dict[str, str] = {}
@@ -244,6 +292,88 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         return list(self._camera_devices)
 
     @property
+    def garden_inventory(self) -> GardenInventory | None:
+        """Last complete consistent garden/device listing, if one was accepted."""
+        return self._garden_inventory
+
+    def garden_plan_read(self, scene_id: int) -> GardenPlanRead:
+        """Return per-garden recipe read health, independent of MQTT."""
+        return self._garden_reads.get(scene_id, GardenPlanRead(None, "unknown"))
+
+    def _physical_poll_is_current(self, device: DeviceInfo, generation: int, version: int) -> bool:
+        """Accept a completed poll only for its still-active inventory and route."""
+        return (
+            self._inventory_is_current(generation)
+            and self._physical_sample_versions.get(device.device_id) == version
+            and device in self._all_devices
+            and device in self._devices
+        )
+
+
+    def garden_schedule_keys(self, scene_id: int) -> frozenset[str]:
+        """Show families with configured schedule slots, independent of equipment."""
+        inventory = self._garden_inventory
+        read = self.garden_plan_read(scene_id)
+        if inventory is None or read.plans is None or read.status not in ("current", "refreshing"):
+            return frozenset()
+        if not any(g.scene_id == scene_id for g in inventory.gardens):
+            return frozenset()
+        keys: set[str] = set()
+        for plan in read.plans.plans:
+            for stage in plan.stages:
+                if stage.content_status != "valid" or stage.content is None:
+                    continue
+                for key in ("light", "cfan", "dfan", "hmdf", "dhmdf", "drip", "heat", "aircd"):
+                    family = stage.content.get(key)
+                    if isinstance(family, dict) and isinstance(family.get("slot"), list) and family["slot"]:
+                        keys.add(key)
+        return frozenset(keys)
+
+    def async_add_garden_listener(
+        self, callback: Callable[[GardenInventory], None],
+    ) -> Callable[[], None]:
+        """Deliver accepted gardens and configured recipe updates to platforms."""
+        if self._garden_inventory is not None:
+            callback(self._garden_inventory)
+        self._garden_listeners.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._garden_listeners:
+                self._garden_listeners.remove(callback)
+
+        return unsubscribe
+
+    def _notify_garden_listeners(self) -> None:
+        inventory = self._garden_inventory
+        if inventory is None:
+            return
+        for listener in tuple(self._garden_listeners):
+            try:
+                listener(inventory)
+            except Exception:
+                self._logger.exception("Garden sensor discovery callback failed")
+
+    def set_garden_topology(self, topology: GardenTopology) -> None:
+        """Attach HA registry updates after bootstrap and before platforms load."""
+        if self._garden_inventory is not None:
+            topology.apply(self._garden_inventory, self._all_devices)
+        self._garden_topology = topology
+
+    def async_add_discovery_listener(
+        self, callback: Callable[[list[DeviceInfo]], None], *, cameras: bool = False,
+    ) -> Callable[[], None]:
+        """Watch accepted account discoveries; provide current devices immediately."""
+        subscription = (callback, cameras)
+        callback(self.camera_devices if cameras else self.devices)
+        self._device_listeners.append(subscription)
+
+        def unsubscribe() -> None:
+            if subscription in self._device_listeners:
+                self._device_listeners.remove(subscription)
+
+        return unsubscribe
+
+    @property
     def support_capture_active(self) -> bool:
         """Return whether support capture is active."""
         return self._support_capture.active
@@ -266,9 +396,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
     async def _async_update_data(self) -> dict[str, object]:
         """Poll climate telemetry while MQTT handles device control and push state."""
+        await self.async_refresh_inventory()
         await self._refresh_point_log()
         await self._async_refresh_stale_shadow_states()
-        await self._refresh_plan_stages()
         return self._build_state_snapshot()
 
     async def async_start(self) -> None:
@@ -280,6 +410,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._shutdown_event.clear()
             self._reconnect_event.clear()
             await self._bootstrap_chain()
+            await self.async_refresh_inventory(initial_devices=self._all_devices, wait_for_plans=False)
+            if (not self._all_devices and not self._capture_devices and not self.skipped_devices_snapshot()
+                    and not (self._garden_inventory and self._garden_inventory.gardens)):
+                raise VivosunResponseError("No devices found for this account")
             if self._devices:
                 self._refresh_task = asyncio.create_task(
                     self._credentials_refresh_loop(),
@@ -290,6 +424,12 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     name="vivosun_reconnect_supervisor",
                 )
             self._started = True
+            self._unsub_inventory_refresh = async_track_time_interval(
+                self.hass, self._async_periodic_inventory_refresh, _INVENTORY_REFRESH_INTERVAL,
+            )
+            self._unsub_garden_tick = async_track_time_interval(
+                self.hass, self._async_garden_tick, _GARDEN_TICK_INTERVAL,
+            )
             await self._refresh_point_log()
             self.async_set_updated_data(self._build_state_snapshot())
 
@@ -298,6 +438,27 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         async with self._start_lock:
             self._shutdown_event.set()
             self._reconnect_event.set()
+            self._inventory_generation += 1
+            if self._forced_inventory_task is not None:
+                self._forced_inventory_task.cancel()
+                await asyncio.gather(self._forced_inventory_task, return_exceptions=True)
+                self._forced_inventory_task = None
+            self._debounced_refresh.async_cancel()
+            for task in self._garden_read_tasks.values():
+                task.cancel()
+            self._physical_sample_versions.clear()
+            if self._garden_read_tasks:
+                await asyncio.gather(*self._garden_read_tasks.values(), return_exceptions=True)
+            self._garden_read_tasks.clear()
+            self._garden_read_versions.clear()
+            self._garden_read_last_attempt.clear()
+            self._reported_plan_signatures.clear()
+            if self._unsub_inventory_refresh is not None:
+                self._unsub_inventory_refresh()
+                self._unsub_inventory_refresh = None
+            if self._unsub_garden_tick is not None:
+                self._unsub_garden_tick()
+                self._unsub_garden_tick = None
 
             tasks = [task for task in (self._refresh_task, self._reconnect_task) if task is not None]
             for task in tasks:
@@ -308,11 +469,17 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._refresh_task = None
             self._reconnect_task = None
 
-            await self._cancel_support_capture_task()
-            await self._disconnect_support_capture_probe_client()
+            await self.async_stop_support_capture()
             await self._disconnect_mqtt_client()
 
             self._started = False
+            self._garden_inventory = None
+            self._garden_topology = None
+            self._garden_reads.clear()
+            self._garden_listeners.clear()
+            self._inventory_last_attempt = None
+            self._all_devices.clear()
+            self._device_listeners.clear()
             self._tokens = None
             self._aws_identity = None
             self._aws_credentials = None
@@ -327,12 +494,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._locally_commanded_fields.clear()
             self._confirmed_spectrum.clear()
             self._spectrum_report_provenance.clear()
-            for receipt in self._already_confirmed_tokens.values():
-                receipt.timeout.cancel()
-            self._already_confirmed_tokens.clear()
             self._last_accepted_manual_generation.clear()
             self._sensor_states.clear()
-            self._plan_stage_cache.clear()
             self._client_id_to_device_id.clear()
             self._topic_prefix_to_device_id.clear()
             self._last_shadow_refresh_request_at.clear()
@@ -415,7 +578,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         )
 
     def manual_memory_enabled(self, device_id: str, channel: str) -> bool:
-        """Check opt-in and the supported controller device/channel contract."""
+        """Check the global option and supported controller channel."""
         device = self.get_device(device_id)
         preferences = self.manual_preferences
         return bool(
@@ -424,20 +587,21 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         )
 
     def remembered_manual_selection(self, device_id: str, channel: str) -> ManualSelection | None:
-        """Return stored HA intent only when memory is enabled."""
+        """Return a remembered numeric or native preset when memory is enabled."""
         preferences = self.manual_preferences
         if preferences is None or not self.manual_memory_enabled(device_id, channel):
             return None
         return preferences.selection(device_id, channel)
 
     def manual_restore_allowed(self, device_id: str, channel: str) -> bool:
-        """Require fresh, genuinely reported manual and no-plan component state."""
+        """Require actual, fresh per-component Manual and no-plan reports."""
         facts = self._confirmed_manual_facts.get((device_id, channel), {})
         return facts.get("mode") == 0 and facts.get("inPlan") == 0
 
     def _stage_manual_choice(
         self, device_id: str, channel: str, selection: ManualSelection, shadow_level: int, token: str,
     ) -> None:
+        """Keep a selected value pending until the cloud accepts that exact write."""
         self._manual_choice_generation += 1
         generation = self._manual_choice_generation
         timeout = asyncio.get_running_loop().call_later(
@@ -456,7 +620,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         return True
 
     async def _accept_manual_choice(self, device_id: str, document: dict[str, object]) -> None:
-        """Store only the explicit value correlated to a matching cloud ACK."""
+        """Only a matching desired update/accepted can persist explicit HA intent."""
         token = document.get("clientToken")
         if not isinstance(token, str):
             return
@@ -483,7 +647,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     async def async_publish_selected_fan_level(
         self, *, device_id: str, channel: str, shadow_level: int,
     ) -> None:
-        """Publish a selected fan level with an independent preference ACK receipt."""
+        """Tokenize explicit numeric speed or circulation Natural Wind selections."""
         values = CFAN_LEVEL_MAP if channel == "cFan" else DFAN_LEVEL_MAP if channel == "dFan" else ()
         is_natural_wind = channel == "cFan" and shadow_level == 200
         if not is_natural_wind and shadow_level not in values[1:]:
@@ -738,6 +902,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
     def _notify_shadow_changed(self) -> None:
         self.data = self._build_state_snapshot()
+        self._notify_garden_listeners()
         self.async_update_listeners()
 
     def _resolve_device(self, device_id: str | None) -> DeviceInfo:
@@ -754,6 +919,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._logger.info("Starting Vivosun coordinator bootstrap")
         self._tokens = await self._api.login(self._email, self._password)
         all_devices = await self._api.get_devices(self._tokens)
+        self._all_devices = list(all_devices)
         self._capture_devices = list({device.client_id: device for device in self._api.capture_devices}.values())
         self._camera_devices = [device for device in all_devices if device.device_type == "camera"]
         self._devices = self._select_devices(all_devices)
@@ -764,6 +930,293 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._aws_identity = await self._api.get_aws_identity(self._tokens)
         self._aws_credentials = await self._aws_auth.get_credentials_for_identity(self._aws_identity)
         await self._connect_mqtt()
+
+    async def _async_periodic_inventory_refresh(self, _now: datetime) -> None:
+        """Poll account inventory without relying on entity platform listeners."""
+        await self.async_refresh_inventory()
+
+    async def _async_garden_tick(self, _now: datetime) -> None:
+        """Re-evaluate stage labels and refresh gardens independently of account inventory."""
+        if not self._shutdown_event.is_set() and self._garden_inventory is not None:
+            self._notify_shadow_changed()
+            for garden in self._garden_inventory.gardens:
+                self._queue_garden_read(garden.scene_id, periodic=True)
+
+
+    def _queue_garden_read(self, scene_id: int, *, periodic: bool = False) -> asyncio.Task[None] | None:
+        """Coalesce per-garden plan invalidations without blocking MQTT handling."""
+        if self._shutdown_event.is_set() or self._tokens is None or self._garden_inventory is None:
+            return None
+        if not any(g.scene_id == scene_id for g in self._garden_inventory.gardens):
+            return None
+        if periodic:
+            last = self._garden_read_last_attempt.get(scene_id)
+            if last is not None and datetime.now(tz=UTC) - last < _GARDEN_READ_INTERVAL:
+                return None
+        else:
+            self._garden_read_versions[scene_id] = self._garden_read_versions.get(scene_id, 0) + 1
+        task = self._garden_read_tasks.get(scene_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._run_garden_reads(scene_id))
+            self._garden_read_tasks[scene_id] = task
+            task.add_done_callback(partial(self._garden_read_done, scene_id))
+        return task
+
+
+
+    def _garden_read_done(self, scene_id: int, task: asyncio.Task[None]) -> None:
+        if self._garden_read_tasks.get(scene_id) is task:
+            self._garden_read_tasks.pop(scene_id, None)
+
+    async def _run_garden_reads(self, scene_id: int) -> None:
+        """Serialize a garden across all triggers; bound account-wide read concurrency."""
+        await asyncio.sleep(_GARDEN_EVENT_COALESCE_SECONDS)
+        while not self._shutdown_event.is_set():
+            tokens = self._tokens
+            if tokens is None or self._garden_inventory is None or not any(
+                g.scene_id == scene_id for g in self._garden_inventory.gardens
+            ):
+                return
+            async with self._garden_read_limit:
+                # Capture validity after waiting for the shared slot, so an
+                # event while queued does not cause an unnecessary extra read.
+                generation = self._inventory_generation
+                version = self._garden_read_versions.get(scene_id, 0)
+                self._garden_read_last_attempt[scene_id] = datetime.now(tz=UTC)
+                try:
+                    plans = await self._authenticated_read(lambda auth: self._api.get_garden_plans(auth, scene_id))
+                    if plans.scene_id != scene_id:
+                        raise VivosunResponseError("Garden plan identity mismatch")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    self._logger.warning(
+                        "Garden recipe read unavailable (%s); keeping last valid result",
+                        _garden_read_failure_category(error),
+                    )
+                    plans = None
+            async with self._inventory_apply_lock:
+                if self._shutdown_event.is_set() or self._garden_inventory is None or not any(
+                    g.scene_id == scene_id for g in self._garden_inventory.gardens
+                ):
+                    return
+                if not self._inventory_is_current(generation) or self._garden_read_versions.get(scene_id, 0) != version:
+                    # A later inventory/event must be read after this response.
+                    # Neither a stale success nor stale failure may win.
+                    continue
+                previous = self._garden_reads.get(scene_id)
+                self._garden_reads[scene_id] = GardenPlanRead(
+                    plans if plans is not None else previous.plans if previous is not None else None,
+                    "current" if plans is not None else "stale",
+                )
+                self._notify_shadow_changed()
+                return
+
+    async def async_request_refresh(self) -> None:
+        """The explicit HA refresh path also checks inventory, regardless of cadence."""
+        if self._shutdown_event.is_set():
+            return
+        task = self._forced_inventory_task
+        if task is None or task.done():
+            task = self._forced_inventory_task = asyncio.create_task(self.async_refresh_inventory(force=True))
+        await asyncio.shield(task)
+        if self._shutdown_event.is_set():
+            return
+        await super().async_request_refresh()
+
+    async def async_refresh_inventory(
+        self, *, force: bool = False, initial_devices: list[DeviceInfo] | None = None,
+        wait_for_plans: bool = True,
+    ) -> None:
+        """Observe account garden membership without writes or destructive discovery."""
+        tokens = self._tokens
+        if tokens is None or self._shutdown_event.is_set():
+            return
+        now = datetime.now(tz=UTC)
+        if (not force and self._inventory_last_attempt is not None
+                and now - self._inventory_last_attempt < _INVENTORY_REFRESH_INTERVAL):
+            return
+        self._inventory_last_attempt = now
+        self._inventory_generation += 1
+        generation = self._inventory_generation
+        try:
+            inventory = await self._authenticated_read(self._api.get_gardens)
+            devices = list(initial_devices if initial_devices is not None
+                           else await self._authenticated_read(self._api.get_devices))
+            garden_membership(inventory, devices)
+            async with self._inventory_apply_lock:
+                if not self._inventory_is_current(generation):
+                    return
+                await self._accept_inventory(inventory, devices, generation)
+            if self._inventory_is_current(generation):
+                await self._refresh_garden_plans(inventory, generation, wait=wait_for_plans)
+        except asyncio.CancelledError:
+            # A cancelled read has no successful outcome. Do not leave its
+            # previous snapshot labelled as an active in-flight refresh.
+            if self._inventory_is_current(generation):
+                for scene_id, read in tuple(self._garden_reads.items()):
+                    if read.status == "refreshing":
+                        self._garden_reads[scene_id] = GardenPlanRead(read.plans, "stale")
+                self._notify_shadow_changed()
+            raise
+        except Exception:
+            # An optional account listing cannot break existing MQTT controls or camera-only accounts.
+            self._logger.warning("Garden inventory refresh unavailable; keeping last verified links")
+            # A superseded inventory may still be awaiting MQTT handoff under
+            # the apply lock. Do not block failure handling behind that I/O.
+            if self._inventory_is_current(generation):
+                self._stale_garden_reads()
+                self._notify_shadow_changed()
+
+    def _stale_garden_reads(self) -> None:
+        for scene_id, read in tuple(self._garden_reads.items()):
+            self._garden_reads[scene_id] = GardenPlanRead(
+                read.plans, "stale" if read.plans is not None else "unknown",
+            )
+
+    async def _refresh_garden_plans(
+        self, inventory: GardenInventory, generation: int, *, wait: bool = True,
+    ) -> None:
+        """Share per-garden workers; startup queues them without delaying physical controls."""
+        if not self._inventory_is_current(generation):
+            return
+        tasks: dict[int, asyncio.Task[None]] = {}
+        started: dict[int, asyncio.Task[None]] = {}
+        versions: dict[int, int] = {}
+        for garden in inventory.gardens:
+            scene_id = garden.scene_id
+            prior = self._garden_read_tasks.get(scene_id)
+            task = self._queue_garden_read(scene_id)
+            if task is None:
+                continue
+            tasks[scene_id] = task
+            versions[scene_id] = self._garden_read_versions[scene_id]
+            if prior is None or prior.done():
+                started[scene_id] = task
+        if not wait:
+            return
+        try:
+            # Caller cancellation must not erase a later MQTT invalidation
+            # already queued on one of these shared workers.
+            # A newer inventory may retire a garden and cancel its worker.
+            # That cancellation must not cancel an otherwise valid older poll.
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks.values()), return_exceptions=True)
+        except asyncio.CancelledError:
+            abandoned = [
+                task for scene_id, task in started.items()
+                if self._inventory_is_current(generation)
+                and self._garden_read_versions.get(scene_id) == versions[scene_id]
+            ]
+            for task in abandoned:
+                task.cancel()
+            if abandoned:
+                await asyncio.gather(*abandoned, return_exceptions=True)
+            raise
+
+    def _inventory_is_current(self, generation: int) -> bool:
+        """Check validity again whenever an inventory operation resumes after awaiting."""
+        return generation == self._inventory_generation and not self._shutdown_event.is_set()
+
+    async def _accept_inventory(
+        self, inventory: GardenInventory, devices: list[DeviceInfo], generation: int,
+    ) -> None:
+        """Set up incremental MQTT routes before exposing a new complete snapshot."""
+        mqtt_devices = {d.device_id: d for d in self._devices}
+        cameras = {d.device_id: d for d in self._camera_devices}
+        for device in devices:
+            if device.device_type == "camera":
+                cameras[device.device_id] = device
+            elif device.client_id:
+                mqtt_devices[device.device_id] = device
+
+        # A disappeared device is retained, so validate the resulting routes, not
+        # only the latest cloud list. Never let a new ID steal a live thing/topic.
+        self._validate_runtime_routes(mqtt_devices, cameras)
+
+        mqtt = self._mqtt_client
+        prepared: set[tuple[str, str]] = set()
+        if mqtt is not None and mqtt.is_connected:
+            for device in mqtt_devices.values():
+                if (device.client_id, device.topic_prefix) not in self._subscribed_routes:
+                    await self._subscribe_device(mqtt, device, track=False, generation=generation)
+                    if not self._inventory_is_current(generation):
+                        return
+                    if self._mqtt_client is not mqtt or not mqtt.is_connected:
+                        break
+                    prepared.add((device.client_id, device.topic_prefix))
+
+        if not self._inventory_is_current(generation):
+            return
+
+        topology = self._garden_topology
+        if topology is not None:
+            topology.apply(inventory, devices)
+        self._garden_inventory = inventory
+        # A successful inventory preserves valid reads during the next plan fetch.
+        # Never revive failed reads, or leave absent gardens looking current.
+        listed = {garden.scene_id for garden in inventory.gardens}
+        for scene_id, task in tuple(self._garden_read_tasks.items()):
+            if scene_id not in listed:
+                task.cancel()
+                self._garden_read_tasks.pop(scene_id, None)
+                self._garden_read_versions.pop(scene_id, None)
+                self._garden_read_last_attempt.pop(scene_id, None)
+        for scene_id, read in tuple(self._garden_reads.items()):
+            if scene_id not in listed:
+                self._garden_reads.pop(scene_id)
+            elif read.status == "current":
+                self._garden_reads[scene_id] = GardenPlanRead(
+                    read.plans, "refreshing",
+                )
+        self._all_devices = devices
+        self._devices = sorted(mqtt_devices.values(), key=lambda d: (d.device_id, d.client_id, d.topic_prefix))
+        for device_id in tuple(self._physical_sample_versions):
+            if device_id not in mqtt_devices:
+                self._physical_sample_versions.pop(device_id, None)
+        self._camera_devices = list(cameras.values())
+        self._build_topic_maps()
+        if mqtt is self._mqtt_client and mqtt is not None and mqtt.is_connected:
+            self._subscribed_routes.update(prepared)
+
+        for callback, cameras_only in tuple(self._device_listeners):
+            try:
+                callback(self.camera_devices if cameras_only else self.devices)
+            except Exception:
+                self._logger.exception("Platform discovery callback failed")
+        self._notify_garden_listeners()
+
+        if mqtt is not None and mqtt.is_connected:
+            for device in self._devices:
+                if device.device_id not in self._last_shadow_refresh_request_at:
+                    try:
+                        await self._async_request_shadow_refresh(device.device_id)
+                    except (MQTTError, TimeoutError):
+                        self._logger.warning("Initial shadow read unavailable for newly discovered device")
+        elif self._devices and self._started:
+            # Camera-only bootstraps must be able to discover a controller later.
+            if self._reconnect_task is None:
+                self._refresh_task = asyncio.create_task(self._credentials_refresh_loop())
+                self._reconnect_task = asyncio.create_task(self._reconnect_supervisor_loop())
+            self._reconnect_event.set()
+
+        self.async_set_updated_data(self._build_state_snapshot())
+
+
+    @staticmethod
+    def _validate_runtime_routes(
+        mqtt_devices: dict[str, DeviceInfo], cameras: dict[str, DeviceInfo],
+    ) -> None:
+        """Reject ambiguous retained route ownership before subscriptions or registry writes."""
+        clients: set[str] = set()
+        prefixes: set[str] = set()
+        if mqtt_devices.keys() & cameras.keys():
+            raise VivosunResponseError("Conflicting physical device types in inventory")
+        for device in mqtt_devices.values():
+            if device.client_id in clients or (device.topic_prefix and device.topic_prefix in prefixes):
+                raise VivosunResponseError("Conflicting retained MQTT routes in inventory")
+            clients.add(device.client_id)
+            if device.topic_prefix:
+                prefixes.add(device.topic_prefix)
 
     async def _refresh_point_log(self) -> None:
         """Refresh climate telemetry from the REST point-log endpoint for all devices."""
@@ -776,10 +1229,15 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         for device in self._devices:
             if not device.supports_point_log:
                 continue
+            generation = self._inventory_generation
+            version = self._physical_sample_versions.get(device.device_id, 0) + 1
+            self._physical_sample_versions[device.device_id] = version
             try:
                 point_log = await self._api.get_point_log(
                     tokens, device, start_time=start_time, end_time=end_time
                 )
+                if not self._physical_poll_is_current(device, generation, version):
+                    continue
                 if device.device_type == "vseed":
                     self._sensor_states.setdefault(device.device_id, {}).update(
                         {key: point_log.get(key) for key in POINT_LOG_KEYS}
@@ -788,17 +1246,19 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     self._sensor_states.setdefault(device.device_id, {}).update(
                         cast("dict[str, object]", point_log)
                     )
+            except VivosunResponseError:
+                # A malformed response must not erase the last valid physical reading.
+                continue
             except Exception:
                 self._logger.debug(
                     "Failed to fetch point log for device %s", device.name, exc_info=True
                 )
 
+
     def _select_devices(self, devices: list[DeviceInfo]) -> list[DeviceInfo]:
         """Select all MQTT-capable devices (filter out cameras without client_id)."""
         if not devices:
-            if self._capture_devices or self.skipped_devices_snapshot():
-                return []
-            raise VivosunResponseError("No devices found for this account")
+            return []
         selected = [d for d in devices if d.client_id and d.device_type != "camera"]
         if not selected and not self._camera_devices:
             raise VivosunResponseError("No controllable devices found for this account")
@@ -837,25 +1297,18 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         await mqtt_client.connect()
         mqtt_client.add_message_callback(self._handle_mqtt_publish)
         self._mqtt_client = mqtt_client
+        self._subscribed_routes.add((primary.client_id, primary.topic_prefix))
 
         # Subscribe additional devices beyond the primary
         for device in self._devices:
             if device.client_id == primary.client_id:
                 continue
-            extra_topics = [
-                (TOPIC_SHADOW_GET_ACCEPTED.format(thing=device.client_id), 1),
-                (TOPIC_SHADOW_UPDATE_ACCEPTED.format(thing=device.client_id), 1),
-                (TOPIC_SHADOW_UPDATE_DOCUMENTS.format(thing=device.client_id), 1),
-                (TOPIC_SHADOW_UPDATE_DELTA.format(thing=device.client_id), 1),
-                (TOPIC_CHANNEL_APP.format(topic_prefix=device.topic_prefix), 1),
-            ]
-            await mqtt_client.subscribe(extra_topics)
-            self._logger.debug("Subscribed to MQTT topics for %s", device.name)
+            await self._subscribe_device(mqtt_client, device)
 
-        # Rejection monitoring is optional. Missing cloud permissions must not
-        # prevent ordinary shadow subscriptions or control.
+        # Rejection monitoring is optional: missing cloud permissions must not
+        # prevent normal MQTT state and commands from working.
         for device in self._devices:
-            if device.device_type != "controller":
+            if device.device_type != "controller" or device.client_id != primary.client_id:
                 continue
             try:
                 await mqtt_client.subscribe([(TOPIC_SHADOW_UPDATE_REJECTED.format(thing=device.client_id), 1)])
@@ -870,9 +1323,37 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         for device in self._devices:
             await self._async_request_shadow_refresh(device.device_id)
 
+    async def _subscribe_device(
+        self, mqtt_client: MQTTClient, device: DeviceInfo, *, track: bool = True,
+        generation: int | None = None,
+    ) -> None:
+        """Subscribe one additional thing without disturbing the active connection."""
+        if generation is not None and not self._inventory_is_current(generation):
+            return
+        await mqtt_client.subscribe([
+            (TOPIC_SHADOW_GET_ACCEPTED.format(thing=device.client_id), 1),
+            (TOPIC_SHADOW_UPDATE_ACCEPTED.format(thing=device.client_id), 1),
+            (TOPIC_SHADOW_UPDATE_DOCUMENTS.format(thing=device.client_id), 1),
+            (TOPIC_SHADOW_UPDATE_DELTA.format(thing=device.client_id), 1),
+            (TOPIC_CHANNEL_APP.format(topic_prefix=device.topic_prefix), 1),
+        ])
+        if (mqtt_client is not self._mqtt_client or not mqtt_client.is_connected
+                or self._shutdown_event.is_set()
+                or (generation is not None and not self._inventory_is_current(generation))):
+            return
+        if device.device_type == "controller":
+            try:
+                await mqtt_client.subscribe([(TOPIC_SHADOW_UPDATE_REJECTED.format(thing=device.client_id), 1)])
+            except (MQTTError, TimeoutError):
+                self._logger.warning("Cloud command rejection subscription unavailable; timeout remains active")
+        if (track and mqtt_client is self._mqtt_client and mqtt_client.is_connected
+                and not self._shutdown_event.is_set()):
+            self._subscribed_routes.add((device.client_id, device.topic_prefix))
+
     async def _disconnect_mqtt_client(self) -> None:
         mqtt_client = self._mqtt_client
         self._mqtt_client = None
+        self._subscribed_routes.clear()
         had_pending = bool(self._pending_fields)
         for pending in self._pending_fields.values():
             pending.timeout.cancel()
@@ -949,23 +1430,31 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     )
                     parsed_shadow = parse_shadow_document(document, dfan_auto_mode=auto_mode)
                     if device is not None and device.device_type == "controller":
-                        self._record_reported_spectrum(
-                            device_id, document, extract_shadow_reported(document), topic,
-                        )
-                        self._record_reported_manual_facts(
-                            device_id, document, extract_shadow_reported(document), topic,
-                        )
+                        reported = extract_shadow_reported(document)
+                        self._record_reported_spectrum(device_id, document, reported, topic)
+                        self._record_reported_manual_facts(device_id, document, reported, topic)
                         self._reconcile_reported_fields(device_id, document, parsed_shadow, topic)
                         if topic.endswith("/update/accepted"):
                             self._accept_pending_fields(device_id, document)
-                            response_token = document.get("clientToken")
-                            if isinstance(response_token, str):
-                                self._forget_confirmed_receipt(device_id, response_token)
+                        response_token = document.get("clientToken")
+                        if topic.endswith("/update/accepted") and isinstance(response_token, str):
+                            self._forget_confirmed_receipt(device_id, response_token)
                     self._merge_shadow_state(device_id, parsed_shadow)
+                    reported = extract_shadow_reported(document)
+                    plan = reported.get("plan") if isinstance(reported, dict) else None
+                    if isinstance(plan, dict):
+                        signature = json.dumps(plan, sort_keys=True)
+                        if self._reported_plan_signatures.get(device_id) != signature:
+                            self._reported_plan_signatures[device_id] = signature
+                            inventory = self._garden_inventory
+                            if inventory is not None:
+                                for garden in inventory.gardens:
+                                    if any(member.device_id == device_id for member in garden.members):
+                                        self._queue_garden_read(garden.scene_id)
+                                        break
+                        self._queue_support_stage_reads(plan)
                     if topic.endswith("/update/accepted"):
                         await self._accept_manual_choice(device_id, document)
-                    if "plan" in parsed_shadow:
-                        await self._refresh_plan_stages(force_refresh_active=True)
                     updated = True
                 elif topic.endswith("/update/delta"):
                     self._parse_json_object(payload)
@@ -990,7 +1479,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             return
 
         if updated:
-            await self._refresh_plan_stages()
             # MQTT pushes must not restart Home Assistant's REST poll timer.
             self._notify_shadow_changed()
 
@@ -1010,6 +1498,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
     async def async_start_support_capture(self, *, max_events: int) -> None:
         """Start bounded read-only capture independently of entity discovery."""
+        await self._cancel_support_stage_reads()
+        self._support_stage_seen.clear()
         await self._cancel_support_capture_task()
         await self._disconnect_support_capture_probe_client()
         self._support_capture.start(
@@ -1055,6 +1545,60 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             )
         self._record_support_capture_model_metadata_results()
         self._schedule_support_capture_initialization()
+        # A capture may be enabled after the device already reported its plan.
+        # Only recorded genuine reports, never desired/shadow fallback, qualify.
+        for signature in self._reported_plan_signatures.values():
+            self._queue_support_stage_reads(json.loads(signature))
+
+    def _queue_support_stage_reads(self, plan: dict[str, object]) -> None:
+        """Fetch each genuinely reported known stage at most once per capture."""
+        if not self._support_capture.active or self._tokens is None or self._shutdown_event.is_set():
+            return
+        for key in ("stage1", "stage2", "stage3", "stage4"):
+            stage = plan.get(key)
+            if not isinstance(stage, dict):
+                continue
+            cont_id = stage.get("contId")
+            if not isinstance(cont_id, str):
+                continue
+            stage_id = cont_id.split("+", 1)[0]
+            if not stage_id or len(stage_id) > 128 or stage_id in self._support_stage_seen:
+                continue
+            if len(self._support_stage_seen) >= SUPPORT_CAPTURE_MAX_STAGE_RESULTS:
+                break
+            self._support_stage_seen.add(stage_id)
+            task = asyncio.create_task(self._capture_stage_info(stage_id))
+            self._support_stage_tasks.add(task)
+            task.add_done_callback(self._support_stage_tasks.discard)
+
+    async def _capture_stage_info(self, stage_id: str) -> None:
+        """Collect bounded opt-in evidence without delaying MQTT or garden reads."""
+        tokens = self._tokens
+        if tokens is None:
+            return
+        generation = self._support_capture.generation
+        try:
+            async with self._garden_read_limit, asyncio.timeout(15):
+                if self._shutdown_event.is_set() or not self._support_capture.active:
+                    return
+                if generation != self._support_capture.generation:
+                    return
+                await self._api.get_plan_stage_info(tokens, stage_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if self._support_capture.active and generation == self._support_capture.generation:
+                self._support_capture.record_stage_info_result(
+                    stage_id, {"status": "error", "error_type": type(error).__name__},
+                )
+
+    async def _cancel_support_stage_reads(self) -> None:
+        tasks = tuple(self._support_stage_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._support_stage_tasks.clear()
 
     def _schedule_support_capture_initialization(self) -> None:
         """Keep slow capture-only broker operations out of HA setup and reconnect."""
@@ -1092,6 +1636,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     async def async_stop_support_capture(self) -> None:
         """Stop support capture."""
         self._support_capture.record("capture_stopping", data={"mqtt_connected": self.is_mqtt_connected})
+        await self._cancel_support_stage_reads()
         await self._cancel_support_capture_task()
         await self._disconnect_support_capture_probe_client()
         self._support_capture.stop()
@@ -1388,6 +1933,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         light = reported.get("light") if isinstance(reported, dict) else None
         if not isinstance(light, dict):
             return
+
         body = document.get("current", document)
         if not isinstance(body, dict):
             return
@@ -1396,6 +1942,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         metadata = body.get("metadata")
         metadata = metadata.get("reported") if isinstance(metadata, dict) else None
         light_metadata = metadata.get("light") if isinstance(metadata, dict) else None
+
         fields: list[tuple[str, object, tuple[str, ...]]] = [
             (key, light[key], (key,)) for key in ("mode", "inPlan", "spec") if key in light
         ]
@@ -1404,8 +1951,18 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             fields.append(("spec", manual["spec"], ("manu", "spec")))
         if not fields:
             return
-        state = self._confirmed_spectrum.setdefault(device_id, {})
-        provenance = self._spectrum_report_provenance.setdefault(device_id, {})
+
+        # Other entities keep the coordinator's normal shadow projection. These
+        # independent facts must not borrow .8 light-LEVEL freshness evidence.
+        state_cache = getattr(self, "_confirmed_spectrum", None)
+        if state_cache is None:
+            state_cache = self._confirmed_spectrum = {}
+        provenance_cache = getattr(self, "_spectrum_report_provenance", None)
+        if provenance_cache is None:
+            provenance_cache = self._spectrum_report_provenance = {}
+        state = state_cache.setdefault(device_id, {})
+        provenance = provenance_cache.setdefault(device_id, {})
+
         for key, raw_value, path in fields:
             leaf = light_metadata
             for part in path:
@@ -1415,6 +1972,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             incoming = _ReportedFieldProvenance(version=version, timestamp=timestamp)
             if not _reported_field_is_fresh(provenance.get(key), incoming, topic):
                 continue
+
+            # Explicit null, invalid and unavailable values invalidate old proof.
+            # The bool false flag is valid for inPlan, but not a manual mode code.
             if key == "inPlan" and isinstance(raw_value, bool):
                 value: int | None = int(raw_value)
             elif type(raw_value) is int and raw_value != SENSOR_UNAVAILABLE_SENTINEL:
@@ -1427,7 +1987,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     def _record_reported_manual_facts(
         self, device_id: str, document: dict[str, object], reported: dict[str, object] | None, topic: str,
     ) -> None:
-        """Track genuinely reported manual/plan facts with independent per-leaf freshness."""
+        """Keep confirmed per-component manual/plan facts apart from desired fallback."""
         if not isinstance(reported, dict):
             return
         current = document.get("current", document)
@@ -1469,34 +2029,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         device_shadow = self._shadow_states.setdefault(device_id, {})
         _deep_merge_mapping(device_shadow, {"connection": {"connected": connected}})
 
-    async def _refresh_plan_stages(self, *, force_refresh_active: bool = False) -> None:
-        """Fetch plan stage details for any stage IDs found in shadow plan data."""
-        if self._tokens is None:
-            return
-        for device in self._devices:
-            shadow = self._shadow_states.get(device.device_id, {})
-            plan = shadow.get("plan")
-            if not isinstance(plan, dict):
-                continue
-            active_key = plan.get("active_stage")
-            stages = plan.get("stages")
-            if not isinstance(stages, dict):
-                continue
-            for stage_key, stage_entry in stages.items():
-                if not isinstance(stage_entry, dict):
-                    continue
-                stage_id = stage_entry.get("stage_id", "")
-                if not stage_id:
-                    continue
-                should_refresh = stage_id not in self._plan_stage_cache
-                if force_refresh_active and stage_key == active_key:
-                    should_refresh = True
-                if not should_refresh:
-                    continue
-                info = await self._api.get_plan_stage_info(self._tokens, stage_id)
-                if info is not None:
-                    self._plan_stage_cache[stage_id] = info
-
     def _build_state_snapshot(self) -> dict[str, object]:
         """Build immutable-ish snapshot consumed by entities."""
         devices_map: dict[str, object] = {d.device_id: d for d in self._devices}
@@ -1504,11 +2036,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             "devices": devices_map,
             "shadows": deepcopy(self._shadow_states),
             "sensors": deepcopy(self._sensor_states),
-            "plan_stages": dict(self._plan_stage_cache),
             "mqtt_connected": self.is_mqtt_connected,
         }
         shadows = cast("dict[str, dict[str, object]]", snapshot["shadows"])
-        for device_id, confirmed in self._confirmed_spectrum.items():
+        for device_id, confirmed in getattr(self, "_confirmed_spectrum", {}).items():
             shadows.setdefault(device_id, {})["confirmed_spectrum"] = dict(confirmed)
         for (device_id, channel, field), pending in self._pending_fields.items():
             component = shadows.setdefault(device_id, {}).setdefault(channel, {})
@@ -1665,11 +2196,32 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._aws_identity = aws_identity
         self._aws_credentials = await self._aws_auth.get_credentials_for_identity(aws_identity)
 
+    async def _renew_tokens(self, expired: AuthTokens | None) -> AuthTokens:
+        """Share one re-login across REST readers and MQTT authentication recovery."""
+        async with self._auth_lock:
+            if self._shutdown_event.is_set():
+                raise VivosunAuthError("Coordinator is shutting down")
+            if self._tokens is expired or self._tokens is None:
+                tokens = await self._api.login(self._email, self._password)
+                if self._shutdown_event.is_set():
+                    raise VivosunAuthError("Coordinator is shutting down")
+                self._tokens = tokens
+            return self._tokens
+
+    async def _authenticated_read(self, read: Callable[[AuthTokens], Awaitable[_ReadResult]]) -> _ReadResult:
+        """Retry one expired REST read without depending on an MQTT connection."""
+        tokens = self._tokens
+        if tokens is None:
+            raise VivosunAuthError("Coordinator is not authenticated")
+        try:
+            return await read(tokens)
+        except VivosunAuthError:
+            return await read(await self._renew_tokens(tokens))
+
     async def _full_reauthenticate(self) -> None:
-        tokens = await self._api.login(self._email, self._password)
+        tokens = await self._renew_tokens(self._tokens)
         aws_identity = await self._api.get_aws_identity(tokens)
         aws_credentials = await self._aws_auth.get_credentials_for_identity(aws_identity)
-        self._tokens = tokens
         self._aws_identity = aws_identity
         self._aws_credentials = aws_credentials
 

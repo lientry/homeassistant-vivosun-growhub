@@ -29,6 +29,7 @@ class SupportCaptureManager:
     def __init__(self) -> None:
         """Initialize capture state."""
         self._active = False
+        self._generation = 0
         self._started_at: datetime | None = None
         self._stopped_at: datetime | None = None
         self._max_events = 0
@@ -49,6 +50,11 @@ class SupportCaptureManager:
         """Return whether support capture is currently active."""
         return self._active
 
+    @property
+    def generation(self) -> int:
+        """Guard in-flight evidence against capture restart or stop."""
+        return self._generation
+
     def start(
         self,
         *,
@@ -57,6 +63,7 @@ class SupportCaptureManager:
         subscription_topics: list[str],
     ) -> None:
         """Start a new support capture session, resetting prior buffered events."""
+        self._generation += 1
         self._active = True
         self._started_at = datetime.now(tz=UTC)
         self._stopped_at = None
@@ -75,6 +82,7 @@ class SupportCaptureManager:
 
     def stop(self) -> None:
         """Stop the current support capture session."""
+        self._generation += 1
         self._active = False
         self._stopped_at = datetime.now(tz=UTC)
 

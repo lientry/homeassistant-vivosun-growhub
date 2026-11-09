@@ -16,6 +16,8 @@ from .const import (
     API_AWS_IDENTITY_PATH,
     API_BASE_URL,
     API_DEVICE_LIST_PATH,
+    API_GARDEN_LIST_PATH,
+    API_GARDEN_PLANS_PATH,
     API_LOGIN_PATH,
     API_PLAN_STAGE_INFO_PATH,
     API_POINT_LOG_PATH,
@@ -43,6 +45,7 @@ from .const import (
 )
 from .encryption import encrypt_request_body
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
+from .gardens import GardenInventory, GardenPlans, parse_garden_inventory, parse_garden_plans
 from .models import (
     AuthTokens,
     AwsIdentity,
@@ -65,7 +68,7 @@ _LOGGER = logging.getLogger(__name__)
 _AUTH_MESSAGE_MARKERS = ("auth", "credential", "forbidden", "invalid", "login", "password", "token", "unauthorized")
 _SP_APP_ID = "com.vivosun.android"
 _NO_SCENE_DEVICE_TYPES = frozenset({"curing_box", "vseed"})
-# Port-only devices with no built-in climate sensor: no point-log polling and no sceneId requirement.
+# Port-only A10 has no built-in climate sensor, even when a scene is assigned.
 _NO_POINT_LOG_DEVICE_TYPES = frozenset({"a10"})
 
 
@@ -138,6 +141,24 @@ class VivosunApiClient:
         _LOGGER.debug("Fetched %d devices", len(devices))
         return devices
 
+    async def get_gardens(self, tokens: AuthTokens) -> GardenInventory:
+        """Read all account gardens, including those without devices."""
+        data = await self._request_json(
+            "POST", API_GARDEN_LIST_PATH, headers=self._auth_headers(tokens),
+            json_body={"sceneGroupName": "garden"},
+        )
+        return parse_garden_inventory(data)
+
+    async def get_garden_plans(self, tokens: AuthTokens, scene_id: int) -> GardenPlans:
+        """Read configured plans for a verified garden without stageInfo fanout."""
+        if isinstance(scene_id, bool) or not isinstance(scene_id, int) or scene_id <= 0:
+            raise ValueError("scene_id must be a positive integer")
+        data = await self._request_json(
+            "POST", API_GARDEN_PLANS_PATH, headers=self._auth_headers(tokens),
+            json_body={"sceneId": scene_id},
+        )
+        return parse_garden_plans(data, scene_id=scene_id)
+
     def _parse_device_entry(
         self,
         device: Mapping[str, object],
@@ -159,14 +180,17 @@ class VivosunApiClient:
         supports_point_log = device_type not in _NO_POINT_LOG_DEVICE_TYPES and (
             scene_id is not None or device_type in _NO_SCENE_DEVICE_TYPES
         )
+        camera_username, camera_password = self._extract_camera_credentials(device)
+
         if device_type == "vseed":
+            # Require safe, exact MQTT routing on scene-less S40 discovery.
             if client_id is not None and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", client_id) is None:
                 client_id = None
             if topic_prefix is not None and (
-                len(topic_prefix) > 512 or any(char in topic_prefix for char in ("+", "#", "\x00"))
+                len(topic_prefix) > 512
+                or any(char in topic_prefix for char in ("+", "#", "\x00"))
             ):
                 topic_prefix = None
-        camera_username, camera_password = self._extract_camera_credentials(device)
 
         if device_type == "unknown" and (camera_username is not None or camera_password is not None):
             device_type = "camera"
@@ -350,6 +374,8 @@ class VivosunApiClient:
                 },
             )
         if device.device_type == "vseed":
+            # S40 readings use their own sensor keys and must not be mapped to
+            # the controller's inside/outside channels.
             return parse_point_log(list(entries), now=end_time)
         snapshot: dict[str, int | None] = {}
         for key in (
@@ -375,6 +401,8 @@ class VivosunApiClient:
 
     async def get_plan_stage_info(self, tokens: AuthTokens, stage_id: str) -> PlanStageInfo | None:
         """Fetch plan stage details from iot/plan/stageInfo."""
+        capture = self._support_capture
+        capture_generation = capture.generation if capture is not None and capture.active else None
         try:
             data = await self._request_json(
                 "POST",
@@ -384,8 +412,8 @@ class VivosunApiClient:
             )
         except (VivosunResponseError, VivosunConnectionError) as exc:
             _LOGGER.debug("Failed to fetch plan stage info for stage_id=%s", stage_id)
-            if self._support_capture is not None and self._support_capture.active:
-                self._support_capture.record_stage_info_result(stage_id, {
+            if capture is not None and capture.active and capture_generation == capture.generation:
+                capture.record_stage_info_result(stage_id, {
                     "status": "error", "error_type": type(exc).__name__,
                 })
             return None
@@ -402,8 +430,8 @@ class VivosunApiClient:
                     content = parsed
             except (ValueError, TypeError):
                 pass
-        if self._support_capture is not None and self._support_capture.active:
-            self._support_capture.record_stage_info_result(stage_id, {
+        if capture is not None and capture.active and capture_generation == capture.generation:
+            capture.record_stage_info_result(stage_id, {
                 "status": "success", "stage_name": stage_name, "icon": icon, "content": content,
                 "content_status": "parsed" if content else "empty_or_unparsed",
             })

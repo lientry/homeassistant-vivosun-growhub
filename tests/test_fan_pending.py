@@ -480,6 +480,7 @@ async def test_mode_only_auto_is_provisional_without_inventing_output(hass: Home
         await fan.async_set_preset_mode("auto")
         assert fan.preset_mode == "auto" and fan.is_on
         assert fan.percentage == 0
+        assert coordinator._confirmed_manual_facts[("light-0", "dFan")]["mode"] == 0
         token = mqtt.published[-1][1]["clientToken"]
         assert mqtt.published[-1][1]["state"] == {"desired": {"dFan": {"mode": 1}}}
         await _receive(coordinator, "thing-0", "update/rejected", {"clientToken": token, "code": 403})
@@ -569,6 +570,29 @@ async def test_mode_only_auto_rolls_back_to_real_mode(
         assert duct.preset_mode == "manual" and not duct.is_on and duct.percentage == 0
         assert coordinator._pending_fields == {}
         assert len(mqtt.published) == (0 if outcome == "send-failed" else 1)
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_optimistic_off_mode_does_not_grant_manual_restore(hass: HomeAssistant) -> None:
+    coordinator, _, _ = _setup(hass)
+    duct = VivosunDuctFanEntity(coordinator, "light-0")
+    try:
+        await _receive(coordinator, "thing-0", "get/accepted", {
+            "version": 100,
+            "state": {"reported": {"dFan": {"mode": 1, "lv": 0, "inPlan": 0}}},
+            "metadata": {"reported": {"dFan": {
+                "mode": {"timestamp": 1000}, "lv": {"timestamp": 1000},
+            }}},
+        })
+        assert not coordinator.manual_restore_allowed("light-0", "dFan")
+        await duct.async_turn_off()
+        assert duct.preset_mode == "manual" and not duct.is_on
+        assert not coordinator.manual_restore_allowed("light-0", "dFan")
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "version": 101, "state": {"desired": {"dFan": {"mode": 0, "manu": {"lv": 0}}}},
+        })
+        assert not coordinator.manual_restore_allowed("light-0", "dFan")
     finally:
         await coordinator.async_shutdown()
 

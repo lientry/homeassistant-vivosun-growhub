@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-import voluptuous as vol
+import probatio as vol
 from homeassistant.exceptions import ConfigEntryNotReady, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -22,10 +24,36 @@ from .const import (
 )
 from .coordinator import VivosunCoordinator
 from .exceptions import VivosunGrowhubError
+from .garden_topology import GardenTopology
 from .manual_preferences import MANUAL_CHANNELS, ManualPreferences
 from .models import RuntimeData
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+_RETIRED_PLAN_ROLES = frozenset({
+    "plan_stage", "plan_light", "plan_cfan", "plan_dfan", "plan_hmdf",
+    "plan_dhmdf", "plan_drip", "plan_heat", "plan_aircd",
+})
+
+
+def retire_controller_plan_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Disable historical controller plan rows without changing identity or user metadata."""
+    registry = er.async_get(hass)
+    devices = dr.async_get(hass)
+    for row in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if row.domain != "sensor" or row.platform != DOMAIN or row.device_id is None:
+            continue
+        device = devices.async_get(row.device_id)
+        if device is None or device.config_entry_id != entry.entry_id:
+            continue
+        for domain, identifier in device.identifiers:
+            if domain != DOMAIN or identifier.startswith("garden:"):
+                continue
+            prefix = f"vivosun_growhub_{identifier}_"
+            if row.unique_id.startswith(prefix) and row.unique_id[len(prefix):] in _RETIRED_PLAN_ROLES:
+                if row.disabled_by is None:
+                    registry.async_update_entity(row.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION)
+                break
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
@@ -115,7 +143,7 @@ async def _async_handle_stop_support_capture(hass: HomeAssistant, call: ServiceC
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Upgrade the former per-channel option to a single Boolean opt-in."""
+    """Convert the former per-channel selector to the sole Boolean option once."""
     if entry.version != 1:
         return False
     if entry.minor_version >= 2:
@@ -144,6 +172,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Vivosun GrowHub from a config entry."""
     _register_services(hass)
+    retire_controller_plan_entities(hass, entry)
     email_value = entry.data.get(CONF_EMAIL)
     password_value = entry.data.get(CONF_PASSWORD)
     if not isinstance(email_value, str) or not isinstance(password_value, str):
@@ -158,6 +187,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         await coordinator.async_start()
+        coordinator.set_garden_topology(GardenTopology(hass, entry.entry_id))
         preferences = ManualPreferences(
             hass, entry.entry_id, entry.options.get(OPTION_REMEMBER_MANUAL_SETTINGS) is True,
         )

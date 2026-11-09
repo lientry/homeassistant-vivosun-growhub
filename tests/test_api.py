@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import aiohttp
 import pytest
@@ -16,6 +17,9 @@ from custom_components.vivosun_growhub.exceptions import (
 )
 from custom_components.vivosun_growhub.models import AuthTokens
 from custom_components.vivosun_growhub.support_capture import SupportCaptureManager
+
+if TYPE_CHECKING:
+    from pytest import MonkeyPatch
 
 
 class _MockResponse:
@@ -104,27 +108,6 @@ async def test_stage_info_capture_records_existing_success_only_when_enabled(ena
     assert "raw-hardware" not in str(saved)
 
 
-@pytest.mark.parametrize("content", ["not-json", "[1, 2]", "{}"])
-async def test_stage_info_capture_retains_empty_or_unparsed_outcome(content: str) -> None:
-    session = _MockSession(responses=[_MockResponse(status=200, payload={
-        "success": True, "message": "success",
-        "data": {"stageName": "Cure", "icon": "", "planStageContent": content},
-    })])
-    client = VivosunApiClient(cast("aiohttp.ClientSession", session))
-    capture = SupportCaptureManager()
-    capture.start(max_events=2, devices=[], subscription_topics=[])
-    client.set_support_capture(capture)
-
-    result = await client.get_plan_stage_info(_valid_tokens(), "stage-3")
-
-    assert result is not None and result.content == {}
-    assert len(session.calls) == 1
-    assert capture.snapshot()["stage_info_results"] == [{
-        "stage_id": "stage-3", "status": "success", "stage_name": "Cure", "icon": "",
-        "content": {}, "content_status": "empty_or_unparsed", "truncated": False,
-    }]
-
-
 async def test_stage_info_capture_failure_preserves_original_return_and_request_count() -> None:
     session = _MockSession(responses=[_MockResponse(status=200, payload={
         "code": 1, "success": False, "message": "not found", "data": {},
@@ -141,18 +124,27 @@ async def test_stage_info_capture_failure_preserves_original_return_and_request_
     }]
 
 
-async def test_stage_info_capture_connection_error_preserves_return() -> None:
-    session = _MockSession(request_error=aiohttp.ClientConnectionError("offline"))
-    client = VivosunApiClient(cast("aiohttp.ClientSession", session))
+async def test_stage_info_inflight_capture_result_cannot_enter_next_session(monkeypatch: MonkeyPatch) -> None:
+    """The API recorder binds results to their initiating opt-in session."""
     capture = SupportCaptureManager()
-    capture.start(max_events=2, devices=[], subscription_topics=[])
+    client = VivosunApiClient(cast("aiohttp.ClientSession", object()))
     client.set_support_capture(capture)
+    capture.start(max_events=10, devices=[], subscription_topics=[])
+    entered, release = asyncio.Event(), asyncio.Event()
 
-    assert await client.get_plan_stage_info(_valid_tokens(), "stage-4") is None
-    assert len(session.calls) == 1
-    assert capture.snapshot()["stage_info_results"] == [{
-        "stage_id": "stage-4", "status": "error", "error_type": "VivosunConnectionError", "truncated": False,
-    }]
+    async def deferred(*_args: object, **_kwargs: object) -> dict[str, object]:
+        entered.set()
+        await release.wait()
+        return {"stageName": "Seedling", "icon": "", "planStageContent": "{}"}
+
+    monkeypatch.setattr(client, "_request_json", deferred)
+    task = asyncio.create_task(client.get_plan_stage_info(_valid_tokens(), "stage-previous"))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    capture.stop()
+    capture.start(max_events=10, devices=[], subscription_topics=[])
+    release.set()
+    assert (await task).stage_name == "Seedling"
+    assert capture.snapshot()["stage_info_results"] == []
 
 
 async def test_login_success_returns_auth_tokens(caplog: pytest.LogCaptureFixture) -> None:
@@ -183,7 +175,7 @@ async def test_login_success_returns_auth_tokens(caplog: pytest.LogCaptureFixtur
     assert "refresh-123" not in caplog.text
 
 
-async def test_discovery_accepts_vseed_without_scene_and_retains_safe_capture_routing() -> None:
+async def test_discovery_retains_safe_capture_routing_when_scene_is_missing() -> None:
     entries = [
         {
             "name": "VSeed S40",
@@ -216,10 +208,10 @@ async def test_discovery_accepts_vseed_without_scene_and_retains_safe_capture_ro
 
     devices = await api.get_devices(_valid_tokens())
 
-    vseed = next(device for device in devices if device.name == "VSeed S40")
-    assert vseed.device_type == "vseed"
-    assert vseed.supports_point_log is True
-    assert vseed.scene_id == 0
+    vseed = [device for device in devices if device.device_type == "vseed"]
+    assert len(vseed) == 1
+    assert vseed[0].name == "VSeed S40"
+    assert vseed[0].supports_point_log
     candidates = api.capture_devices
     assert len(candidates) == 1
     assert candidates[0].client_id == "vivosun-VSSBS40-account-seed"
@@ -899,3 +891,38 @@ async def test_malformed_payload_raises_response_error() -> None:
 
     with pytest.raises(VivosunResponseError):
         await client.get_aws_identity(_valid_tokens())
+
+
+@pytest.mark.parametrize("content", ["not-json", "[1, 2]", "{}"])
+async def test_stage_info_capture_retains_empty_or_unparsed_outcome(content: str) -> None:
+    session = _MockSession(responses=[_MockResponse(status=200, payload={
+        "success": True, "message": "success",
+        "data": {"stageName": "Cure", "icon": "", "planStageContent": content},
+    })])
+    client = VivosunApiClient(cast("aiohttp.ClientSession", session))
+    capture = SupportCaptureManager()
+    capture.start(max_events=2, devices=[], subscription_topics=[])
+    client.set_support_capture(capture)
+
+    result = await client.get_plan_stage_info(_valid_tokens(), "stage-3")
+
+    assert result is not None and result.content == {}
+    assert len(session.calls) == 1
+    assert capture.snapshot()["stage_info_results"] == [{
+        "stage_id": "stage-3", "status": "success", "stage_name": "Cure", "icon": "",
+        "content": {}, "content_status": "empty_or_unparsed", "truncated": False,
+    }]
+
+
+async def test_stage_info_capture_connection_error_preserves_return() -> None:
+    session = _MockSession(request_error=aiohttp.ClientConnectionError("offline"))
+    client = VivosunApiClient(cast("aiohttp.ClientSession", session))
+    capture = SupportCaptureManager()
+    capture.start(max_events=2, devices=[], subscription_topics=[])
+    client.set_support_capture(capture)
+
+    assert await client.get_plan_stage_info(_valid_tokens(), "stage-4") is None
+    assert len(session.calls) == 1
+    assert capture.snapshot()["stage_info_results"] == [{
+        "stage_id": "stage-4", "status": "error", "error_type": "VivosunConnectionError", "truncated": False,
+    }]

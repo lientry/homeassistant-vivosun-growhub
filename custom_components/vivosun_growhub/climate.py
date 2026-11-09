@@ -9,8 +9,9 @@ from homeassistant.components.climate.const import ClimateEntityFeature, HVACAct
 from homeassistant.const import UnitOfTemperature
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DEFAULT_TEMP_UNIT, DOMAIN, MODE_AUTO, MODE_MANUAL, TEMP_SCALE_FACTOR
+from .const import DOMAIN, MODE_AUTO, MODE_MANUAL, SENSOR_UNAVAILABLE_SENTINEL, TEMP_SCALE_FACTOR
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, sensor_slice, shadow_slice
 from .shadow import (
     build_aircd_func_payload,
@@ -29,10 +30,9 @@ if TYPE_CHECKING:
     from homeassistant.helpers.device_registry import DeviceInfo
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+    from .models import DeviceInfo as VivosunDeviceInfo
     from .models import RuntimeData
 
-_OPTIONS_TEMP_UNIT = "temp_unit"
-_UNIT_FAHRENHEIT = "fahrenheit"
 _HEAT_PRESETS = ("manual", "auto")
 _TURN_ON_FEATURE = getattr(ClimateEntityFeature, "TURN_ON", ClimateEntityFeature(0))
 _TURN_OFF_FEATURE = getattr(ClimateEntityFeature, "TURN_OFF", ClimateEntityFeature(0))
@@ -53,14 +53,14 @@ async def async_setup_entry(
     if coordinator is None:
         return
 
-    entities: list[ClimateEntity] = []
-    for device in coordinator.devices:
+    def factory(device: VivosunDeviceInfo) -> list[ClimateEntity]:
         if device.device_type == "heater":
-            entities.append(VivosunHeaterClimateEntity(coordinator, entry, device.device_id))
-        elif device.device_type == "air_conditioner":
-            entities.append(VivosunAirConditionerClimateEntity(coordinator, entry, device.device_id))
-    if entities:
-        async_add_entities(entities)
+            return [VivosunHeaterClimateEntity(coordinator, entry, device.device_id)]
+        if device.device_type == "air_conditioner":
+            return [VivosunAirConditionerClimateEntity(coordinator, entry, device.device_id)]
+        return []
+
+    watch_devices(entry, coordinator, async_add_entities, factory)
 
 
 class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateEntity):  # type: ignore[misc]
@@ -75,6 +75,7 @@ class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateE
     )
     _attr_min_temp = 0
     _attr_max_temp = 40
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_target_temperature_step = 1
     _enable_turn_on_off_backwards_compatibility = ClimateEntityFeature(0) == _EXPLICIT_TURN_FEATURES
 
@@ -87,31 +88,9 @@ class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateE
         """Initialize the heater climate entity."""
         super().__init__(coordinator)
         self._device_id = device_id
-        self._entry = entry
         self._attr_unique_id = f"vivosun_growhub_{device_id}_climate"
         self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
         self._attr_preset_modes = list(_HEAT_PRESETS)
-
-    @property
-    def temperature_unit(self) -> str:
-        """Return the temperature unit for this entity."""
-        if self._temp_unit_config() == _UNIT_FAHRENHEIT:
-            return str(UnitOfTemperature.FAHRENHEIT)
-        return str(UnitOfTemperature.CELSIUS)
-
-    @property
-    def min_temp(self) -> float:
-        """Return the configured minimum target temperature."""
-        if self._temp_unit_config() == _UNIT_FAHRENHEIT:
-            return 32.0
-        return float(self._attr_min_temp)
-
-    @property
-    def max_temp(self) -> float:
-        """Return the configured maximum target temperature."""
-        if self._temp_unit_config() == _UNIT_FAHRENHEIT:
-            return 104.0
-        return float(self._attr_max_temp)
 
     @property
     def hvac_mode(self) -> HVACMode:
@@ -134,29 +113,21 @@ class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateE
         return HVACAction.IDLE
 
     @property
-    def target_temperature(self) -> float | None:
-        """Return the target temperature."""
+    def native_target_temperature(self) -> float | None:
+        """Return the device target in Celsius."""
         heat = self._heat_state()
         target = heat.get("target_temp")
-        if isinstance(target, int):
-            value = target / TEMP_SCALE_FACTOR
-            if self._temp_unit_config() == _UNIT_FAHRENHEIT:
-                return (value * 9 / 5) + 32
-            return value
+        if type(target) is int and target != SENSOR_UNAVAILABLE_SENTINEL:
+            return target / TEMP_SCALE_FACTOR
         return None
 
     @property
-    def current_temperature(self) -> float | None:
-        """Return current temperature from probe sensor."""
+    def native_current_temperature(self) -> float | None:
+        """Return the probe temperature in Celsius."""
         sensors = sensor_slice(self.coordinator, self._device_id)
         raw = sensors.get("pTemp")
-        if isinstance(raw, bool):
-            return None
-        if isinstance(raw, int):
-            value = raw / TEMP_SCALE_FACTOR
-            if self._temp_unit_config() == _UNIT_FAHRENHEIT:
-                return (value * 9 / 5) + 32
-            return value
+        if type(raw) is int and raw != SENSOR_UNAVAILABLE_SENTINEL:
+            return raw / TEMP_SCALE_FACTOR
         return None
 
     @property
@@ -206,12 +177,10 @@ class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateE
     async def async_set_temperature(self, **kwargs: object) -> None:
         """Set the target temperature."""
         temperature = kwargs.get("temperature")
-        if not isinstance(temperature, (int, float)):
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
             return
-        # Convert from display unit back to Celsius for raw storage
-        if self._temp_unit_config() == _UNIT_FAHRENHEIT:
-            temperature = (temperature - 32) * 5 / 9
-        target_raw = int(temperature * TEMP_SCALE_FACTOR)
+        # Home Assistant converts service input to the native unit before this call.
+        target_raw = round(temperature * TEMP_SCALE_FACTOR)
         await self.coordinator.async_publish_shadow_update(
             build_heat_target_payload(target_raw), device_id=self._device_id
         )
@@ -230,13 +199,6 @@ class VivosunHeaterClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateE
     def _heat_state(self) -> Mapping[str, object]:
         return shadow_slice(self.coordinator, self._device_id, "heat")
 
-    def _temp_unit_config(self) -> str:
-        configured_unit = self._entry.options.get(_OPTIONS_TEMP_UNIT, DEFAULT_TEMP_UNIT)
-        if isinstance(configured_unit, str):
-            return configured_unit
-        return DEFAULT_TEMP_UNIT
-
-
 class VivosunAirConditionerClimateEntity(CoordinatorEntity[VivosunCoordinator], ClimateEntity):  # type: ignore[misc]
     """AeroLush C08 cooling controls. Other functions need device verification."""
 
@@ -245,31 +207,22 @@ class VivosunAirConditionerClimateEntity(CoordinatorEntity[VivosunCoordinator], 
     _attr_supported_features = _EXPLICIT_TURN_FEATURES | ClimateEntityFeature.TARGET_TEMPERATURE
     _attr_min_temp = 16
     _attr_max_temp = 32
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_target_temperature_step = 1
     _enable_turn_on_off_backwards_compatibility = ClimateEntityFeature(0) == _EXPLICIT_TURN_FEATURES
 
     def __init__(self, coordinator: VivosunCoordinator, entry: ConfigEntry, device_id: str) -> None:
         super().__init__(coordinator)
-        self._entry = entry
         self._device_id = device_id
         self._attr_unique_id = f"vivosun_growhub_{device_id}_climate"
         self._attr_hvac_modes = [HVACMode.OFF, HVACMode.COOL]
 
     @property
-    def temperature_unit(self) -> str:
-        if self._fahrenheit:
-            return str(UnitOfTemperature.FAHRENHEIT)
-        return str(UnitOfTemperature.CELSIUS)
-
-    @property
     def min_temp(self) -> float:
         minimum = self._aircd_state().get("min_target_temp")
-        temp_c = minimum / TEMP_SCALE_FACTOR if isinstance(minimum, int) else float(self._attr_min_temp)
-        return self._display_temp(temp_c)
-
-    @property
-    def max_temp(self) -> float:
-        return self._display_temp(float(self._attr_max_temp))
+        if type(minimum) is int and 16 * TEMP_SCALE_FACTOR <= minimum <= 32 * TEMP_SCALE_FACTOR:
+            return minimum / TEMP_SCALE_FACTOR
+        return float(self._attr_min_temp)
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -290,15 +243,15 @@ class VivosunAirConditionerClimateEntity(CoordinatorEntity[VivosunCoordinator], 
         return None
 
     @property
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         raw = self._aircd_state().get("target_temp")
-        return self._display_temp(raw / TEMP_SCALE_FACTOR) if isinstance(raw, int) else None
+        return raw / TEMP_SCALE_FACTOR if type(raw) is int and raw != SENSOR_UNAVAILABLE_SENTINEL else None
 
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         raw = sensor_slice(self.coordinator, self._device_id).get("pTemp")
-        if isinstance(raw, int) and not isinstance(raw, bool):
-            return self._display_temp(raw / TEMP_SCALE_FACTOR)
+        if type(raw) is int and raw != SENSOR_UNAVAILABLE_SENTINEL:
+            return raw / TEMP_SCALE_FACTOR
         return None
 
     @property
@@ -344,19 +297,10 @@ class VivosunAirConditionerClimateEntity(CoordinatorEntity[VivosunCoordinator], 
         temp = kwargs.get("temperature")
         if isinstance(temp, bool) or not isinstance(temp, (int, float)):
             return
-        temp_c = (temp - 32) * 5 / 9 if self._fahrenheit else temp
         await self.coordinator.async_publish_shadow_update(
-            build_aircd_target_temp_payload(round(temp_c * TEMP_SCALE_FACTOR)),
+            build_aircd_target_temp_payload(round(temp * TEMP_SCALE_FACTOR)),
             device_id=self._device_id,
         )
 
     def _aircd_state(self) -> Mapping[str, object]:
         return shadow_slice(self.coordinator, self._device_id, "aircd")
-
-    @property
-    def _fahrenheit(self) -> bool:
-        unit = self._entry.options.get(_OPTIONS_TEMP_UNIT, DEFAULT_TEMP_UNIT)
-        return isinstance(unit, str) and unit == _UNIT_FAHRENHEIT
-
-    def _display_temp(self, temp_c: float) -> float:
-        return (temp_c * 9 / 5) + 32 if self._fahrenheit else temp_c

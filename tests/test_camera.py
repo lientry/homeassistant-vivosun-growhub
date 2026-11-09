@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from discovery_stubs import DiscoveryCoordinatorStub
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.camera import VivosunGrowCamEntity, async_setup_entry
 from custom_components.vivosun_growhub.const import CONF_CAMERA_IP, CONF_CAMERA_IPS, DOMAIN
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 
-class _StubCoordinator:
+class _StubCoordinator(DiscoveryCoordinatorStub):
     def __init__(self) -> None:
         self.camera_devices = [
             DeviceInfo(

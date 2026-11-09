@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub import async_setup, async_setup_entry, async_unload_entry
 from custom_components.vivosun_growhub.const import (
@@ -42,6 +42,9 @@ class _CoordinatorStub:
 
     async def async_start(self) -> None:
         self.started = True
+
+    def set_garden_topology(self, _topology: object) -> None:
+        """Allow registry initialization in setup tests."""
 
     async def async_shutdown(self) -> None:
         self.stopped = True

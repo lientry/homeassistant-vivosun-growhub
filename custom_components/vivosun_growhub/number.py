@@ -10,6 +10,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
+from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available
 from .vseed import SETTING_LIMITS, STAGES, command, reported_seed
 
@@ -36,13 +37,11 @@ async def async_setup_entry(
     runtime = cast("RuntimeData", hass.data[DOMAIN][entry.entry_id])
     if runtime.coordinator is None:
         return
-    async_add_entities([
-        VivosunSeedSettingNumber(runtime.coordinator, device.device_id, phase, key)
-        for device in runtime.coordinator.devices
-        if device.device_type == "vseed"
-        for phase in (1, 2, 3)
-        for key in _SETTINGS
-    ])
+    coordinator = runtime.coordinator
+    watch_devices(entry, coordinator, async_add_entities, lambda device: [
+        VivosunSeedSettingNumber(coordinator, device.device_id, phase, key)
+        for phase in (1, 2, 3) for key in _SETTINGS
+    ] if device.device_type == "vseed" else [])
 
 
 class VivosunSeedSettingNumber(CoordinatorEntity[VivosunCoordinator], NumberEntity):  # type: ignore[misc]

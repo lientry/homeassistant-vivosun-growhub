@@ -9,6 +9,8 @@ INTEGRATION_NAME = "Vivosun GrowHub"
 API_BASE_URL = "https://api-prod.next.vivosun.com"
 API_LOGIN_PATH = "/user/login"
 API_DEVICE_LIST_PATH = "/iot/device/getTotalList"
+API_GARDEN_LIST_PATH = "/iot/scene/getList"
+API_GARDEN_PLANS_PATH = "/iot/plan/getList"
 API_AWS_IDENTITY_PATH = "/iot/user/awsIdentity"
 API_POINT_LOG_PATH = "/iot/data/getPointLog"
 API_REQUEST_TIMEOUT_SECONDS = 15
@@ -25,7 +27,6 @@ CONF_PASSWORD = "password"
 CONF_CAMERA_IP = "camera_ip"
 CONF_CAMERA_IPS = "camera_ips"
 CONF_HAS_CAMERA = "has_camera"
-DEFAULT_TEMP_UNIT = "celsius"
 OPTION_SUPPORT_CAPTURE_ENABLED = "support_capture_enabled"
 OPTION_SPECTRUM_CONTROLLERS = "spectrum_controllers"
 OPTION_CFAN_OSCILLATION_CONTROLLERS = "cfan_oscillation_controllers"
@@ -125,7 +126,6 @@ SHADOW_ROOT_REPORTED = "reported"
 DESIRED_LEVEL_PATH_NOTE = "desired.<key>.manu.lv"
 
 PLATFORMS: list[Platform] = [
-    Platform.NUMBER,
     Platform.SELECT,
     Platform.SWITCH,
     Platform.LIGHT,
@@ -135,4 +135,5 @@ PLATFORMS: list[Platform] = [
     Platform.HUMIDIFIER,
     Platform.CLIMATE,
     Platform.CAMERA,
+    Platform.NUMBER,
 ]
