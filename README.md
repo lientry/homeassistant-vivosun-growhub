@@ -9,7 +9,7 @@ Requires your Vivosun app account. Device control and sensor readings use the Vi
 <!-- ha-marketplace:exclude-start -->
 ## Quick Start
 
-1. Install **Vivosun GrowHub** through the [Marketplace](https://www.home-assistant.io/integrations/marketplace).
+1. On Home Assistant 2026.11 or later, install **Vivosun GrowHub** through the [Marketplace](https://www.home-assistant.io/integrations/marketplace). On 2026.3 through 2026.10, use [HACS](https://hacs.xyz/docs/use/).
 2. Restart Home Assistant.
 3. Add **Vivosun GrowHub** and sign in with your Vivosun app account.
 
