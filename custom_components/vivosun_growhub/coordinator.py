@@ -114,6 +114,11 @@ _Channel: TypeAlias = Literal["light", "cFan", "dFan"]
 _Field: TypeAlias = Literal["level", "mode", "manual_level"]
 _FieldKey: TypeAlias = tuple[str, _Channel, _Field]
 _CONTROLLER_CHANNELS: tuple[_Channel, ...] = ("light", "cFan", "dFan")
+_CYCLE_READOUT_FIELDS: dict[_Channel, tuple[str, ...]] = {
+    "light": ("onDur", "offDur", "lv", "spec", "rate"),
+    "cFan": ("onDur", "offDur", "lvOn", "lvOff"),
+    "dFan": ("onDur", "offDur", "lvOn", "lvOff"),
+}
 
 @dataclass(slots=True)
 class _PendingField:
@@ -297,7 +302,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._e25_selection: dict[str, int | None] = {}
         self._e25_selection_provenance: dict[str, _ReportedFieldProvenance] = {}
         self._pending_fields: dict[_FieldKey, _PendingField] = {}
-        self._reported_fields: dict[_FieldKey, _ReportedFieldProvenance] = {}
+        self._reported_fields: dict[tuple[str, _Channel, str], _ReportedFieldProvenance] = {}
         self._has_reported_fields: set[_FieldKey] = set()
         self._locally_commanded_fields: set[_FieldKey] = set()
         self._already_confirmed_tokens: dict[str, _ConfirmedCommandReceipt] = {}
@@ -1480,6 +1485,46 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 )
                 self._has_reported_fields.add(key)
                 self._reconcile_pending_field(key, value, version, timestamp, reported_change=reported_change)
+            self._reconcile_reported_cycle(
+                device_id, channel, body, cast("dict[str, object]", projected), version, topic,
+            )
+
+    def _reconcile_reported_cycle(
+        self, device_id: str, channel: _Channel, body: dict[str, object],
+        projected: dict[str, object], version: int | None, topic: str,
+    ) -> None:
+        """Merge only fresh genuine Cycle leaves, including explicit null tombstones."""
+        if "cycle" not in projected:
+            return
+        cycle = projected["cycle"]
+        updates = (
+            {leaf: cycle[leaf] for leaf in _CYCLE_READOUT_FIELDS[channel] if leaf in cycle}
+            if isinstance(cycle, dict) else dict.fromkeys(_CYCLE_READOUT_FIELDS[channel])
+        )
+        metadata = body.get("metadata")
+        reported_meta = metadata.get("reported") if isinstance(metadata, dict) else None
+        channel_meta = reported_meta.get(channel) if isinstance(reported_meta, dict) else None
+        cycle_meta = channel_meta.get("cycle") if isinstance(channel_meta, dict) else None
+        for leaf in tuple(updates):
+            leaf_meta = cycle_meta.get(leaf) if isinstance(cycle_meta, dict) else None
+            raw_stamp = (leaf_meta.get("timestamp") if isinstance(leaf_meta, dict) else
+                         cycle_meta.get("timestamp") if isinstance(cycle_meta, dict) else None)
+            stamp = raw_stamp if type(raw_stamp) is int and raw_stamp >= 0 else None
+            key = (device_id, channel, f"cycle.{leaf}")
+            last = self._reported_fields.get(key)
+            incoming = _ReportedFieldProvenance(version, stamp)
+            if not _reported_field_is_fresh(last, incoming, topic):
+                del updates[leaf]
+                continue
+            # Missing metadata must not erase earlier leaf ordering evidence.
+            self._reported_fields[key] = _ReportedFieldProvenance(
+                version if version is not None else last.version if last else None,
+                stamp if stamp is not None else last.timestamp if last else None,
+            )
+        if updates:
+            projected["cycle"] = updates
+        else:
+            projected.pop("cycle")
 
     def _notify_shadow_changed(self) -> None:
         self.data = self._build_state_snapshot()

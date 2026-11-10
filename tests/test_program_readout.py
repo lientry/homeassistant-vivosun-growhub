@@ -157,6 +157,178 @@ async def test_readable_modes_require_genuine_reports_not_desired_fallback(hass:
         await coordinator.async_shutdown()
 
 
+async def test_delayed_reported_cycle_cannot_regress_newer_light_setting(hass: HomeAssistant) -> None:
+    coordinator, _, _ = _setup(hass)
+    coordinator._devices = [replace(coordinator._devices[0], client_id="vivosun-VSCTLE42A-test")]
+    coordinator._build_topic_maps()
+    light = VivosunLightEntity(coordinator, "light-0")
+    try:
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "update/accepted", {
+            "version": 102,
+            "state": {"reported": {"light": {"mode": 1, "cycle": {"onDur": 3600}}}},
+            "metadata": {"reported": {"light": {"mode": {"timestamp": 1020},
+                                             "cycle": {"onDur": {"timestamp": 1020}}}}},
+        })
+        assert light.extra_state_attributes["cycle_settings"]["on_minutes"] == 60
+
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "get/accepted", {
+            "version": 100,
+            "state": {"reported": {"light": {"mode": 0, "cycle": {"onDur": 600}}}},
+            "metadata": {"reported": {"light": {"mode": {"timestamp": 1000},
+                                             "cycle": {"onDur": {"timestamp": 1000}}}}},
+        })
+        assert light.extra_state_attributes["operation_mode"] == "cycle"
+        assert light.extra_state_attributes["cycle_settings"]["on_minutes"] == 60
+
+        # An older whole snapshot can still contribute a previously unseen leaf.
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "get/accepted", {
+            "version": 101,
+            "state": {"reported": {"light": {"cycle": {"onDur": 600, "offDur": 1200}}}},
+            "metadata": {"reported": {"light": {"cycle": {
+                "onDur": {"timestamp": 1000}, "offDur": {"timestamp": 1030},
+            }}}},
+        })
+        assert light.extra_state_attributes["cycle_settings"] == {"on_minutes": 60, "off_minutes": 20}
+
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "update/documents", {
+            "previous": {"version": 102, "state": {"reported": {"light": {"cycle": {"onDur": 3600}}}}},
+            "current": {"version": 103, "state": {"reported": {"light": {"cycle": {"onDur": 1800}}}},
+                        "metadata": {"reported": {"light": {"cycle": {"onDur": {"timestamp": 1040}}}}}},
+        })
+        assert light.extra_state_attributes["cycle_settings"] == {"on_minutes": 30, "off_minutes": 20}
+    finally:
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize(("channel", "reported", "older", "expected"), [
+    ("light", {"onDur": 3600, "offDur": 600, "lv": 25, "spec": 20, "rate": 600},
+     {"onDur": 600, "offDur": 120, "lv": 5, "spec": 10, "rate": 0},
+     {"on_minutes": 60, "off_minutes": 10, "on_brightness_percent": 25,
+      "on_spectrum": 20, "sunrise_sunset_enabled": True}),
+    ("cFan", {"onDur": 3600, "offDur": 600, "lvOn": 44, "lvOff": 0},
+     {"onDur": 600, "offDur": 120, "lvOn": 0, "lvOff": 44},
+     {"on_minutes": 60, "off_minutes": 10, "on_speed_percent": 10, "off_speed_percent": 0}),
+    ("dFan", {"onDur": 3600, "offDur": 600, "lvOn": 30, "lvOff": 0},
+     {"onDur": 600, "offDur": 120, "lvOn": 0, "lvOff": 30},
+     {"on_minutes": 60, "off_minutes": 10, "on_speed_percent": 10, "off_speed_percent": 0}),
+])
+async def test_all_readable_cycle_leaves_reject_older_reports(
+    hass: HomeAssistant, channel: str, reported: dict[str, int],
+    older: dict[str, int], expected: dict[str, object],
+) -> None:
+    coordinator, _, _ = _setup(hass)
+    readout = {
+        "light": VivosunLightEntity(coordinator, "light-0"),
+        "cFan": VivosunCirculationFanEntity(coordinator, "light-0"),
+        "dFan": VivosunDuctFanEntity(coordinator, "light-0"),
+    }[channel]
+    try:
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "version": 102, "state": {"reported": {channel: {"cycle": reported}}},
+            "metadata": {"reported": {channel: {"cycle": {
+                key: {"timestamp": 1020} for key in reported
+            }}}},
+        })
+        await _receive(coordinator, "thing-0", "get/accepted", {
+            "version": 100, "state": {"reported": {channel: {"cycle": older}}},
+            "metadata": {"reported": {channel: {"cycle": {
+                key: {"timestamp": 1000} for key in older
+            }}}},
+        })
+        assert readout.extra_state_attributes["cycle_settings"] == expected
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_cycle_freshness_is_isolated_per_device_and_channel(hass: HomeAssistant) -> None:
+    coordinator, _, _ = _setup(hass, count=2)
+    try:
+        for thing, channel, minutes, version, timestamp in (
+            ("thing-0", "light", 60, 102, 1020),
+            ("thing-0", "cFan", 10, 100, 1000),
+            ("thing-1", "light", 30, 100, 1000),
+        ):
+            await _receive(coordinator, thing, "update/accepted", {
+                "version": version,
+                "state": {"reported": {channel: {"cycle": {"onDur": minutes * 60}}}},
+                "metadata": {"reported": {channel: {"cycle": {"onDur": {"timestamp": timestamp}}}}},
+            })
+        for thing, channel, minutes in (
+            ("thing-0", "light", 10),
+            ("thing-0", "cFan", 20),
+            ("thing-1", "light", 40),
+        ):
+            await _receive(coordinator, thing, "update/accepted", {
+                "version": 101,
+                "state": {"reported": {channel: {"cycle": {"onDur": minutes * 60}}}},
+                "metadata": {"reported": {channel: {"cycle": {"onDur": {"timestamp": 1010}}}}},
+            })
+        assert VivosunLightEntity(coordinator, "light-0").extra_state_attributes["cycle_settings"] == {
+            "on_minutes": 60,
+        }
+        assert VivosunCirculationFanEntity(coordinator, "light-0").extra_state_attributes["cycle_settings"] == {
+            "on_minutes": 20,
+        }
+        assert VivosunLightEntity(coordinator, "light-1").extra_state_attributes["cycle_settings"] == {
+            "on_minutes": 40,
+        }
+    finally:
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.parametrize("channel", ["light", "cFan", "dFan"])
+async def test_reported_cycle_clear_and_tombstone_reject_stale_replays(
+    hass: HomeAssistant, channel: str,
+) -> None:
+    coordinator, _, _ = _setup(hass)
+    readout = {
+        "light": VivosunLightEntity(coordinator, "light-0"),
+        "cFan": VivosunCirculationFanEntity(coordinator, "light-0"),
+        "dFan": VivosunDuctFanEntity(coordinator, "light-0"),
+    }[channel]
+    try:
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "version": 102, "state": {"reported": {channel: {"cycle": {"onDur": 3600, "offDur": 600}}}},
+            "metadata": {"reported": {channel: {"cycle": {
+                "onDur": {"timestamp": 1020}, "offDur": {"timestamp": 1020},
+            }}}},
+        })
+        await _receive(coordinator, "thing-0", "update/documents", {
+            "previous": {"version": 102, "state": {"reported": {channel: {"cycle": {"onDur": 3600}}}}},
+            "current": {"version": 103, "state": {"reported": {channel: {"cycle": {"onDur": None}}}},
+                        "metadata": {"reported": {channel: {"cycle": {"onDur": {"timestamp": 1030}}}}}},
+        })
+        await _receive(coordinator, "thing-0", "get/accepted", {
+            "version": 102, "state": {"reported": {channel: {"cycle": {"onDur": 3600}}}},
+            "metadata": {"reported": {channel: {"cycle": {"onDur": {"timestamp": 1020}}}}},
+        })
+        assert readout.extra_state_attributes["cycle_settings"] == {"off_minutes": 10}
+
+        await _receive(coordinator, "thing-0", "update/documents", {
+            "current": {"version": 104, "state": {"reported": {channel: {"cycle": None}}},
+                        "metadata": {"reported": {channel: {"cycle": {"timestamp": 1040}}}}},
+        })
+        await _receive(coordinator, "thing-0", "get/accepted", {
+            "version": 103, "state": {"reported": {channel: {"cycle": {"onDur": 3600, "offDur": 600}}}},
+            "metadata": {"reported": {channel: {"cycle": {
+                "onDur": {"timestamp": 1030}, "offDur": {"timestamp": 1030},
+            }}}},
+        })
+        assert "cycle_settings" not in readout.extra_state_attributes
+
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "version": 200, "state": {"desired": {channel: {"cycle": {"onDur": 600}}}},
+        })
+        assert "cycle_settings" not in readout.extra_state_attributes
+        await _receive(coordinator, "thing-0", "update/accepted", {
+            "version": 105, "state": {"reported": {channel: {"cycle": {"onDur": 1800}}}},
+            "metadata": {"reported": {channel: {"cycle": {"onDur": {"timestamp": 1050}}}}},
+        })
+        assert readout.extra_state_attributes["cycle_settings"] == {"on_minutes": 30}
+    finally:
+        await coordinator.async_shutdown()
+
+
 def test_legacy_light_keeps_numeric_mode_without_unverified_label() -> None:
     legacy = replace(_controller_device("dev-1"), client_id="vivosun-VSCTL001-acc-dev-1")
     coordinator = _StubCoordinator([legacy])
