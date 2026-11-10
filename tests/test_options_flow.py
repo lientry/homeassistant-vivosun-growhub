@@ -173,8 +173,7 @@ def test_manual_option_uses_named_setting_and_description() -> None:
         options = json.loads((base / catalog).read_text())["options"]["step"]["init"]
         assert options["data"][OPTION_REMEMBER_MANUAL_SETTINGS] == "Remember brightness and fan speed"
         assert options["data_description"][OPTION_REMEMBER_MANUAL_SETTINGS] == (
-            "Reuse brightness and fan speed selected in Home Assistant "
-            "when turning devices back on in manual mode without an active plan."
+            "Reuse brightness and fan speed when turning devices back on."
         )
 
 
@@ -192,8 +191,7 @@ async def test_ha_backend_loads_options_labels_from_en_translation(
     assert translated[prefix + "data." + _OSC_OPTION] == "Controllers with fan oscillation"
     assert translated[prefix + "data." + OPTION_REMEMBER_MANUAL_SETTINGS] == "Remember brightness and fan speed"
     assert translated[prefix + "data_description." + OPTION_REMEMBER_MANUAL_SETTINGS] == (
-        "Reuse brightness and fan speed selected in Home Assistant "
-        "when turning devices back on in manual mode without an active plan."
+        "Reuse brightness and fan speed when turning devices back on."
     )
     assert translated[prefix + "data_description." + OPTION_SPECTRUM_CONTROLLERS] == (
         "Select controllers whose connected lights offer spectrum presets in the Vivosun app."

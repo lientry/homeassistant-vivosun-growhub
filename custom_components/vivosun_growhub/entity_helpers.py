@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import DOMAIN
+from .shadow import cfan_shadow_to_percentage, dfan_shadow_to_percentage
 
 if TYPE_CHECKING:
     from .coordinator import VivosunCoordinator
@@ -89,6 +90,35 @@ def sensor_slice(coordinator: VivosunCoordinator, device_id: str) -> Mapping[str
         return {}
 
     return cast("Mapping[str, object]", device_sensors)
+
+
+def cycle_attributes(channel: str, state: Mapping[str, object]) -> dict[str, object]:
+    """Display reported stored targets, never the current output or schedule phase."""
+    raw = state.get("cycle")
+    if not isinstance(raw, Mapping):
+        return {}
+    values: dict[str, object] = {}
+    for wire, label in (("onDur", "on_minutes"), ("offDur", "off_minutes")):
+        seconds = raw.get(wire)
+        if type(seconds) is int and seconds >= 0 and seconds % 60 == 0:
+            values[label] = seconds // 60
+    if channel == "light":
+        for wire, label in (("lv", "on_brightness_percent"), ("spec", "on_spectrum")):
+            value = raw.get(wire)
+            if type(value) is int and 0 <= value <= 100:
+                values[label] = value
+        rate = raw.get("rate")
+        if type(rate) is int and rate in (0, 600):
+            values["sunrise_sunset_enabled"] = rate == 600
+    else:
+        convert = cfan_shadow_to_percentage if channel == "cFan" else dfan_shadow_to_percentage
+        for wire, label in (("lvOn", "on_speed_percent"), ("lvOff", "off_speed_percent")):
+            value = raw.get(wire)
+            if type(value) is int and 0 <= value <= 100:
+                speed = convert(value)
+                if speed is not None:
+                    values[label] = speed
+    return {"cycle_settings": values} if values else {}
 
 
 def _model_from_client_id(client_id: str) -> str:

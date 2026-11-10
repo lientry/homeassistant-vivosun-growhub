@@ -38,6 +38,7 @@ class _StubCoordinator(DiscoveryCoordinatorStub):
         self.data: dict[str, object] = {}
         self._devices = devices or [_controller_device(_DEV_ID)]
         self.is_mqtt_connected = True
+        self._reported_modes: dict[tuple[str, str], int | None] = {}
         self.async_publish_shadow_update = AsyncMock()
         self.async_publish_light_level = AsyncMock()
 
@@ -50,6 +51,9 @@ class _StubCoordinator(DiscoveryCoordinatorStub):
 
     def manual_restore_allowed(self, device_id: str, channel: str) -> bool:
         return False
+
+    def reported_operation_mode(self, device_id: str, channel: str) -> int | None:
+        return self._reported_modes.get((device_id, channel))
 
     @property
     def device(self) -> DeviceInfo:
@@ -120,10 +124,11 @@ async def test_light_state_mapping_and_availability() -> None:
         }
     }
     entity = _make_light(coordinator)
+    coordinator._reported_modes[(_DEV_ID, "light")] = 0
 
     assert entity.is_on is True
     assert entity.brightness == 128
-    assert entity.extra_state_attributes == {"mode": 0, "spectrum": 20}
+    assert entity.extra_state_attributes == {"operation_mode": "manual", "spectrum": 20}
     assert entity.available is True
     assert entity.device_info["model"] == "VSCTLE42A"
 

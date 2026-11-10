@@ -8,11 +8,16 @@ from typing import TYPE_CHECKING
 
 from homeassistant.helpers import entity_registry
 from homeassistant.helpers.entity_platform import EntityPlatform
-from homeassistant.helpers.translation import async_get_translations
+from homeassistant.helpers.translation import (
+    async_get_translations,
+    async_translate_state,
+    async_translate_state_attr,
+)
 from homeassistant.setup import async_setup_component
 
 from custom_components.vivosun_growhub.const import DOMAIN
 from custom_components.vivosun_growhub.fan import VivosunCirculationFanEntity
+from custom_components.vivosun_growhub.select import VivosunLightModeSelect, VivosunSpectrumSelect
 from tests.test_light_pending import _receive, _setup
 
 if TYPE_CHECKING:
@@ -40,8 +45,16 @@ async def test_native_fan_preset_label_preserves_entity_and_command(
         assert registered.unique_id == "vivosun_growhub_light-0_cfan"
         assert fan.name == "Circulation Fan"
         translated = await async_get_translations(hass, "en", "entity", {DOMAIN})
+        hass.config.components.add(DOMAIN)
         prefix = f"component.{DOMAIN}.entity.fan.{registered.translation_key}."
-        assert translated[prefix + "state_attributes.preset_mode.state.natural_wind"] == "Natural Wind"
+        assert translated[prefix + "state_attributes.preset_mode.state.natural_wind"] == "natural wind"
+        assert async_translate_state_attr(
+            hass, "natural_wind", "fan", DOMAIN, registered.translation_key, None, "preset_mode"
+        ) == "natural wind"
+        for state, expected in (("true", "yes"), ("false", "no")):
+            assert async_translate_state_attr(
+                hass, state, "fan", DOMAIN, registered.translation_key, None, "oscillating"
+            ) == expected
 
         await hass.services.async_call(
             "fan", "set_preset_mode", {"entity_id": fan.entity_id, "preset_mode": "natural_wind"},
@@ -58,3 +71,27 @@ async def test_native_fan_preset_label_preserves_entity_and_command(
     finally:
         await coordinator._disconnect_mqtt_client()
         await platform.async_reset()
+
+
+async def test_native_select_display_translations_preserve_service_options(
+    hass: HomeAssistant, enable_custom_integrations: None,
+) -> None:
+    coordinator, _, _ = _setup(hass)
+    mode = VivosunLightModeSelect(coordinator, "light-0")
+    spectrum = VivosunSpectrumSelect(coordinator, "light-0")
+    assert mode.entity_category is None
+    assert mode.name == "Grow Light Mode" and spectrum.name == "Spectrum"
+    assert mode.options == ["Manual", "Cycle"]
+    assert spectrum.options == ["Seedling", "Vegetative", "Bloom"]
+    assert mode.unique_id == "vivosun_growhub_light-0_light_mode"
+    assert spectrum.unique_id == "vivosun_growhub_light-0_spectrum"
+    await async_get_translations(hass, "en", "entity", {DOMAIN})
+    hass.config.components.add(DOMAIN)
+    for entity, expected in (
+        (mode, ("manual", "cycle")),
+        (spectrum, ("seedling", "vegetative", "bloom")),
+    ):
+        assert [
+            async_translate_state(hass, raw, "select", DOMAIN, entity.translation_key, None)
+            for raw in entity.options
+        ] == list(expected)

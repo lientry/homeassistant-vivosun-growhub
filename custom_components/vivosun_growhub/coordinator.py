@@ -32,6 +32,7 @@ from .const import (
     DOMAIN,
     E42A_DFAN_AUTO_MODE,
     MODE_AUTO,
+    MODE_CYCLE,
     SENSOR_UNAVAILABLE_SENTINEL,
     TOPIC_CHANNEL_APP,
     TOPIC_SHADOW_GET,
@@ -610,20 +611,21 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             requested: list[tuple[_FieldKey, int]] = []
             for channel in _CONTROLLER_CHANNELS:
                 part = desired.get(channel) if isinstance(desired, dict) else None
-                # Light's explicit entity publisher supplies its own token.
-                # Raw shadow updates remain byte-for-byte compatible.
-                if channel == "light" and not isinstance(payload.get("clientToken"), str):
+                # Explicit light levels supply their own token; proved E42A mode
+                # writes can acquire one here without changing raw level commands.
+                if (channel == "light" and not isinstance(payload.get("clientToken"), str)
+                        and not (isinstance(part, dict) and "mode" in part)):
                     continue
                 manual = part.get("manu") if isinstance(part, dict) else None
                 raw_level = manual.get("lv") if isinstance(manual, dict) else None
-                if channel == "dFan" and isinstance(part, dict):
+                if isinstance(part, dict):
                     raw_mode = part.get("mode")
-                    auto_mode = (
-                        E42A_DFAN_AUTO_MODE
-                        if client_model_token(target_device.client_id) == "VSCTLE42A" else MODE_AUTO
-                    )
-                    if type(raw_mode) is int and raw_mode in (0, auto_mode):
-                        requested.append(((target_device.device_id, "dFan", "mode"), raw_mode))
+                    e42a = client_model_token(target_device.client_id) == "VSCTLE42A"
+                    auto_mode = E42A_DFAN_AUTO_MODE if e42a else MODE_AUTO
+                    supported = (raw_mode in (0, auto_mode) or (e42a and raw_mode == MODE_CYCLE)
+                                 if channel == "dFan" else e42a and raw_mode in (0, MODE_CYCLE))
+                    if type(raw_mode) is int and supported:
+                        requested.append(((target_device.device_id, channel, "mode"), raw_mode))
                 valid_levels = (
                     range(101) if channel == "light"
                     else (*CFAN_LEVEL_MAP, 200) if channel == "cFan" else DFAN_LEVEL_MAP
@@ -1171,6 +1173,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         facts = self._confirmed_manual_facts.get((device_id, channel), {})
         return facts.get("mode") == 0 and facts.get("inPlan") == 0
 
+    def reported_operation_mode(self, device_id: str, channel: str) -> int | None:
+        """Return a genuine reported mode, excluding desired-only startup fallback."""
+        return self._confirmed_manual_facts.get((device_id, channel), {}).get("mode")
+
     def _stage_manual_choice(
         self, device_id: str, channel: str, selection: ManualSelection, shadow_level: int, token: str,
     ) -> None:
@@ -1280,8 +1286,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         confirmed_receipt: tuple[str, str] | None = None
         requested_keys = {key for key, _ in requested}
         for device_id, channel, field in requested_keys:
-            if channel == "dFan" and field == "mode":
-                level_key: _FieldKey = (device_id, "dFan", "level")
+            if field == "mode":
+                level_key: _FieldKey = (device_id, channel, "level")
                 if level_key not in requested_keys:
                     # A later mode-only preset leaves actual output in charge.
                     # An older manual speed request is no longer local intent.
@@ -1404,6 +1410,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         raw_version = body.get("version")
         version = raw_version if type(raw_version) is int else None
         reported = extract_shadow_reported(document)
+        device = self.get_device(device_id)
+        e42a = device is not None and client_model_token(device.client_id) == "VSCTLE42A"
         for channel in _CONTROLLER_CHANNELS:
             component = reported.get(channel) if isinstance(reported, dict) else None
             if not isinstance(component, dict):
@@ -1429,7 +1437,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 cast("dict[str, object]", parsed).pop("light", None)
                 continue
             fields: tuple[_Field, ...] = (
-                ("level", "mode", "manual_level") if channel == "dFan" else ("level",)
+                ("level", "mode", "manual_level") if channel == "dFan"
+                else ("level", "mode") if e42a else ("level",)
             )
             for field in fields:
                 if field not in projected:

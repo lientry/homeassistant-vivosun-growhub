@@ -19,10 +19,10 @@ from .const import (
     MODE_MANUAL,
     OPTION_CFAN_OSCILLATION_CONTROLLERS,
 )
-from .controls import Control, control_is_selected, require_selected_control
+from .controls import Control, control_is_selected, require_selected_control, supports_local_program_mode
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices
-from .entity_helpers import build_device_info, is_entity_available, shadow_slice
+from .entity_helpers import build_device_info, cycle_attributes, is_entity_available, shadow_slice
 from .models import client_model_token
 from .shadow import (
     build_cfan_level_payload,
@@ -37,6 +37,7 @@ from .shadow import (
 )
 
 _CIRCULATION_PRESETS = ["natural_wind"]
+_CIRCULATION_PROGRAM_PRESETS = ["manual", "cycle", "natural_wind"]
 _DUCT_PRESETS = ["manual", "auto"]
 _DEFAULT_TURN_ON_PERCENTAGE = 10
 _TURN_ON_FEATURE = getattr(FanEntityFeature, "TURN_ON", FanEntityFeature(0))
@@ -138,6 +139,9 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
             if isinstance(raw_percentage, int):
                 requested_percentage = raw_percentage
 
+        if requested_preset == "cycle" and requested_percentage is not None:
+            raise ValueError("Cycle selects a saved program without a manual speed")
+
         if requested_preset is not None:
             if requested_percentage is None:
                 await self.async_set_preset_mode(requested_preset)
@@ -145,7 +149,8 @@ class _VivosunFanBase(CoordinatorEntity[VivosunCoordinator], FanEntity):  # type
                 raise ValueError(f"Unsupported {self._manual_channel} preset: {requested_preset}")
 
         # These presets select their own speed; a stale manual level would cancel them.
-        if requested_preset in ("auto", "natural_wind") and requested_percentage is None:
+        if requested_percentage is None and (requested_preset in ("auto", "cycle", "natural_wind")
+                                             or (self._manual_channel == "cFan" and requested_preset == "manual")):
             return
 
         # A bare ON must not replace an already active cFan breeze with level 1.
@@ -244,9 +249,33 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
     @property
     def preset_mode(self) -> str | None:
         """Return current circulation fan preset mode."""
+        if self._cycle_writable and self.coordinator.reported_operation_mode(self._device_id, "cFan") == MODE_CYCLE:
+            return "cycle"
         if _as_int(self._cfan_state().get("level")) == 200:
             return "natural_wind"
+        if self._cycle_writable and self.coordinator.reported_operation_mode(self._device_id, "cFan") == MODE_MANUAL:
+            return "manual"
         return None
+
+    @property
+    def preset_modes(self) -> list[str]:
+        """Retain Natural Wind and add verified E42A program modes."""
+        return list(_CIRCULATION_PROGRAM_PRESETS if self._cycle_writable else _CIRCULATION_PRESETS)
+
+    @property
+    def _cycle_writable(self) -> bool:
+        return supports_local_program_mode(self.coordinator, self._device_id, "cFan")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """Show genuine reported mode and stored Cycle settings."""
+        state = self._cfan_state()
+        device = self.coordinator.get_device(self._device_id)
+        attributes = cycle_attributes("cFan", state)
+        if device and client_model_token(device.client_id) == "VSCTLE42A":
+            reported = self.coordinator.reported_operation_mode(self._device_id, "cFan")
+            attributes["operation_mode"] = {0: "manual", 1: "cycle"}.get(reported) if reported is not None else None
+        return attributes
 
     async def async_set_percentage(self, percentage: int) -> None:
         """Set circulation fan speed percentage."""
@@ -279,6 +308,12 @@ class VivosunCirculationFanEntity(_VivosunFanBase):
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set circulation fan preset mode."""
         require_selected_control(self.coordinator, self._device_id, "cFan")
+        if preset_mode in ("manual", "cycle") and self._cycle_writable:
+            await self.coordinator.async_publish_shadow_update(
+                {"state": {"desired": {"cFan": {"mode": MODE_CYCLE if preset_mode == "cycle" else MODE_MANUAL}}}},
+                device_id=self._device_id,
+            )
+            return
         if preset_mode == "natural_wind":
             if self.coordinator.manual_memory_enabled(self._device_id, "cFan"):
                 await self.coordinator.async_publish_selected_fan_level(
@@ -299,6 +334,7 @@ class VivosunDuctFanEntity(_VivosunFanBase):
     """Representation of the duct fan (dFan)."""
 
     _attr_name = "Duct Fan"
+    _attr_translation_key = "duct_fan"
     _attr_supported_features = (
         _EXPLICIT_TURN_FEATURES
         | FanEntityFeature.SET_SPEED
@@ -326,7 +362,17 @@ class VivosunDuctFanEntity(_VivosunFanBase):
     def preset_mode(self) -> str | None:
         """Expose only supported commands as selectable presets."""
         operation = self._operation_mode
-        return operation if operation in _DUCT_PRESETS else None
+        return operation if operation in self.preset_modes else None
+
+    @property
+    def preset_modes(self) -> list[str]:
+        """Only the E42A duct channel has a verified writable Cycle mode."""
+        return [*_DUCT_PRESETS, "cycle"] if self._cycle_writable else list(_DUCT_PRESETS)
+
+    @property
+    def _cycle_writable(self) -> bool:
+        device = self.coordinator.get_device(self._device_id)
+        return bool(device and client_model_token(device.client_id) == "VSCTLE42A")
 
     @property
     def _operation_mode(self) -> str | None:
@@ -347,23 +393,26 @@ class VivosunDuctFanEntity(_VivosunFanBase):
         """Expose the read-only operation and dFan auto-threshold settings."""
         auto = self._dfan_auto_state()
         attributes: dict[str, object] = {"operation_mode": self._operation_mode}
-        for field in (
-            "lvMin",
-            "lvMax",
-            "tMin",
-            "tMax",
-            "hMin",
-            "hMax",
-            "vpdMin",
-            "vpdMax",
-            "tStep",
-            "hStep",
-            "vpdStep",
-            "exChk",
-        ):
+        attributes.update(cycle_attributes("dFan", self._dfan_state()))
+        readable: dict[str, object] = {}
+        for field, label in (("lvMin", "min_speed_percent"), ("lvMax", "max_speed_percent")):
             value = auto.get(field)
-            if isinstance(value, int) or value is None:
-                attributes[field] = value
+            if type(value) is int and 0 <= value <= 100:
+                readable[label] = dfan_shadow_to_percentage(value)
+        for field, label in (("tMin", "min_temperature_c"), ("tMax", "max_temperature_c")):
+            value = auto.get(field)
+            if type(value) is int and -4000 <= value <= 12500:
+                readable[label] = value / 100
+        for field, label in (("hMin", "min_humidity_percent"), ("hMax", "max_humidity_percent")):
+            value = auto.get(field)
+            if type(value) is int and 0 <= value <= 10000:
+                readable[label] = value / 100
+        for field, label in (("vpdMin", "min_vpd_kpa"), ("vpdMax", "max_vpd_kpa")):
+            value = auto.get(field)
+            if type(value) is int and 0 <= value <= 2000:
+                readable[label] = value / 100
+        if readable:
+            attributes["auto_settings"] = readable
         return attributes
 
     async def async_set_percentage(self, percentage: int) -> None:
@@ -393,6 +442,11 @@ class VivosunDuctFanEntity(_VivosunFanBase):
         if preset_mode == "manual":
             await self.coordinator.async_publish_shadow_update(
                 build_dfan_auto_mode_payload(False), device_id=self._device_id
+            )
+            return
+        if preset_mode == "cycle" and self._cycle_writable:
+            await self.coordinator.async_publish_shadow_update(
+                {"state": {"desired": {"dFan": {"mode": MODE_CYCLE}}}}, device_id=self._device_id
             )
             return
         raise ValueError(f"Unsupported duct fan preset: {preset_mode}")

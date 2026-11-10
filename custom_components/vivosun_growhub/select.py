@@ -12,6 +12,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, OPTION_SPECTRUM_CONTROLLERS
+from .controls import require_selected_control, supports_local_program_mode
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
@@ -69,12 +70,54 @@ async def async_setup_entry(
             return [VivosunCureModeSelect(coordinator, device.device_id)]
         if device.device_type == "vseed":
             return [VivosunSeedStageSelect(coordinator, device.device_id)]
+        result: list[SelectEntity] = []
+        if supports_local_program_mode(coordinator, device.device_id, "light"):
+            result.append(VivosunLightModeSelect(coordinator, device.device_id))
         if (device.device_type == "controller"
                 and device.device_id in entry.options.get(OPTION_SPECTRUM_CONTROLLERS, [])):
-            return [VivosunSpectrumSelect(coordinator, device.device_id)]
-        return []
+            result.append(VivosunSpectrumSelect(coordinator, device.device_id))
+        return result
 
     watch_devices(entry, coordinator, async_add_entities, factory)
+
+
+class VivosunLightModeSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]
+    """Select the saved E42A light program without writing its settings or level."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Grow Light Mode"
+    _attr_translation_key = "grow_light_mode"
+
+    def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_options = ["Manual", "Cycle"]
+        self._attr_unique_id = f"vivosun_growhub_{device_id}_light_mode"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(self.coordinator, self._device_id)
+
+    @property
+    def available(self) -> bool:
+        return (is_entity_available(self.coordinator, self._device_id)
+                and supports_local_program_mode(self.coordinator, self._device_id, "light"))
+
+    @property
+    def current_option(self) -> str | None:
+        mode = self.coordinator.reported_operation_mode(self._device_id, "light")
+        return self._attr_options[mode] if type(mode) is int and mode in (0, 1) else None
+
+    async def async_select_option(self, option: str) -> None:
+        require_selected_control(self.coordinator, self._device_id, "light")
+        if not supports_local_program_mode(self.coordinator, self._device_id, "light"):
+            raise ServiceValidationError("Light program modes are not verified for this controller")
+        if option not in self._attr_options:
+            raise ServiceValidationError("Unsupported light program mode")
+        await self.coordinator.async_publish_shadow_update(
+            {"state": {"desired": {"light": {"mode": self._attr_options.index(option)}}}},
+            device_id=self._device_id,
+        )
 
 
 class VivosunA22ModeSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity):  # type: ignore[misc]
@@ -119,6 +162,7 @@ class VivosunSpectrumSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity)
 
     _attr_has_entity_name = True
     _attr_name = "Spectrum"
+    _attr_translation_key = "spectrum"
     _attr_icon = "mdi:palette"
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:

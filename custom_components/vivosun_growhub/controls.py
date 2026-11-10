@@ -41,6 +41,14 @@ def control_is_selected(coordinator: VivosunCoordinator, device_id: str, control
     return control in coordinator.selected_controls(device_id)
 
 
+def supports_local_program_mode(coordinator: VivosunCoordinator, device_id: str, control: Control) -> bool:
+    """Allow only independently proven E42A light/circulation mode writes."""
+    device = coordinator.get_device(device_id)
+    return bool(control in ("light", "cFan") and device
+                and client_model_token(device.client_id) == "VSCTLE42A"
+                and control_is_selected(coordinator, device_id, control))
+
+
 def require_selected_control(coordinator: VivosunCoordinator, device_id: str, control: Control) -> None:
     """Block direct entity service calls for deselected or unconfigured E25 terminals."""
     if not control_is_selected(coordinator, device_id, control):

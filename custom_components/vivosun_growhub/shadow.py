@@ -97,6 +97,19 @@ class LightState(TypedDict, total=False):
     manual_level: int | None
     spectrum: int | None
     in_plan: bool
+    cycle: CycleState | None
+
+
+class CycleState(TypedDict, total=False):
+    """Sparse stored Cycle settings, in original firmware units."""
+
+    onDur: int | None
+    offDur: int | None
+    lv: int | None
+    lvOn: int | None
+    lvOff: int | None
+    spec: int | None
+    rate: int | None
 
 
 class CirculatorFanState(TypedDict, total=False):
@@ -106,6 +119,7 @@ class CirculatorFanState(TypedDict, total=False):
     level: int | None
     manual_level: int | None
     oscillating: bool
+    cycle: CycleState | None
 
 
 class DuctFanAutoState(TypedDict, total=False):
@@ -132,6 +146,7 @@ class DuctFanState(TypedDict, total=False):
     level: int | None
     manual_level: int | None
     auto: DuctFanAutoState
+    cycle: CycleState | None
 
 
 class HumidifierState(TypedDict, total=False):
@@ -566,7 +581,9 @@ def _extract_reported(document: dict[str, object]) -> dict[str, object]:
         if desired is not None:
             # Preserve legacy desired-only startup state for other channels.
             # Duct fan output/mode, VSeed and physical ports need real reports.
-            return {key: value for key, value in desired.items()
+            return {key: {field: val for field, val in value.items() if field != "cycle"}
+                    if key in ("light", "cFan") and isinstance(value, dict) else value
+                    for key, value in desired.items()
                     if key not in ("dFan", "seed", "usb1", "usb2", "plug1", "plug2")}
 
     raise ShadowParseError("Shadow payload does not include state.reported or state.desired")
@@ -592,6 +609,8 @@ def _parse_light_state(light: dict[str, object]) -> LightState:
         result["spectrum"] = _normalize_sentinel_int(spectrum)
     if "inPlan" in light:
         result["in_plan"] = _as_bool(light["inPlan"])
+    if "cycle" in light:
+        result["cycle"] = _parse_cycle(light)
     return result
 
 
@@ -609,6 +628,8 @@ def _parse_cfan_state(cfan: dict[str, object]) -> CirculatorFanState:
         result["level"] = result["manual_level"]
     if SHADOW_KEY_OSC in cfan:
         result["oscillating"] = _as_bool(cfan[SHADOW_KEY_OSC])
+    if "cycle" in cfan:
+        result["cycle"] = _parse_cycle(cfan)
     return result
 
 
@@ -633,7 +654,21 @@ def _parse_dfan_state(dfan: dict[str, object]) -> DuctFanState:
                 if field in auto
             },
         )
+    if "cycle" in dfan:
+        result["cycle"] = _parse_cycle(dfan)
     return result
+
+
+def _parse_cycle(channel: dict[str, object]) -> CycleState | None:
+    """Retain sparse targets; explicit invalid blocks and leaves clear prior values."""
+    cycle = _as_dict(channel.get("cycle"))
+    if cycle is None:
+        return None
+    return cast("CycleState", {
+        key: _normalize_sentinel_int(_as_int(value))
+        for key, value in cycle.items()
+        if key in ("onDur", "offDur", "lv", "lvOn", "lvOff", "spec", "rate")
+    })
 
 
 def _parse_hmdf_state(hmdf: dict[str, object]) -> HumidifierState:

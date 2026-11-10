@@ -52,6 +52,7 @@ class _StubCoordinator(DiscoveryCoordinatorStub):
         self.data: dict[str, object] = {}
         self._devices = devices or [_controller_device(_DEV_ID)]
         self.is_mqtt_connected = True
+        self._reported_modes: dict[tuple[str, str], int | None] = {}
         self.async_publish_shadow_update = AsyncMock()
         self.async_publish_selected_fan_level = AsyncMock()
 
@@ -64,6 +65,9 @@ class _StubCoordinator(DiscoveryCoordinatorStub):
 
     def manual_restore_allowed(self, device_id: str, channel: str) -> bool:
         return False
+
+    def reported_operation_mode(self, device_id: str, channel: str) -> int | None:
+        return self._reported_modes.get((device_id, channel))
 
     @property
     def device(self) -> DeviceInfo:
@@ -229,8 +233,11 @@ async def test_duct_fan_state_and_commands() -> None:
     assert entity.unique_id == f"vivosun_growhub_{_DEV_ID}_dfan"
     assert entity.percentage == 50
     assert entity.preset_mode == "auto"
-    assert entity.extra_state_attributes["lvMin"] == 20
-    assert entity.extra_state_attributes["tMin"] is None
+    assert entity.extra_state_attributes["auto_settings"] == {
+        "min_speed_percent": 10, "max_speed_percent": 90,
+        "max_temperature_c": 28, "max_humidity_percent": 70,
+        "max_vpd_kpa": 1.8,
+    }
 
     await entity.async_set_percentage(55)
     coordinator.async_publish_shadow_update.assert_awaited_once_with(
@@ -299,7 +306,7 @@ async def test_duct_fan_auto_turn_on_preserves_preset_and_legacy_mode() -> None:
     ("model", "mode", "operation", "preset"),
     [
         ("VSCTLE42A", 0, "manual", "manual"),
-        ("VSCTLE42A", 1, "cycle", None),
+        ("VSCTLE42A", 1, "cycle", "cycle"),
         ("VSCTLE42A", 2, "auto", "auto"),
         ("VSCTLE42A", 99, None, None),
         ("VSCTLE42A", None, None, None),
@@ -325,13 +332,19 @@ async def test_duct_reported_operation_is_model_specific_and_read_only(
 
     assert fan.extra_state_attributes["operation_mode"] == operation
     assert fan.preset_mode == preset
-    assert fan.preset_modes == ["manual", "auto"]
+    assert fan.preset_modes == (["manual", "auto", "cycle"] if model == "VSCTLE42A"
+                                else ["manual", "auto"])
     if operation == "auto":
         assert fan.is_on
-    with pytest.raises(ValueError, match="Unsupported duct fan preset"):
-        # Observing Cycle must not create an unverified writable Cycle preset.
+    if model == "VSCTLE42A":
         await fan.async_set_preset_mode("cycle")
-    coordinator.async_publish_shadow_update.assert_not_awaited()
+        coordinator.async_publish_shadow_update.assert_awaited_once_with(
+            {"state": {"desired": {"dFan": {"mode": 1}}}}, device_id=_DEV_ID,
+        )
+    else:
+        with pytest.raises(ValueError, match="Unsupported duct fan preset"):
+            await fan.async_set_preset_mode("cycle")
+        coordinator.async_publish_shadow_update.assert_not_awaited()
 
 
 async def test_circulation_fan_natural_wind_maps_to_preset_and_on_state() -> None:
@@ -355,7 +368,7 @@ async def test_circulation_fan_natural_wind_maps_to_preset_and_on_state() -> Non
     ("level", "nw", "preset"),
     [(70, 0, None), (70, 1, None), (0, 1, None), (200, 0, "natural_wind"), (200, 1, "natural_wind")],
 )
-async def test_circulation_fan_native_preset_is_only_natural_wind(
+async def test_circulation_natural_wind_is_independent_of_program_mode(
     level: int, nw: int, preset: str | None,
 ) -> None:
     coordinator = _StubCoordinator()
@@ -364,7 +377,7 @@ async def test_circulation_fan_native_preset_is_only_natural_wind(
     })}}
     entity = _make_cfan(coordinator)
 
-    assert entity.preset_modes == ["natural_wind"]
+    assert entity.preset_modes == ["manual", "cycle", "natural_wind"]
     assert entity.preset_mode == preset
     assert "night_mode" not in coordinator.data["shadows"][_DEV_ID]["cFan"]
 
