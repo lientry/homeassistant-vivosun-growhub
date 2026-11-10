@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pytest
 from homeassistant.helpers import entity_registry
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.translation import (
@@ -22,6 +26,22 @@ from tests.test_light_pending import _receive, _setup
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+
+
+@pytest.mark.parametrize("catalog", ["strings.json", "translations/en.json"])
+def test_entity_state_translation_keys_follow_hassfest_schema(catalog: str) -> None:
+    resources = json.loads((Path(__file__).parents[1] / "custom_components" / DOMAIN / catalog).read_text())
+
+    def check(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        states = value.get("state")
+        if isinstance(states, dict):
+            assert all(re.fullmatch(r"[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?", key) for key in states)
+        for child in value.values():
+            check(child)
+
+    check(resources["entity"])
 
 
 async def test_native_fan_preset_label_preserves_entity_and_command(
@@ -73,7 +93,7 @@ async def test_native_fan_preset_label_preserves_entity_and_command(
         await platform.async_reset()
 
 
-async def test_native_select_display_translations_preserve_service_options(
+async def test_native_select_controls_preserve_service_options(
     hass: HomeAssistant, enable_custom_integrations: None,
 ) -> None:
     coordinator, _, _ = _setup(hass)
@@ -88,8 +108,8 @@ async def test_native_select_display_translations_preserve_service_options(
     await async_get_translations(hass, "en", "entity", {DOMAIN})
     hass.config.components.add(DOMAIN)
     for entity, expected in (
-        (mode, ("manual", "cycle")),
-        (spectrum, ("seedling", "vegetative", "bloom")),
+        (mode, ("Manual", "Cycle")),
+        (spectrum, ("Seedling", "Vegetative", "Bloom")),
     ):
         assert [
             async_translate_state(hass, raw, "select", DOMAIN, entity.translation_key, None)

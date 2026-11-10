@@ -86,7 +86,6 @@ class VivosunLightModeSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity
 
     _attr_has_entity_name = True
     _attr_name = "Grow Light Mode"
-    _attr_translation_key = "grow_light_mode"
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
         super().__init__(coordinator)
@@ -162,7 +161,6 @@ class VivosunSpectrumSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity)
 
     _attr_has_entity_name = True
     _attr_name = "Spectrum"
-    _attr_translation_key = "spectrum"
     _attr_icon = "mdi:palette"
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:

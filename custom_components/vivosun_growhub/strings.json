@@ -54,14 +54,6 @@
     }
   },
   "entity": {
-    "select": {
-      "grow_light_mode": {
-        "state": {"Manual": "manual", "Cycle": "cycle"}
-      },
-      "spectrum": {
-        "state": {"Seedling": "seedling", "Vegetative": "vegetative", "Bloom": "bloom"}
-      }
-    },
     "fan": {
       "circulation_fan": {
         "state_attributes": {
