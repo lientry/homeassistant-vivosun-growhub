@@ -12,7 +12,8 @@ from .const import DOMAIN, LIGHT_MIN_BRIGHTNESS
 from .controls import control_is_selected, require_selected_control
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices
-from .entity_helpers import build_device_info, is_entity_available, shadow_slice
+from .entity_helpers import build_device_info, cycle_attributes, is_entity_available, shadow_slice
+from .models import client_model_token
 from .shadow import build_light_spectrum_payload
 
 if TYPE_CHECKING:
@@ -92,8 +93,13 @@ class VivosunLightEntity(CoordinatorEntity[VivosunCoordinator], LightEntity):  #
         attributes: dict[str, object] = {}
 
         mode = light.get("mode")
-        if isinstance(mode, int):
+        device = self.coordinator.get_device(self._device_id)
+        if device and client_model_token(device.client_id) == "VSCTLE42A":
+            reported = self.coordinator.reported_operation_mode(self._device_id, "light")
+            attributes["operation_mode"] = {0: "manual", 1: "cycle"}.get(reported) if reported is not None else None
+        elif type(mode) is int:
             attributes["mode"] = mode
+        attributes.update(cycle_attributes("light", light))
 
         spectrum = light.get("spectrum")
         if isinstance(spectrum, int):

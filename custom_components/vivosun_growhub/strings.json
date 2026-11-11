@@ -35,7 +35,7 @@
         "data_description": {
           "spectrum_controllers": "Select controllers whose connected lights offer spectrum presets in the Vivosun app.",
           "cfan_oscillation_controllers": "Select controllers whose connected fans offer oscillation controls in the Vivosun app.",
-          "remember_manual_settings": "Reuse brightness and fan speed selected in Home Assistant when turning devices back on in manual mode without an active plan."
+          "remember_manual_settings": "Reuse brightness and fan speed when turning devices back on."
         }
       },
       "camera": {
@@ -59,8 +59,18 @@
         "state_attributes": {
           "preset_mode": {
             "state": {
-              "natural_wind": "Natural Wind"
+              "manual": "manual", "cycle": "cycle", "natural_wind": "natural wind"
             }
+          },
+          "oscillating": {
+            "state": {"true": "yes", "false": "no"}
+          }
+        }
+      },
+      "duct_fan": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {"manual": "manual", "auto": "auto", "cycle": "cycle"}
           }
         }
       }

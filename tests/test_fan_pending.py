@@ -494,6 +494,62 @@ async def test_mode_only_auto_is_provisional_without_inventing_output(hass: Home
         await coordinator.async_shutdown()
 
 
+async def test_e42a_cycle_uses_token_pending_rejection_and_latest_intent(hass: HomeAssistant) -> None:
+    coordinator, mqtt, _ = _setup(hass)
+    coordinator._devices = [DeviceInfo(
+        "light-0", "vivosun-VSCTLE42A-test", "topic/0", "GrowHub E42A",
+        True, 66078, "controller",
+    )]
+    coordinator._build_topic_maps()
+    duct = VivosunDuctFanEntity(coordinator, "light-0")
+    key = ("light-0", "dFan", "mode")
+    try:
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "get/accepted", {
+            "version": 100, "state": {"reported": {"dFan": {"mode": 0, "lv": 0}}},
+            "metadata": {"reported": {"dFan": {"mode": {"timestamp": 1000}}}},
+        })
+        await duct.async_set_preset_mode("cycle")
+        cycle_token = mqtt.published[-1][1]["clientToken"]
+        assert mqtt.published[-1][1]["state"] == {"desired": {"dFan": {"mode": 1}}}
+        assert key in coordinator._pending_fields and duct.preset_mode == "cycle"
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "update/accepted", {
+            "clientToken": cycle_token, "version": 101,
+            "state": {"desired": {"dFan": {"mode": 1}}},
+            "metadata": {"desired": {"dFan": {"mode": {"timestamp": 1010}}}},
+        })
+        assert key in coordinator._pending_fields
+        await duct.async_set_preset_mode("auto")
+        auto_token = mqtt.published[-1][1]["clientToken"]
+        assert auto_token != cycle_token and duct.preset_mode == "auto"
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "update/rejected", {
+            "clientToken": cycle_token, "code": 403,
+        })
+        assert key in coordinator._pending_fields and duct.preset_mode == "auto"
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "update/accepted", {
+            "version": 102, "state": {"reported": {"dFan": {"mode": 2}}},
+            "metadata": {"reported": {"dFan": {"mode": {"timestamp": 1011}}}},
+        })
+        assert key not in coordinator._pending_fields and duct.preset_mode == "auto"
+        await duct.async_set_preset_mode("cycle")
+        assert key in coordinator._pending_fields and duct.preset_mode == "cycle"
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "update/rejected", {
+            "clientToken": mqtt.published[-1][1]["clientToken"], "code": 403,
+        })
+        assert key not in coordinator._pending_fields and duct.preset_mode == "auto"
+        await duct.async_set_preset_mode("cycle")
+        pending = coordinator._pending_fields[key]
+        coordinator._expire_pending_field(key, pending.generation)
+        assert key not in coordinator._pending_fields and duct.preset_mode == "auto"
+        await duct.async_set_preset_mode("cycle")
+        await _receive(coordinator, "vivosun-VSCTLE42A-test", "update/accepted", {
+            "version": 103, "state": {"reported": {"dFan": {"mode": 1}}},
+            "metadata": {"reported": {"dFan": {"mode": {"timestamp": 1012}}}},
+        })
+        assert key not in coordinator._pending_fields and duct.preset_mode == "cycle"
+    finally:
+        await coordinator.async_shutdown()
+
+
 async def test_mode_only_auto_supersedes_old_off_level_without_faking_output(hass: HomeAssistant) -> None:
     coordinator, mqtt, _ = _setup(hass)
     duct = VivosunDuctFanEntity(coordinator, "light-0")
@@ -753,7 +809,7 @@ async def test_e42a_reported_output_and_mode_survive_sparse_manual_updates(hass:
                 "metadata": {"reported": {"dFan": {"mode": {"timestamp": version + 1000}}}},
             })
             assert fan.extra_state_attributes["operation_mode"] == "cycle"
-            assert fan.preset_mode is None
+            assert fan.preset_mode == "cycle"
             assert fan.percentage == 10
 
         await _receive(coordinator, client_id, "get/accepted", {

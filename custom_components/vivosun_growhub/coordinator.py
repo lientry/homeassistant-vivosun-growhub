@@ -32,6 +32,7 @@ from .const import (
     DOMAIN,
     E42A_DFAN_AUTO_MODE,
     MODE_AUTO,
+    MODE_CYCLE,
     SENSOR_UNAVAILABLE_SENTINEL,
     TOPIC_CHANNEL_APP,
     TOPIC_SHADOW_GET,
@@ -113,6 +114,11 @@ _Channel: TypeAlias = Literal["light", "cFan", "dFan"]
 _Field: TypeAlias = Literal["level", "mode", "manual_level"]
 _FieldKey: TypeAlias = tuple[str, _Channel, _Field]
 _CONTROLLER_CHANNELS: tuple[_Channel, ...] = ("light", "cFan", "dFan")
+_CYCLE_READOUT_FIELDS: dict[_Channel, tuple[str, ...]] = {
+    "light": ("onDur", "offDur", "lv", "spec", "rate"),
+    "cFan": ("onDur", "offDur", "lvOn", "lvOff"),
+    "dFan": ("onDur", "offDur", "lvOn", "lvOff"),
+}
 
 @dataclass(slots=True)
 class _PendingField:
@@ -296,7 +302,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._e25_selection: dict[str, int | None] = {}
         self._e25_selection_provenance: dict[str, _ReportedFieldProvenance] = {}
         self._pending_fields: dict[_FieldKey, _PendingField] = {}
-        self._reported_fields: dict[_FieldKey, _ReportedFieldProvenance] = {}
+        self._reported_fields: dict[tuple[str, _Channel, str], _ReportedFieldProvenance] = {}
         self._has_reported_fields: set[_FieldKey] = set()
         self._locally_commanded_fields: set[_FieldKey] = set()
         self._already_confirmed_tokens: dict[str, _ConfirmedCommandReceipt] = {}
@@ -610,25 +616,24 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             requested: list[tuple[_FieldKey, int]] = []
             for channel in _CONTROLLER_CHANNELS:
                 part = desired.get(channel) if isinstance(desired, dict) else None
-                # Light's explicit entity publisher supplies its own token.
-                # Raw shadow updates remain byte-for-byte compatible.
-                if channel == "light" and not isinstance(payload.get("clientToken"), str):
-                    continue
+                # Raw light levels need the explicit entity publisher's token.
+                # Proven mode-only commands can acquire their own below.
                 manual = part.get("manu") if isinstance(part, dict) else None
                 raw_level = manual.get("lv") if isinstance(manual, dict) else None
-                if channel == "dFan" and isinstance(part, dict):
+                if isinstance(part, dict):
                     raw_mode = part.get("mode")
-                    auto_mode = (
-                        E42A_DFAN_AUTO_MODE
-                        if client_model_token(target_device.client_id) == "VSCTLE42A" else MODE_AUTO
-                    )
-                    if type(raw_mode) is int and raw_mode in (0, auto_mode):
-                        requested.append(((target_device.device_id, "dFan", "mode"), raw_mode))
+                    e42a = client_model_token(target_device.client_id) == "VSCTLE42A"
+                    auto_mode = E42A_DFAN_AUTO_MODE if e42a else MODE_AUTO
+                    supported = (raw_mode in (0, auto_mode) or (e42a and raw_mode == MODE_CYCLE)
+                                 if channel == "dFan" else e42a and raw_mode in (0, MODE_CYCLE))
+                    if type(raw_mode) is int and supported:
+                        requested.append(((target_device.device_id, channel, "mode"), raw_mode))
                 valid_levels = (
                     range(101) if channel == "light"
                     else (*CFAN_LEVEL_MAP, 200) if channel == "cFan" else DFAN_LEVEL_MAP
                 )
-                if type(raw_level) is int and raw_level in valid_levels:
+                if (type(raw_level) is int and raw_level in valid_levels
+                        and (channel != "light" or isinstance(payload.get("clientToken"), str))):
                     requested.append(((target_device.device_id, channel, "level"), raw_level))
             if requested:
                 token = payload.get("clientToken")
@@ -1171,6 +1176,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         facts = self._confirmed_manual_facts.get((device_id, channel), {})
         return facts.get("mode") == 0 and facts.get("inPlan") == 0
 
+    def reported_operation_mode(self, device_id: str, channel: str) -> int | None:
+        """Return a genuine reported mode, excluding desired-only startup fallback."""
+        return self._confirmed_manual_facts.get((device_id, channel), {}).get("mode")
+
     def _stage_manual_choice(
         self, device_id: str, channel: str, selection: ManualSelection, shadow_level: int, token: str,
     ) -> None:
@@ -1280,8 +1289,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         confirmed_receipt: tuple[str, str] | None = None
         requested_keys = {key for key, _ in requested}
         for device_id, channel, field in requested_keys:
-            if channel == "dFan" and field == "mode":
-                level_key: _FieldKey = (device_id, "dFan", "level")
+            if field == "mode":
+                level_key: _FieldKey = (device_id, channel, "level")
                 if level_key not in requested_keys:
                     # A later mode-only preset leaves actual output in charge.
                     # An older manual speed request is no longer local intent.
@@ -1404,6 +1413,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         raw_version = body.get("version")
         version = raw_version if type(raw_version) is int else None
         reported = extract_shadow_reported(document)
+        device = self.get_device(device_id)
+        e42a = device is not None and client_model_token(device.client_id) == "VSCTLE42A"
         for channel in _CONTROLLER_CHANNELS:
             component = reported.get(channel) if isinstance(reported, dict) else None
             if not isinstance(component, dict):
@@ -1419,17 +1430,22 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             projected = parsed.get(channel)
             if not isinstance(projected, dict):
                 continue
-            # Retain the original light rule for an older whole-shadow version.
+            self._reconcile_reported_cycle(
+                device_id, channel, body, cast("dict[str, object]", projected), version, topic,
+            )
+            # Keep old light output out while reconciling independent program fields.
             light_provenance = self._reported_fields.get((device_id, "light", "level"))
             if (
                 channel == "light" and light_provenance is not None
                 and version is not None and light_provenance.version is not None
                 and version < light_provenance.version
             ):
-                cast("dict[str, object]", parsed).pop("light", None)
-                continue
+                for raw_field in tuple(projected):
+                    if raw_field != "cycle" and not (e42a and raw_field == "mode"):
+                        cast("dict[str, object]", projected).pop(raw_field)
             fields: tuple[_Field, ...] = (
-                ("level", "mode", "manual_level") if channel == "dFan" else ("level",)
+                ("level", "mode", "manual_level") if channel == "dFan"
+                else ("level", "mode") if e42a else ("level",)
             )
             for field in fields:
                 if field not in projected:
@@ -1471,6 +1487,43 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 )
                 self._has_reported_fields.add(key)
                 self._reconcile_pending_field(key, value, version, timestamp, reported_change=reported_change)
+
+    def _reconcile_reported_cycle(
+        self, device_id: str, channel: _Channel, body: dict[str, object],
+        projected: dict[str, object], version: int | None, topic: str,
+    ) -> None:
+        """Merge only fresh genuine Cycle leaves, including explicit null tombstones."""
+        if "cycle" not in projected:
+            return
+        cycle = projected["cycle"]
+        updates = (
+            {leaf: cycle[leaf] for leaf in _CYCLE_READOUT_FIELDS[channel] if leaf in cycle}
+            if isinstance(cycle, dict) else dict.fromkeys(_CYCLE_READOUT_FIELDS[channel])
+        )
+        metadata = body.get("metadata")
+        reported_meta = metadata.get("reported") if isinstance(metadata, dict) else None
+        channel_meta = reported_meta.get(channel) if isinstance(reported_meta, dict) else None
+        cycle_meta = channel_meta.get("cycle") if isinstance(channel_meta, dict) else None
+        for leaf in tuple(updates):
+            leaf_meta = cycle_meta.get(leaf) if isinstance(cycle_meta, dict) else None
+            raw_stamp = (leaf_meta.get("timestamp") if isinstance(leaf_meta, dict) else
+                         cycle_meta.get("timestamp") if isinstance(cycle_meta, dict) else None)
+            stamp = raw_stamp if type(raw_stamp) is int and raw_stamp >= 0 else None
+            key = (device_id, channel, f"cycle.{leaf}")
+            last = self._reported_fields.get(key)
+            incoming = _ReportedFieldProvenance(version, stamp)
+            if not _reported_field_is_fresh(last, incoming, topic):
+                del updates[leaf]
+                continue
+            # Missing metadata must not erase earlier leaf ordering evidence.
+            self._reported_fields[key] = _ReportedFieldProvenance(
+                version if version is not None else last.version if last else None,
+                stamp if stamp is not None else last.timestamp if last else None,
+            )
+        if updates:
+            projected["cycle"] = updates
+        else:
+            projected.pop("cycle")
 
     def _notify_shadow_changed(self) -> None:
         self.data = self._build_state_snapshot()
