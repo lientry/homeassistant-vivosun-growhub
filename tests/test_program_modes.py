@@ -11,6 +11,7 @@ from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.vivosun_growhub.const import DOMAIN
 from custom_components.vivosun_growhub.fan import VivosunCirculationFanEntity
+from custom_components.vivosun_growhub.light import VivosunLightEntity
 from custom_components.vivosun_growhub.models import RuntimeData
 from custom_components.vivosun_growhub.select import VivosunLightModeSelect, async_setup_entry
 from tests.test_fan import _controller_device, _StubCoordinator
@@ -172,5 +173,36 @@ async def test_raw_light_mode_does_not_track_untokened_level(hass: HomeAssistant
         assert mqtt.published[-1][1]["state"] == {"desired": {"light": {"mode": 1, "manu": {"lv": 25}}}}
         assert ("light-0", "light", "mode") in coordinator._pending_fields
         assert ("light-0", "light", "level") not in coordinator._pending_fields
+    finally:
+        await coordinator.async_shutdown()
+
+
+async def test_mode_confirmation_is_independent_of_newer_light_output(hass: HomeAssistant) -> None:
+    coordinator, mqtt, _ = _setup(hass)
+    coordinator._devices = [replace(coordinator._devices[0], client_id="vivosun-VSCTLE42A-test")]
+    coordinator._build_topic_maps()
+    thing = "vivosun-VSCTLE42A-test"
+    mode = VivosunLightModeSelect(coordinator, "light-0")
+    try:
+        await _receive(coordinator, thing, "get/accepted", {
+            "version": 98, "state": {"reported": {"light": {"mode": 0, "lv": 0}}},
+            "metadata": {"reported": {"light": {"mode": {"timestamp": 980}, "lv": {"timestamp": 980}}}},
+        })
+        await mode.async_select_option("Cycle")
+        await _receive(coordinator, thing, "update/accepted", {
+            "version": 99, "clientToken": mqtt.published[-1][1]["clientToken"],
+            "state": {"desired": {"light": {"mode": 1}}},
+        })
+        await _receive(coordinator, thing, "update/accepted", {
+            "version": 102, "state": {"reported": {"light": {"lv": 50}}},
+            "metadata": {"reported": {"light": {"lv": {"timestamp": 1020}}}},
+        })
+        await _receive(coordinator, thing, "update/accepted", {
+            "version": 101, "state": {"reported": {"light": {"mode": 1, "lv": 0}}},
+            "metadata": {"reported": {"light": {"mode": {"timestamp": 1010}, "lv": {"timestamp": 1000}}}},
+        })
+        assert mode.current_option == "Cycle"
+        assert ("light-0", "light", "mode") not in coordinator._pending_fields
+        assert VivosunLightEntity(coordinator, "light-0").brightness == 128
     finally:
         await coordinator.async_shutdown()

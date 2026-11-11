@@ -1433,17 +1433,16 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             self._reconcile_reported_cycle(
                 device_id, channel, body, cast("dict[str, object]", projected), version, topic,
             )
-            # Retain the original light rule for an older whole-shadow version.
+            # Keep old light output out while reconciling independent program fields.
             light_provenance = self._reported_fields.get((device_id, "light", "level"))
             if (
                 channel == "light" and light_provenance is not None
                 and version is not None and light_provenance.version is not None
                 and version < light_provenance.version
             ):
-                cast("dict[str, object]", parsed)["light"] = {
-                    key: value for key, value in projected.items() if key == "cycle"
-                }
-                continue
+                for raw_field in tuple(projected):
+                    if raw_field != "cycle" and not (e42a and raw_field == "mode"):
+                        cast("dict[str, object]", projected).pop(raw_field)
             fields: tuple[_Field, ...] = (
                 ("level", "mode", "manual_level") if channel == "dFan"
                 else ("level", "mode") if e42a else ("level",)
