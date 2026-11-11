@@ -368,7 +368,7 @@ async def test_circulation_fan_natural_wind_maps_to_preset_and_on_state() -> Non
     ("level", "nw", "preset"),
     [(70, 0, None), (70, 1, None), (0, 1, None), (200, 0, "natural_wind"), (200, 1, "natural_wind")],
 )
-async def test_circulation_natural_wind_is_independent_of_program_mode(
+async def test_circulation_natural_wind_uses_level_not_nw_flag(
     level: int, nw: int, preset: str | None,
 ) -> None:
     coordinator = _StubCoordinator()

@@ -159,3 +159,18 @@ async def test_mode_latest_intent_rejection_timeout_and_unsupported_models(hass:
     with pytest.raises(ValueError):
         await VivosunCirculationFanEntity(cast("object", legacy), "legacy").async_set_preset_mode("cycle")
     legacy.async_publish_shadow_update.assert_not_awaited()
+
+
+async def test_raw_light_mode_does_not_track_untokened_level(hass: HomeAssistant) -> None:
+    coordinator, mqtt, _ = _setup(hass)
+    coordinator._devices = [replace(coordinator._devices[0], client_id="vivosun-VSCTLE42A-test")]
+    coordinator._build_topic_maps()
+    try:
+        await coordinator.async_publish_shadow_update(
+            {"state": {"desired": {"light": {"mode": 1, "manu": {"lv": 25}}}}}, device_id="light-0",
+        )
+        assert mqtt.published[-1][1]["state"] == {"desired": {"light": {"mode": 1, "manu": {"lv": 25}}}}
+        assert ("light-0", "light", "mode") in coordinator._pending_fields
+        assert ("light-0", "light", "level") not in coordinator._pending_fields
+    finally:
+        await coordinator.async_shutdown()

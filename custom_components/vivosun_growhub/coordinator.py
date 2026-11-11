@@ -616,11 +616,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             requested: list[tuple[_FieldKey, int]] = []
             for channel in _CONTROLLER_CHANNELS:
                 part = desired.get(channel) if isinstance(desired, dict) else None
-                # Explicit light levels supply their own token; proved E42A mode
-                # writes can acquire one here without changing raw level commands.
-                if (channel == "light" and not isinstance(payload.get("clientToken"), str)
-                        and not (isinstance(part, dict) and "mode" in part)):
-                    continue
+                # Raw light levels need the explicit entity publisher's token.
+                # Proven mode-only commands can acquire their own below.
                 manual = part.get("manu") if isinstance(part, dict) else None
                 raw_level = manual.get("lv") if isinstance(manual, dict) else None
                 if isinstance(part, dict):
@@ -635,7 +632,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     range(101) if channel == "light"
                     else (*CFAN_LEVEL_MAP, 200) if channel == "cFan" else DFAN_LEVEL_MAP
                 )
-                if type(raw_level) is int and raw_level in valid_levels:
+                if (type(raw_level) is int and raw_level in valid_levels
+                        and (channel != "light" or isinstance(payload.get("clientToken"), str))):
                     requested.append(((target_device.device_id, channel, "level"), raw_level))
             if requested:
                 token = payload.get("clientToken")
@@ -1432,6 +1430,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             projected = parsed.get(channel)
             if not isinstance(projected, dict):
                 continue
+            self._reconcile_reported_cycle(
+                device_id, channel, body, cast("dict[str, object]", projected), version, topic,
+            )
             # Retain the original light rule for an older whole-shadow version.
             light_provenance = self._reported_fields.get((device_id, "light", "level"))
             if (
@@ -1439,7 +1440,9 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 and version is not None and light_provenance.version is not None
                 and version < light_provenance.version
             ):
-                cast("dict[str, object]", parsed).pop("light", None)
+                cast("dict[str, object]", parsed)["light"] = {
+                    key: value for key, value in projected.items() if key == "cycle"
+                }
                 continue
             fields: tuple[_Field, ...] = (
                 ("level", "mode", "manual_level") if channel == "dFan"
@@ -1485,9 +1488,6 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 )
                 self._has_reported_fields.add(key)
                 self._reconcile_pending_field(key, value, version, timestamp, reported_change=reported_change)
-            self._reconcile_reported_cycle(
-                device_id, channel, body, cast("dict[str, object]", projected), version, topic,
-            )
 
     def _reconcile_reported_cycle(
         self, device_id: str, channel: _Channel, body: dict[str, object],

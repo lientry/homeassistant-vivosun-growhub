@@ -165,7 +165,7 @@ async def test_delayed_reported_cycle_cannot_regress_newer_light_setting(hass: H
     try:
         await _receive(coordinator, "vivosun-VSCTLE42A-test", "update/accepted", {
             "version": 102,
-            "state": {"reported": {"light": {"mode": 1, "cycle": {"onDur": 3600}}}},
+            "state": {"reported": {"light": {"mode": 1, "lv": 25, "cycle": {"onDur": 3600}}}},
             "metadata": {"reported": {"light": {"mode": {"timestamp": 1020},
                                              "cycle": {"onDur": {"timestamp": 1020}}}}},
         })
@@ -173,12 +173,13 @@ async def test_delayed_reported_cycle_cannot_regress_newer_light_setting(hass: H
 
         await _receive(coordinator, "vivosun-VSCTLE42A-test", "get/accepted", {
             "version": 100,
-            "state": {"reported": {"light": {"mode": 0, "cycle": {"onDur": 600}}}},
+            "state": {"reported": {"light": {"mode": 0, "lv": 0, "cycle": {"onDur": 600}}}},
             "metadata": {"reported": {"light": {"mode": {"timestamp": 1000},
                                              "cycle": {"onDur": {"timestamp": 1000}}}}},
         })
         assert light.extra_state_attributes["operation_mode"] == "cycle"
         assert light.extra_state_attributes["cycle_settings"]["on_minutes"] == 60
+        assert light.brightness == 64
 
         # An older whole snapshot can still contribute a previously unseen leaf.
         await _receive(coordinator, "vivosun-VSCTLE42A-test", "get/accepted", {

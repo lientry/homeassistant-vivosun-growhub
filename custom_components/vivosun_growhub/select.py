@@ -18,7 +18,7 @@ from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
 from .ports import A22_PORTS
-from .shadow import build_light_spectrum_payload
+from .shadow import build_light_mode_payload, build_light_spectrum_payload
 from .vseed import STAGES, command, reported_seed, stage_name
 
 if TYPE_CHECKING:
@@ -114,7 +114,7 @@ class VivosunLightModeSelect(CoordinatorEntity[VivosunCoordinator], SelectEntity
         if option not in self._attr_options:
             raise ServiceValidationError("Unsupported light program mode")
         await self.coordinator.async_publish_shadow_update(
-            {"state": {"desired": {"light": {"mode": self._attr_options.index(option)}}}},
+            build_light_mode_payload(self._attr_options.index(option)),
             device_id=self._device_id,
         )
 
