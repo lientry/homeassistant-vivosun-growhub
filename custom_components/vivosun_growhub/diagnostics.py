@@ -184,6 +184,7 @@ def _build_discovered_device_inventory(
                     "collection_index": collection_index,
                     "name": getattr(candidate, "name", ""),
                     "online": getattr(candidate, "online", False),
+                    "device_group_id": getattr(candidate, "device_group_id", ""),
                     "device_type": getattr(candidate, "device_type", "unknown"),
                     "scene_id": getattr(candidate, "scene_id", 0),
                     "device_id": device_id,

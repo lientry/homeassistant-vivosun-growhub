@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import DOMAIN
+from .devices import NO_MQTT_DEVICE_TYPES
 
 if TYPE_CHECKING:
     from .coordinator import VivosunCoordinator
@@ -28,6 +29,9 @@ def build_device_info(coordinator: VivosunCoordinator, device_id: str) -> Device
 
 def is_entity_available(coordinator: VivosunCoordinator, device_id: str) -> bool:
     """Return availability based on MQTT state and per-device shadow connectivity."""
+    device = coordinator.get_device(device_id)
+    if device is not None and device.device_type in NO_MQTT_DEVICE_TYPES:
+        return True
     if not coordinator.is_mqtt_connected:
         return False
 
@@ -73,6 +77,11 @@ def shadow_slice(coordinator: VivosunCoordinator, device_id: str, key: str) -> M
 
     return cast("Mapping[str, object]", value)
 
+def shadow_reported(
+    coordinator: VivosunCoordinator,
+    device_id: str,
+) -> dict[str, object]:
+    return shadow_slice(coordinator, device_id, "reported_supported")
 
 def sensor_slice(coordinator: VivosunCoordinator, device_id: str) -> Mapping[str, object]:
     """Extract sensor state for a specific device."""

@@ -78,21 +78,21 @@ _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
         "device_type": "controller",
         "comm_mode_list": ["MQTT"],
         "channel_param_key": {
-            "0": {"temp": "outTemp", "humi": "outHumi"},
-            "1": {"temp": "inTemp", "humi": "inHumi"},
+            "0": {"temp": "bTemp", "humi": "bHumi"},
+            "1": {"temp": "pTemp", "humi": "pHumi"},
         },
         "data_upload_groups": [
             {
                 "group_name": "Inside",
                 "group_type": "CLIMATE",
                 "shadow_channel": 0,
-                "data_keys": ["inTemp", "inHumi", "inVpd"],
+                "data_keys": ["pTemp", "pHumi", "pVpd"],
             },
             {
                 "group_name": "Outside",
                 "group_type": "CLIMATE",
                 "shadow_channel": 0,
-                "data_keys": ["outTemp", "outHumi", "outVpd"],
+                "data_keys": ["bTemp", "bHumi", "bVpd"],
             },
         ],
     },
@@ -109,7 +109,7 @@ _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
                 "group_name": "Probe",
                 "group_type": "CLIMATE",
                 "shadow_channel": 0,
-                "data_keys": ["pTemp", "pHumi", "pVpd"],
+                "data_keys": ["pTemp", "pHumi", "pVpd", "pCo2", "pLgt"],
             },
             {
                 "group_name": "Built-in",
@@ -174,7 +174,7 @@ _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
                 "group_name": "Probe",
                 "group_type": "CLIMATE",
                 "shadow_channel": 0,
-                "data_keys": ["pTemp", "pHumi", "pVpd", "pCo2"],
+                "data_keys": ["pTemp", "pHumi", "pVpd"],
             }
         ],
     },
@@ -209,6 +209,43 @@ _MODEL_METADATA_BY_TOKEN: dict[str, dict[str, object]] = {
                 "data_keys": ["pTemp", "pHumi", "pVpd"],
             }
         ],
+    },
+    "VSCGCC4": {
+        "default_name": "GrowCam C4",
+        "device_type": "camera",
+        "comm_mode_list": [],
+        "channel_param_key": {},
+        "data_upload_groups": [],
+    },
+    "VSTHB1": {
+        "default_name": "AeroLab THB1",
+        "device_type": "aerolab",
+        "comm_mode_list": [],
+        "channel_param_key": {
+            "0": {"temp": "bTemp", "humi": "bHumi"},
+            "1": {"temp": "pTemp", "humi": "pHumi"},
+        },
+        "data_upload_groups": [
+            {
+                "group_name": "Inside",
+                "group_type": "CLIMATE",
+                "shadow_channel": 0,
+                "data_keys": ["pTemp", "pHumi", "pVpd"],
+            },
+            {
+                "group_name": "Outside",
+                "group_type": "CLIMATE",
+                "shadow_channel": 0,
+                "data_keys": ["bTemp", "bHumi", "bVpd"],
+            },
+        ],
+    },
+    "VSSBS40": {
+        "default_name": "VSeed Smart Seedling Box",
+        "device_type": "vseed",
+        "comm_mode_list": [],
+        "channel_param_key": {},
+        "data_upload_groups": [],
     },
 }
 

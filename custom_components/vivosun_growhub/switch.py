@@ -16,6 +16,7 @@ from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
 from .ports import PORTS_BY_MODEL, PortReport, build_manual_port_payload, reported_port
 from .vseed import STAGES, command, reported_seed
+from .devices import MODEL_A10, MODEL_A22
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -43,8 +44,8 @@ _CURING_BOX_SWITCHES: tuple[VivosunSwitchDescription, ...] = (
 )
 
 
-_PORT_ONLY_MODELS = frozenset({"VSPLUGA10", "VSPLUGA22"})
-_PORT_MODEL_NAMES = {"VSPLUGA10": "GrowHub A10", "VSPLUGA22": "GrowHub A22", "VSCTLY18": "VGrow"}
+_PORT_ONLY_MODELS = frozenset({MODEL_A10, MODEL_A22})
+_PORT_MODEL_NAMES = {MODEL_A10: "GrowHub A10", MODEL_A22: "GrowHub A22", "VSCTLY18": "VGrow"}
 
 
 def _runtime(hass: HomeAssistant, entry: ConfigEntry) -> RuntimeData:
@@ -91,7 +92,7 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
     _attr_icon = "mdi:power-socket"
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str, port: str,
-                 model: str = "VSPLUGA22") -> None:
+                 model: str = MODEL_A22) -> None:
         super().__init__(coordinator)
         if port not in PORTS_BY_MODEL.get(model, ()):
             raise ValueError("Unsupported model/physical port")
@@ -107,7 +108,7 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
         return build_device_info(self.coordinator, self._device_id)
 
     def _report(self) -> PortReport:
-        if self._model == "VSPLUGA22":
+        if self._model == MODEL_A22:
             return self.coordinator.a22_settings(self._device_id, self._port).status
         return reported_port(shadow_slice(self.coordinator, self._device_id, "ports").get(self._port))
 
@@ -140,7 +141,7 @@ class VivosunPortSwitch(CoordinatorEntity[VivosunCoordinator], SwitchEntity):  #
                 f"Cannot control {self._attr_name}: manual mode and no active plan must both be reported "
                 "(mode=0, inPlan=0)"
             )
-        if self._model == "VSPLUGA22":
+        if self._model == MODEL_A22:
             await self.coordinator.async_set_a22_manual_power(self._device_id, self._port, on)
             return
         await self.coordinator.async_publish_shadow_update(

@@ -22,7 +22,6 @@ from .const import (
     SHADOW_KEY_DUCT_FAN,
     SHADOW_KEY_HEATER,
     SHADOW_KEY_HUMIDIFIER,
-    SHADOW_KEY_LEVEL,
     SHADOW_KEY_LIGHT,
     SHADOW_KEY_MANU,
     SHADOW_KEY_MODE,
@@ -30,6 +29,7 @@ from .const import (
     SHADOW_KEY_PLAN,
     SHADOW_ROOT_REPORTED,
     SHADOW_ROOT_STATE,
+    SHADOW_KEY_LEVEL,
     TOPIC_CHANNEL_APP,
 )
 
@@ -65,8 +65,44 @@ _SUPPORTED_REPORTED_ROOT_KEYS: frozenset[str] = frozenset(
         "ctlLock",
         "cure",
         "seed",
+        "lang",
+        "senTyp",
+        "prbTyp",
+        "ppfdThr",
+        "tZoneAdd",
+        "snsTH",
+        "pCo2",
+        "pLgt",
+        "bat",
+        "usb1",
+        "usb2",
+        "plug1",
+        "plug2",
+        "sgsaDev",
+        "sgsbDev",
+        "sgscDev",
+        "sgsdDev",
+        "sgseDev",
+        "sgslDev",
+        "rssi",  
     }
 )
+
+_SUPPORTED_REPORTED_PORT_KEYS: frozenset[str] = frozenset(
+    {
+        "usb1",
+        "usb2",
+        "plug1",
+        "plug2",
+        "sgsaDev",
+        "sgsbDev",
+        "sgscDev",
+        "sgsdDev",
+        "sgseDev",
+        "sgslDev",
+    }
+)
+
 _DFAN_AUTO_FIELDS: frozenset[str] = frozenset(
     {
         "lvMin",
@@ -308,7 +344,7 @@ def parse_reported_fragment(reported_fragment: dict[str, object]) -> ShadowV1Sta
     port_reports = {
         key: value
         for key, value in reported_fragment.items()
-        if key in ("usb1", "usb2", "plug1", "plug2") and isinstance(value, dict)
+        if key in _SUPPORTED_REPORTED_PORT_KEYS and isinstance(value, dict)
     }
     if port_reports:
         parsed["ports"] = cast("dict[str, dict[str, object]]", port_reports)

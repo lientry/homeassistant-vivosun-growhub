@@ -26,6 +26,7 @@ from .const import (
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
 from .models import DeviceInfo
+from .devices import DEVICE_TYPE_CONTROLLER, DEVICE_TYPE_CAMERA
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -135,7 +136,7 @@ class VivosunGrowhubConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  # typ
         api = VivosunApiClient(async_get_clientsession(self.hass))
         tokens = await api.login(user_input[CONF_EMAIL], user_input[CONF_PASSWORD])
         devices = await api.get_devices(tokens)
-        return tokens.user_id, [device for device in devices if device.device_type == "camera"]
+        return tokens.user_id, [device for device in devices if device.device_type == DEVICE_TYPE_CAMERA]
 
     @staticmethod
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
@@ -302,7 +303,7 @@ class VivosunGrowhubOptionsFlow(config_entries.OptionsFlow):  # type: ignore[mis
         runtime = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
         coordinator = getattr(runtime, "coordinator", None)
         devices = getattr(coordinator, "devices", [])
-        return [device for device in devices if isinstance(device, DeviceInfo) and device.device_type == "controller"]
+        return [device for device in devices if isinstance(device, DeviceInfo) and device.device_type == DEVICE_TYPE_CONTROLLER]
 
     def _finish_options(self, options: dict[str, object]) -> config_entries.ConfigFlowResult:
         """Save normalized options and reload when they changed."""

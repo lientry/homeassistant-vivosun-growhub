@@ -19,6 +19,10 @@ from .const import (
     MODE_MANUAL,
     OPTION_CFAN_OSCILLATION_CONTROLLERS,
 )
+from .devices import (
+    DEVICE_TYPE_CONTROLLER,
+    MODEL_E42A,
+)
 from .controls import Control, control_is_selected, require_selected_control
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices
@@ -68,7 +72,7 @@ async def async_setup_entry(
         return
 
     def factory(device: VivosunDeviceInfo) -> list[_VivosunFanBase]:
-        if device.device_type != "controller":
+        if device.device_type != DEVICE_TYPE_CONTROLLER:
             return []
         result: list[_VivosunFanBase] = []
         if control_is_selected(coordinator, device.device_id, "cFan"):
@@ -400,7 +404,7 @@ class VivosunDuctFanEntity(_VivosunFanBase):
     @property
     def _auto_mode(self) -> int:
         device = self.coordinator.get_device(self._device_id)
-        if device and client_model_token(device.client_id) == "VSCTLE42A":
+        if device and client_model_token(device.client_id) == MODEL_E42A:
             return E42A_DFAN_AUTO_MODE
         return MODE_AUTO
 

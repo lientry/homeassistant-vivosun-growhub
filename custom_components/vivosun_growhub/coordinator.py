@@ -42,6 +42,16 @@ from .const import (
     TOPIC_SHADOW_UPDATE_DOCUMENTS,
     TOPIC_SHADOW_UPDATE_REJECTED,
 )
+from .devices import(
+    NO_MQTT_DEVICE_TYPES,
+    DEVICE_TYPE_AEROLAB,
+    DEVICE_TYPE_CONTROLLER,
+    DEVICE_TYPE_CAMERA,
+    MODEL_E42A,
+    MODEL_E25,
+    MODEL_A10,
+    MODEL_A22,
+)
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
 from .garden_topology import GardenTopology, garden_membership
 from .gardens import GardenPlanRead
@@ -339,7 +349,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         if not self._devices:
             raise RuntimeError("Device not available before coordinator start")
         for d in self._devices:
-            if d.device_type == "controller":
+            if d.device_type == DEVICE_TYPE_CONTROLLER:
                 return d
         return self._devices[0]
 
@@ -604,7 +614,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
         target_device = self._resolve_device(device_id)
         command_token: str | None = None
-        if isinstance(payload, dict) and target_device.device_type == "controller":
+        if isinstance(payload, dict) and target_device.device_type == DEVICE_TYPE_CONTROLLER:
             state = payload.get("state")
             desired = state.get("desired") if isinstance(state, dict) else None
             requested: list[tuple[_FieldKey, int]] = []
@@ -620,7 +630,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     raw_mode = part.get("mode")
                     auto_mode = (
                         E42A_DFAN_AUTO_MODE
-                        if client_model_token(target_device.client_id) == "VSCTLE42A" else MODE_AUTO
+                        if client_model_token(target_device.client_id) == MODEL_E42A else MODE_AUTO
                     )
                     if type(raw_mode) is int and raw_mode in (0, auto_mode):
                         requested.append(((target_device.device_id, "dFan", "mode"), raw_mode))
@@ -999,7 +1009,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
             # Never infer a reported mode or output from the desired acknowledgement.
             latest = self._a22_require(device_id, port, ("lv",))
             try:
-                second = finish_a22_manual_change("VSPLUGA22", port, change, latest, fresh=True)
+                second = finish_a22_manual_change(MODEL_A22, port, change, latest, fresh=True)
             except ValueError as err:
                 raise ServiceValidationError(str(err)) from err
             try:
@@ -1015,7 +1025,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
     ) -> None:
         """Apply only newer, genuine A22 leaf reports and retain independent write proof."""
         device = self.get_device(device_id)
-        if device is None or client_model_token(device.client_id) != "VSPLUGA22":
+        if device is None or client_model_token(device.client_id) != MODEL_A22:
             return
         reported = extract_shadow_reported(document)
         if not isinstance(reported, dict):
@@ -1155,7 +1165,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         device = self.get_device(device_id)
         preferences = self.manual_preferences
         return bool(
-            device is not None and device.device_type == "controller"
+            device is not None and device.device_type == DEVICE_TYPE_CONTROLLER
             and preferences is not None and preferences.enabled(device_id, channel)
         )
 
@@ -1246,7 +1256,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         if not self.is_mqtt_connected:
             raise MQTTConnectionError("Cannot publish shadow update while MQTT is disconnected")
         device = self._resolve_device(device_id)
-        if device.device_type != "controller":
+        if device.device_type != DEVICE_TYPE_CONTROLLER:
             raise VivosunResponseError("Light level commands require a controller")
         token = uuid4().hex
         payload: dict[str, object] = {**build_light_level_payload(level), "clientToken": token}
@@ -1532,7 +1542,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         all_devices = await self._api.get_devices(self._tokens)
         self._all_devices = list(all_devices)
         self._capture_devices = list({device.client_id: device for device in self._api.capture_devices}.values())
-        self._camera_devices = [device for device in all_devices if device.device_type == "camera"]
+        self._camera_devices = [device for device in all_devices if device.device_type == DEVICE_TYPE_CAMERA]
         self._devices = self._select_devices(all_devices)
         self._build_topic_maps()
         if not self._devices:
@@ -1735,7 +1745,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         mqtt_devices = {d.device_id: d for d in self._devices}
         cameras = {d.device_id: d for d in self._camera_devices}
         for device in devices:
-            if device.device_type == "camera":
+            if device.device_type == DEVICE_TYPE_CAMERA:
                 cameras[device.device_id] = device
             elif device.client_id:
                 mqtt_devices[device.device_id] = device
@@ -1870,7 +1880,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         """Select all MQTT-capable devices (filter out cameras without client_id)."""
         if not devices:
             return []
-        selected = [d for d in devices if d.client_id and d.device_type != "camera"]
+        selected = [d for d in devices if (d.device_type in {DEVICE_TYPE_AEROLAB} or (d.client_id and d.device_type != DEVICE_TYPE_CAMERA))]
         if not selected and not self._camera_devices:
             raise VivosunResponseError("No controllable devices found for this account")
         selected.sort(key=lambda item: (item.device_id, item.client_id, item.topic_prefix))
@@ -1926,7 +1936,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         # prevent normal MQTT state and commands from working.
         for device in self._devices:
             if device.client_id != primary.client_id or (
-                device.device_type != "controller"
+                device.device_type != DEVICE_TYPE_CONTROLLER
                 and client_model_token(device.client_id) != "VSPLUGA22"
             ):
                 continue
@@ -1941,12 +1951,16 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._logger.info("Connected MQTT session for %d devices", len(self._devices))
 
         for device in self._devices:
+            if device.device_type in NO_MQTT_DEVICE_TYPES:
+                continue  
             await self._async_request_shadow_refresh(device.device_id)
 
     async def _subscribe_device(
         self, mqtt_client: MQTTClient, device: DeviceInfo, *, track: bool = True,
         generation: int | None = None,
     ) -> None:
+        if device.device_type in NO_MQTT_DEVICE_TYPES:
+            return
         """Subscribe one additional thing without disturbing the active connection."""
         if generation is not None and not self._inventory_is_current(generation):
             return
@@ -1961,7 +1975,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                 or self._shutdown_event.is_set()
                 or (generation is not None and not self._inventory_is_current(generation))):
             return
-        if device.device_type == "controller" or client_model_token(device.client_id) == "VSPLUGA22":
+        if device.device_type == DEVICE_TYPE_CONTROLLER or client_model_token(device.client_id) == MODEL_A22:
             try:
                 await mqtt_client.subscribe([(TOPIC_SHADOW_UPDATE_REJECTED.format(thing=device.client_id), 1)])
             except (MQTTError, TimeoutError):
@@ -2049,8 +2063,8 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                     if topic.endswith("/update/accepted"):
                         self._a22_accept_ack(device_id, document)
                     self._record_a22_reported(device_id, document, topic)
-                    if device is not None and device.device_type == "controller":
-                        if client_model_token(device.client_id) == "VSCTL002":
+                    if device is not None and device.device_type == DEVICE_TYPE_CONTROLLER:
+                        if client_model_token(device.client_id) == MODEL_E25:
                             self._record_e25_selection(device_id, document, topic)
                         reported = extract_shadow_reported(document)
                         self._record_reported_spectrum(device_id, document, reported, topic)
@@ -2062,7 +2076,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                         if topic.endswith("/update/accepted") and isinstance(response_token, str):
                             self._forget_confirmed_receipt(device_id, response_token)
                     self._merge_shadow_state(device_id, parsed_shadow)
-                    if device and client_model_token(device.client_id) == "VSPLUGA22":
+                    if device and client_model_token(device.client_id) == MODEL_A22:
                         self._shadow_states.setdefault(device_id, {})["ports"] = {
                             port: deepcopy(raw) for (owner, port), raw in self._a22_reported.items()
                             if owner == device_id
@@ -2713,7 +2727,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._last_shadow_refresh_request_at[device_id] = datetime.now(tz=UTC)
         topic = TOPIC_SHADOW_GET.format(thing=device.client_id)
         payload = b"{}"
-        if client_model_token(device.client_id) == "VSPLUGA22":
+        if client_model_token(device.client_id) == MODEL_A22:
             token = self._a22_reads[device_id] = uuid4().hex
             payload = json.dumps({"clientToken": token}).encode()
         await mqtt_client.publish(topic, payload)

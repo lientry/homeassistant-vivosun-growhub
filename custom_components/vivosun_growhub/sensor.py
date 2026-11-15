@@ -18,6 +18,7 @@ from homeassistant.components.sensor import (
 from homeassistant.const import PERCENTAGE, SIGNAL_STRENGTH_DECIBELS_MILLIWATT, UnitOfTemperature
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -29,13 +30,39 @@ from .const import (
     TEMP_SCALE_FACTOR,
     WATER_LEVEL_SCALE_FACTOR,
 )
+from .devices import(
+    SENSOR_KEYS_BY_DEVICE_GROUP_ID,
+    SENSOR_KEY_INSIDE_TEMP,
+    SENSOR_KEY_INSIDE_HUMI,
+    SENSOR_KEY_INSIDE_VPD,
+    SENSOR_KEY_OUTSIDE_TEMP,
+    SENSOR_KEY_OUTSIDE_HUMI,
+    SENSOR_KEY_OUTSIDE_VPD,
+    SENSOR_KEY_BUILDIN_TEMP,
+    SENSOR_KEY_BUILDIN_HUMI,
+    SENSOR_KEY_BUILDIN_VPD,
+    SENSOR_KEY_PROBE_TEMP,
+    SENSOR_KEY_PROBE_HUMI,
+    SENSOR_KEY_PROBE_VPD,
+    SENSOR_KEY_WATER_LEVEL,
+    SENSOR_KEY_WATER_TEMP,
+    SENSOR_KEY_ROOT_TEMP,
+    SENSOR_KEY_CORE_TEMP,
+    SENSOR_KEY_RSSI,
+    SENSOR_KEY_BRSSI,
+    SENSOR_KEY_PROBE_CO2,
+    SENSOR_KEY_PROBE_LIGHT,
+    SENSOR_KEY_BAT,
+)
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices, watch_gardens
-from .entity_helpers import build_device_info, is_entity_available, sensor_slice
+from .entity_helpers import build_device_info, is_entity_available, sensor_slice, shadow_reported
 from .garden_display import GardenScheduleClock, GardenSelection, garden_stage_clock, select_garden_plan
 from .models import client_model_token
 from .shadow import cfan_shadow_to_percentage, dfan_shadow_to_percentage
 from .vseed import reported_seed
+from .ports import PORT_DEVICE_NAMES, PORT_DEVICE_TYPES, PORT_OPTION, PORT_OPTION_TYPES, SHADOW_KEY_PORT_MOD
+from .devices import DEVICE_PORTS_BY_MODEL
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -89,8 +116,8 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="inside_temperature",
         name="Inside Temperature",
-        channel_key="inTemp",
-        channel_key_aliases=("pTemp",),
+        channel_key=SENSOR_KEY_INSIDE_TEMP,
+        channel_key_aliases=(SENSOR_KEY_PROBE_TEMP,),
         quantity="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -98,8 +125,8 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="inside_humidity",
         name="Inside Humidity",
-        channel_key="inHumi",
-        channel_key_aliases=("pHumi",),
+        channel_key=SENSOR_KEY_INSIDE_HUMI,
+        channel_key_aliases=(SENSOR_KEY_PROBE_HUMI,),
         quantity="humidity",
         device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
@@ -108,8 +135,8 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="inside_vpd",
         name="Inside VPD",
-        channel_key="inVpd",
-        channel_key_aliases=("pVpd",),
+        channel_key=SENSOR_KEY_INSIDE_VPD,
+        channel_key_aliases=(SENSOR_KEY_PROBE_VPD,),
         quantity="vpd",
         icon="mdi:leaf",
         native_unit_of_measurement="kPa",
@@ -118,8 +145,8 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="outside_temperature",
         name="Outside Temperature",
-        channel_key="outTemp",
-        channel_key_aliases=("bTemp",),
+        channel_key=SENSOR_KEY_OUTSIDE_TEMP,
+        channel_key_aliases=(SENSOR_KEY_BUILDIN_TEMP,),
         quantity="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -127,8 +154,8 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="outside_humidity",
         name="Outside Humidity",
-        channel_key="outHumi",
-        channel_key_aliases=("bHumi",),
+        channel_key=SENSOR_KEY_OUTSIDE_HUMI,
+        channel_key_aliases=(SENSOR_KEY_BUILDIN_HUMI,),
         quantity="humidity",
         device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
@@ -137,8 +164,8 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="outside_vpd",
         name="Outside VPD",
-        channel_key="outVpd",
-        channel_key_aliases=("bVpd",),
+        channel_key=SENSOR_KEY_OUTSIDE_VPD,
+        channel_key_aliases=(SENSOR_KEY_BUILDIN_VPD,),
         quantity="vpd",
         icon="mdi:leaf",
         native_unit_of_measurement="kPa",
@@ -147,7 +174,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="probe_temperature",
         name="Probe Temperature",
-        channel_key="pTemp",
+        channel_key=SENSOR_KEY_PROBE_TEMP,
         quantity="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -155,7 +182,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="probe_humidity",
         name="Probe Humidity",
-        channel_key="pHumi",
+        channel_key=SENSOR_KEY_PROBE_HUMI,
         quantity="humidity",
         device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
@@ -164,7 +191,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="probe_vpd",
         name="Probe VPD",
-        channel_key="pVpd",
+        channel_key=SENSOR_KEY_PROBE_VPD,
         quantity="vpd",
         icon="mdi:leaf",
         native_unit_of_measurement="kPa",
@@ -173,7 +200,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="water_level",
         name="Water Level",
-        channel_key="waterLv",
+        channel_key=SENSOR_KEY_WATER_LEVEL,
         quantity="water_level",
         icon="mdi:waves-arrow-up",
         native_unit_of_measurement=PERCENTAGE,
@@ -182,21 +209,88 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="core_temperature",
         name="Core Temperature",
-        channel_key="coreTemp",
+        channel_key=SENSOR_KEY_CORE_TEMP,
         quantity="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
     ),
     VivosunSensorDescription(
         key="wifi_signal",
         name="WiFi Signal",
-        channel_key="rssi",
+        channel_key=SENSOR_KEY_RSSI,
         quantity="signal_strength",
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,
         native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
         state_class=SensorStateClass.MEASUREMENT,
         entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    VivosunSensorDescription(
+        key="bt_signal",
+        name="Bluetooth Signal",
+        channel_key=SENSOR_KEY_BRSSI,
+        quantity="signal_strength",
+        icon="mdi:bluetooth",
+        device_class=SensorDeviceClass.SIGNAL_STRENGTH,
+        native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    VivosunSensorDescription(
+        key="probe_co2",
+        name="Probe CO2",
+        channel_key=SENSOR_KEY_PROBE_CO2,
+        quantity="probe_co2",
+        device_class=SensorDeviceClass.CO2,
+        native_unit_of_measurement="ppm",
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    VivosunSensorDescription(
+        key="probe_light_percent",
+        name="Probe Light",
+        channel_key=SENSOR_KEY_PROBE_LIGHT,
+        quantity="probe_light_percent",
+        icon="mdi:brightness-6",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+    ),    
+    VivosunSensorDescription(
+        key="battery",
+        name="Battery",
+        channel_key=SENSOR_KEY_BAT,
+        quantity="battery_percent",
+        icon="mdi:battery",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    VivosunSensorDescription(
+        key="buildin_temperature",
+        name="Build-In Temperature",
+        channel_key=SENSOR_KEY_BUILDIN_TEMP,
+        quantity="temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    VivosunSensorDescription(
+        key="buildin_humidity",
+        name="Build-In Humidity",
+        channel_key=SENSOR_KEY_BUILDIN_HUMI,
+        quantity="humidity",
+        device_class=SensorDeviceClass.HUMIDITY,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    VivosunSensorDescription(
+        key="buildin_vpd",
+        name="Build-In VPD",
+        channel_key=SENSOR_KEY_BUILDIN_VPD,
+        quantity="vpd",
+        icon="mdi:leaf",
+        native_unit_of_measurement="kPa",
+        state_class=SensorStateClass.MEASUREMENT,
     ),
 )
 
@@ -204,7 +298,7 @@ _VGROW_DWC_SENSORS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="water_level",
         name="Water Level",
-        channel_key="waterLv",
+        channel_key=SENSOR_KEY_WATER_LEVEL,
         quantity="water_level",
         scale_factor=DWC_WATER_LEVEL_SCALE_FACTOR,
         icon="mdi:waves-arrow-up",
@@ -213,7 +307,7 @@ _VGROW_DWC_SENSORS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
         key="water_temperature",
         name="Water Temperature",
-        channel_key="waterT",
+        channel_key=SENSOR_KEY_WATER_TEMP,
         quantity="temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
     ),
@@ -221,34 +315,23 @@ _VGROW_DWC_SENSORS: tuple[VivosunSensorDescription, ...] = (
 
 _VSEED_SENSORS: tuple[VivosunSensorDescription, ...] = (
     VivosunSensorDescription(
-        key="seed_root_temperature", name="Root Temperature", channel_key="rTemp",
+        key="seed_root_temperature", name="Root Temperature", channel_key=SENSOR_KEY_ROOT_TEMP,
         quantity="temperature", device_class=SensorDeviceClass.TEMPERATURE,
     ),
     VivosunSensorDescription(
-        key="seed_dome_temperature", name="Dome Temperature", channel_key="pTemp",
+        key="seed_dome_temperature", name="Dome Temperature", channel_key=SENSOR_KEY_PROBE_TEMP,
         quantity="temperature", device_class=SensorDeviceClass.TEMPERATURE,
     ),
     VivosunSensorDescription(
-        key="seed_dome_humidity", name="Dome Humidity", channel_key="pHumi",
+        key="seed_dome_humidity", name="Dome Humidity", channel_key=SENSOR_KEY_PROBE_HUMI,
         quantity="humidity", device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
     ),
     VivosunSensorDescription(
-        key="seed_vpd", name="VPD", channel_key="pVpd",
+        key="seed_vpd", name="VPD", channel_key=SENSOR_KEY_PROBE_VPD,
         quantity="vpd", native_unit_of_measurement="kPa", icon="mdi:leaf",
     ),
 )
-
-_DEVICE_TYPE_SENSORS: dict[str, frozenset[str]] = {
-    "a22": frozenset({"pTemp", "pHumi", "pVpd"}),
-    "controller": frozenset({"inTemp", "inHumi", "inVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
-    "dehumidifier": frozenset({"pTemp", "pHumi", "pVpd"}),
-    "humidifier": frozenset({"pTemp", "pHumi", "pVpd", "waterLv", "coreTemp"}),
-    "heater": frozenset({"pTemp", "pHumi", "pVpd"}),
-    "air_conditioner": frozenset({"pTemp", "pHumi", "pVpd"}),
-    "curing_box": frozenset({"pTemp", "pHumi", "pVpd", "outTemp", "outHumi", "outVpd", "coreTemp", "rssi"}),
-}
-
 
 def _runtime(hass: HomeAssistant, entry: ConfigEntry) -> RuntimeData:
     return cast("RuntimeData", hass.data[DOMAIN][entry.entry_id])
@@ -272,7 +355,7 @@ async def async_setup_entry(
                 for description in _VSEED_SENSORS
             )
             entities.append(VivosunSeedLiveLightSensor(coordinator, device.device_id))
-        allowed_keys = _DEVICE_TYPE_SENSORS.get(device.device_type, frozenset())
+        allowed_keys = SENSOR_KEYS_BY_DEVICE_GROUP_ID.get(device.device_group_id, frozenset())
         for description in _ALL_SENSOR_DESCRIPTIONS:
             if description.channel_key in allowed_keys:
                 entities.append(
@@ -281,6 +364,16 @@ async def async_setup_entry(
         if client_model_token(device.client_id) == "VSCTLY18":
             for description in _VGROW_DWC_SENSORS:
                 entities.append(VivosunChannelSensorEntity(coordinator, entry, description, device.device_id))
+        model = client_model_token(device.client_id)
+        if model in DEVICE_PORTS_BY_MODEL:
+            for port in DEVICE_PORTS_BY_MODEL[model]:
+                entities.append(
+                    VivosunPortDeviceSensor(
+                        coordinator,
+                        device.device_id,
+                        port,
+                    )
+                )
         return entities
 
     watch_devices(entry, coordinator, async_add_entities, factory)
@@ -302,6 +395,72 @@ async def async_setup_entry(
 
     watch_gardens(entry, coordinator, async_add_entities, garden_factory)
 
+class VivosunPortDeviceSensor(
+    CoordinatorEntity[VivosunCoordinator],
+    SensorEntity,
+):
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:usb-port"
+
+    def __init__(
+        self,
+        coordinator: VivosunCoordinator,
+        device_id: str,
+        shadow_key: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._shadow_key = shadow_key
+
+        self._attr_name = PORT_DEVICE_NAMES[shadow_key]
+        self._attr_unique_id = (
+            f"vivosun_growhub_{device_id}_{shadow_key}"
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        value = shadow_reported(
+            self.coordinator,
+            self._device_id
+            ).get(self._shadow_key)
+
+        if not isinstance(value, int):
+            return None
+
+        if value == PORT_OPTION:
+            value = shadow_reported(
+                self.coordinator,
+                self._device_id
+                ).get(SHADOW_KEY_PORT_MOD)
+            return PORT_OPTION_TYPES.get(
+                value,
+                f"Unknown ({value})",
+            )
+        else:
+            return PORT_DEVICE_TYPES.get(
+                value,
+                f"Unknown ({value})",
+            )
+
+    @property
+    def available(self) -> bool:
+        return is_entity_available(
+            self.coordinator,
+            self._device_id,
+        )
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return build_device_info(
+            self.coordinator,
+            self._device_id,
+        )
+    
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        return {
+            "device_code": shadow_reported(self.coordinator, self._device_id).get(self._shadow_key)
+        }
 
 class VivosunGardenSensor(CoordinatorEntity[VivosunCoordinator], SensorEntity):  # type: ignore[misc]
     """Garden-configured intent, not evidence of physical device execution."""
@@ -521,10 +680,21 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
                 return self._computed_vpd()
             return None
 
+        if self.entity_description.quantity == "":
+            return(raw_value)
         if self.entity_description.quantity == "signal_strength":
             return float(raw_value)
         if self.entity_description.quantity == "water_level":
             return raw_value / (self.entity_description.scale_factor or WATER_LEVEL_SCALE_FACTOR)
+        if self.entity_description.quantity == "probe_co2":
+            return float(raw_value)
+        if self.entity_description.quantity == "probe_light_percent":
+            percent = 100 - (raw_value / 4096 * 100)
+            return round(max(0, min(100, percent)), 2)
+        if self.entity_description.quantity == "battery_percent":
+            voltage = raw_value / 100
+            percent = (voltage - 3.0) / (4.5 - 3.0) * 100
+            return round(max(0, min(100, percent)))
         return raw_value / (self.entity_description.scale_factor or TEMP_SCALE_FACTOR)
 
     @property
@@ -541,10 +711,14 @@ class VivosunChannelSensorEntity(CoordinatorEntity[VivosunCoordinator], SensorEn
 
     def _raw_channel_value(self) -> int | None:
         sensors = sensor_slice(self.coordinator, self._device_id)
+        shadows = shadow_reported(self.coordinator, self._device_id)
         for key in self.entity_description.channel_key_lookup:
             value = sensors.get(key)
             if isinstance(value, bool):
                 continue
+            if isinstance(value, int) and value != SENSOR_UNAVAILABLE_SENTINEL:
+                return value
+            value = shadows.get(key)
             if isinstance(value, int) and value != SENSOR_UNAVAILABLE_SENTINEL:
                 return value
         return None

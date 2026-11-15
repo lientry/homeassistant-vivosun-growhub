@@ -19,6 +19,7 @@ from .models import client_model_token
 from .ports import A22_PORTS
 from .shadow import build_light_spectrum_payload
 from .vseed import STAGES, command, reported_seed, stage_name
+from .devices import MODEL_A22
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -63,7 +64,7 @@ async def async_setup_entry(
     if coordinator is None:
         return
     def factory(device: VivosunDeviceInfo) -> list[SelectEntity]:
-        if client_model_token(device.client_id) == "VSPLUGA22":
+        if client_model_token(device.client_id) == MODEL_A22:
             return [VivosunA22ModeSelect(coordinator, device.device_id, port) for port in A22_PORTS]
         if device.device_type == "curing_box":
             return [VivosunCureModeSelect(coordinator, device.device_id)]

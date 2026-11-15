@@ -24,24 +24,18 @@ from .const import (
     API_PROTOCOL_VERSION,
     API_REQUEST_TIMEOUT_SECONDS,
     APP_VERSION,
-    SENSOR_KEY_BOX_HUMI,
-    SENSOR_KEY_BOX_TEMP,
-    SENSOR_KEY_BOX_VPD,
-    SENSOR_KEY_CORE_TEMP,
-    SENSOR_KEY_INSIDE_HUMI,
-    SENSOR_KEY_INSIDE_TEMP,
-    SENSOR_KEY_INSIDE_VPD,
-    SENSOR_KEY_OUTSIDE_HUMI,
-    SENSOR_KEY_OUTSIDE_TEMP,
-    SENSOR_KEY_OUTSIDE_VPD,
-    SENSOR_KEY_PROBE_HUMI,
-    SENSOR_KEY_PROBE_TEMP,
-    SENSOR_KEY_PROBE_VPD,
-    SENSOR_KEY_RSSI,
-    SENSOR_KEY_WATER_LEVEL,
-    SENSOR_KEY_WATER_TEMP,
     SENSOR_UNAVAILABLE_SENTINEL,
     SERVER_PLATFORM,
+)
+from .devices import(
+    DEVICE_TYPE_AEROLAB,
+    DEVICE_TYPE_CAMERA,
+    DEVICE_TYPE_CONTROLLER,
+    SENSOR_KEYS_BY_DEVICE_GROUP_ID,
+    POINTLOG_KEY_MAPPING_BY_DEVICE_GROUP_ID,
+    NO_SCENE_DEVICE_TYPES,
+    NO_POINT_LOG_DEVICE_TYPES,
+    NO_MQTT_DEVICE_TYPES,
 )
 from .encryption import encrypt_request_body
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
@@ -53,7 +47,9 @@ from .models import (
     DeviceInfo,
     PlanStageInfo,
     client_model_token,
+    parent_device_id_token,
     infer_device_type,
+    synthetic_client_id,
 )
 from .redaction import redact_identifier, sanitize_mapping_for_debug
 from .support_capture import summarize_rest_telemetry
@@ -67,10 +63,6 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 _AUTH_MESSAGE_MARKERS = ("auth", "credential", "forbidden", "invalid", "login", "password", "token", "unauthorized")
 _SP_APP_ID = "com.vivosun.android"
-_NO_SCENE_DEVICE_TYPES = frozenset({"curing_box", "vseed"})
-# Port-only A10 has no built-in climate sensor, even when a scene is assigned.
-_NO_POINT_LOG_DEVICE_TYPES = frozenset({"a10"})
-
 
 class VivosunApiClient:
     """aiohttp-based REST API client for Vivosun cloud bootstrap calls."""
@@ -128,14 +120,24 @@ class VivosunApiClient:
         devices: list[DeviceInfo] = []
         self._skipped_devices = []
         self._capture_devices = []
+
+        # NOTE:
+        # Vivosun getTotalList always returns the primary controller before
+        # any attached child devices. The parsing logic below intentionally
+        # relies on that ordering to derive synthetic client_ids for devices
+        # that do not provide their own MQTT identity (e.g. THB1, GrowCam).
+        parent_device_id = ""
+        
         for category_key, category_devices in device_group.items():
             if not isinstance(category_devices, list):
                 continue
             for index, item in enumerate(category_devices):
                 device = self._expect_mapping_item(item, f"deviceGroup.{category_key}[{index}]")
-                device_info = self._parse_device_entry(device, category_key=category_key, index=index)
+                device_info = self._parse_device_entry(device, category_key=category_key, index=index, parent_device_id=parent_device_id)
                 if device_info is None:
                     continue
+                if device_info.device_type == DEVICE_TYPE_CONTROLLER and parent_device_id == "":
+                    parent_device_id = parent_device_id_token(device_info.client_id)
                 devices.append(device_info)
 
         _LOGGER.debug("Fetched %d devices", len(devices))
@@ -165,6 +167,7 @@ class VivosunApiClient:
         *,
         category_key: str,
         index: int,
+        parent_device_id: str = "",
     ) -> DeviceInfo | None:
         """Parse a device entry, skipping unsupported/non-IoT categories safely."""
         name = self._optional_str(device, "name")
@@ -175,10 +178,16 @@ class VivosunApiClient:
         device_id = self._optional_str(device, "deviceId")
         client_id = self._optional_str(device, "clientId")
         topic_prefix = self._optional_str(device, "topicPrefix")
-        device_type = infer_device_type(name, client_id or "")
+        device_group_id = self._optional_int(device, "deviceGroupId", default=0)
+        device_type = infer_device_type(name, client_id or "", device_group_id)
+        if parent_device_id != "":
+            if device_type == DEVICE_TYPE_AEROLAB:
+                client_id = synthetic_client_id("VSTHB1", parent_device_id, device_id)
+            if device_type == DEVICE_TYPE_CAMERA:
+                client_id = synthetic_client_id("VSCGCC4", parent_device_id, device_id)
         scene_id = self._optional_scene_id(device)
-        supports_point_log = device_type not in _NO_POINT_LOG_DEVICE_TYPES and (
-            scene_id is not None or device_type in _NO_SCENE_DEVICE_TYPES
+        supports_point_log = device_type not in NO_POINT_LOG_DEVICE_TYPES and (
+            scene_id is not None or device_type in NO_SCENE_DEVICE_TYPES
         )
         camera_username, camera_password = self._extract_camera_credentials(device)
 
@@ -193,23 +202,23 @@ class VivosunApiClient:
                 topic_prefix = None
 
         if device_type == "unknown" and (camera_username is not None or camera_password is not None):
-            device_type = "camera"
+            device_type = DEVICE_TYPE_CAMERA
 
         missing_fields: list[str] = []
         if device_id is None:
             missing_fields.append("deviceId")
         if (
             scene_id is None
-            and device_type not in _NO_SCENE_DEVICE_TYPES | _NO_POINT_LOG_DEVICE_TYPES
-            and device_type != "camera"
+            and device_type not in NO_SCENE_DEVICE_TYPES | NO_POINT_LOG_DEVICE_TYPES
+            and device_type != DEVICE_TYPE_CAMERA
         ):
             missing_fields.append("sceneId")
-        if device_type != "camera":
+        if device_type not in (DEVICE_TYPE_CAMERA, DEVICE_TYPE_AEROLAB):
             if client_id is None:
                 missing_fields.append("clientId")
             if topic_prefix is None:
                 missing_fields.append("topicPrefix")
-        if device_type != "camera" and client_id and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", client_id):
+        if device_type != DEVICE_TYPE_CAMERA and device_type not in NO_MQTT_DEVICE_TYPES and client_id and re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", client_id):
             safe_prefix = topic_prefix or ""
             if any(char in safe_prefix for char in ("+", "#", "\x00")) or len(safe_prefix) > 512:
                 safe_prefix = ""
@@ -234,12 +243,14 @@ class VivosunApiClient:
 
         return DeviceInfo(
             device_id=device_id or "",
+            parent_device_id=parent_device_id or "",
             client_id=client_id or "",
             topic_prefix=topic_prefix or "",
             name=name,
             online=self._optional_int(device, "onlineStatus", default=0) == 1,
             scene_id=scene_id or 0,
             device_type=device_type,
+            device_group_id=device_group_id,
             camera_username=camera_username,
             camera_password=camera_password,
             supports_point_log=supports_point_log,
@@ -279,8 +290,10 @@ class VivosunApiClient:
     ) -> None:
         """Record and log a skipped getTotalList entry for diagnostics."""
         client_id = self._optional_str(device, "clientId") or ""
+        device_group_id = self._optional_int(device, "deviceGroupId", default=0)
         self._skipped_devices.append(
             {
+                "device_group_id": device_group_id,
                 "device_group": category_key,
                 "index": index,
                 "available_keys": sorted(str(key) for key in device),
@@ -378,25 +391,10 @@ class VivosunApiClient:
             # the controller's inside/outside channels.
             return parse_point_log(list(entries), now=end_time)
         snapshot: dict[str, int | None] = {}
-        for key in (
-            SENSOR_KEY_INSIDE_TEMP,
-            SENSOR_KEY_INSIDE_HUMI,
-            SENSOR_KEY_INSIDE_VPD,
-            SENSOR_KEY_OUTSIDE_TEMP,
-            SENSOR_KEY_OUTSIDE_HUMI,
-            SENSOR_KEY_OUTSIDE_VPD,
-            SENSOR_KEY_BOX_TEMP,
-            SENSOR_KEY_BOX_HUMI,
-            SENSOR_KEY_BOX_VPD,
-            SENSOR_KEY_PROBE_TEMP,
-            SENSOR_KEY_PROBE_HUMI,
-            SENSOR_KEY_PROBE_VPD,
-            SENSOR_KEY_WATER_LEVEL,
-            SENSOR_KEY_WATER_TEMP,
-            SENSOR_KEY_CORE_TEMP,
-            SENSOR_KEY_RSSI,
-        ):
-            snapshot[key] = self._optional_sensor_int(latest, key)
+        keys = SENSOR_KEYS_BY_DEVICE_GROUP_ID.get(device.device_group_id, frozenset())
+        mapping = POINTLOG_KEY_MAPPING_BY_DEVICE_GROUP_ID.get(device.device_group_id, {})
+        for key in keys:
+            snapshot[key] = self._optional_sensor_int(latest, mapping.get(key, key))
         return snapshot
 
     async def get_plan_stage_info(self, tokens: AuthTokens, stage_id: str) -> PlanStageInfo | None:

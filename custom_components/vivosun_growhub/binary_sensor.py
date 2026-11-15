@@ -6,11 +6,13 @@ from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.entity import EntityCategory
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, shadow_slice
+from .devices import VSTHB1
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -46,6 +48,7 @@ class VivosunConnectionBinarySensorEntity(CoordinatorEntity[VivosunCoordinator],
     _attr_has_entity_name = True
     _attr_name = "Connected"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: VivosunCoordinator, device_id: str) -> None:
         """Initialize the connectivity entity."""
@@ -67,7 +70,13 @@ class VivosunConnectionBinarySensorEntity(CoordinatorEntity[VivosunCoordinator],
     def is_on(self) -> bool | None:
         """Return True when the device reports connected, False when disconnected."""
         connection = shadow_slice(self.coordinator, self._device_id, "connection")
+        device = self.coordinator.get_device(self._device_id)
+        if device is None:
+            device = self.coordinator.device
+
         if not connection:
+            if device.device_group_id == VSTHB1: 
+                return True
             return None
         connected = connection.get("connected")
         if isinstance(connected, bool):
