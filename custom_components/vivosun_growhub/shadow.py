@@ -84,7 +84,7 @@ _SUPPORTED_REPORTED_ROOT_KEYS: frozenset[str] = frozenset(
         "sgsdDev",
         "sgseDev",
         "sgslDev",
-        "rssi",  
+        "rssi",
     }
 )
 
@@ -603,7 +603,20 @@ def _extract_reported(document: dict[str, object]) -> dict[str, object]:
             # Preserve legacy desired-only startup state for other channels.
             # Duct fan output/mode, VSeed and physical ports need real reports.
             return {key: value for key, value in desired.items()
-                    if key not in ("dFan", "seed", "usb1", "usb2", "plug1", "plug2")}
+                        if key not in (
+                            "dFan",
+                            "seed",
+                            "usb1",
+                            "usb2",
+                            "plug1",
+                            "plug2",
+                            "sgsaDev",
+                            "sgsbDev",
+                            "sgscDev",
+                            "sgsdDev",
+                            "sgseDev",
+                            "sgslDev",
+                        )}
 
     raise ShadowParseError("Shadow payload does not include state.reported or state.desired")
 

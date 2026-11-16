@@ -59,8 +59,6 @@ class DeviceInfo:
     """Device entry parsed from getTotalList endpoint."""
 
     device_id: str
-    parent_device_id: str
-    device_group_id: int
     client_id: str
     topic_prefix: str
     name: str
@@ -70,6 +68,9 @@ class DeviceInfo:
     camera_username: str | None = None
     camera_password: str | None = None
     supports_point_log: bool = True
+    device_group_id: int = 0
+    parent_device_id: str = ""
+    hw_id: str = ""
 
 def synthetic_client_id(
     model: str,

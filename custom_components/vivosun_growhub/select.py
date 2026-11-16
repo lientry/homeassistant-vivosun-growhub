@@ -13,13 +13,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, OPTION_SPECTRUM_CONTROLLERS
 from .coordinator import VivosunCoordinator
+from .devices import MODEL_A22
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
 from .ports import A22_PORTS
 from .shadow import build_light_spectrum_payload
 from .vseed import STAGES, command, reported_seed, stage_name
-from .devices import MODEL_A22
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry

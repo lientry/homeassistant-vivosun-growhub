@@ -49,7 +49,6 @@ from .devices import(
     DEVICE_TYPE_CAMERA,
     MODEL_E42A,
     MODEL_E25,
-    MODEL_A10,
     MODEL_A22,
 )
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
@@ -1545,6 +1544,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._camera_devices = [device for device in all_devices if device.device_type == DEVICE_TYPE_CAMERA]
         self._devices = self._select_devices(all_devices)
         self._build_topic_maps()
+        mqtt_devices = [d for d in self._devices if d.device_type not in NO_MQTT_DEVICE_TYPES]
+        if not mqtt_devices:
+            self._logger.info("Only non-MQTT devices discovered; skipping MQTT bootstrap")
+            return
         if not self._devices:
             self._logger.info("No entity-capable MQTT devices; retaining discovery diagnostics without MQTT setup")
             return
@@ -1747,7 +1750,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         for device in devices:
             if device.device_type == DEVICE_TYPE_CAMERA:
                 cameras[device.device_id] = device
-            elif device.client_id:
+            elif (
+                device.client_id
+                and device.device_type not in NO_MQTT_DEVICE_TYPES
+            ):
                 mqtt_devices[device.device_id] = device
 
         # A disappeared device is retained, so validate the resulting routes, not
@@ -1952,7 +1958,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
 
         for device in self._devices:
             if device.device_type in NO_MQTT_DEVICE_TYPES:
-                continue  
+                continue
             await self._async_request_shadow_refresh(device.device_id)
 
     async def _subscribe_device(

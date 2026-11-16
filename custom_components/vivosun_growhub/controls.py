@@ -6,10 +6,8 @@ from typing import TYPE_CHECKING, Literal
 
 from homeassistant.exceptions import ServiceValidationError
 
+from .devices import DEVICE_TYPE_CONTROLLER
 from .models import client_model_token
-from .devices import (
-    DEVICE_TYPE_CONTROLLER,
-)
 
 if TYPE_CHECKING:
     from .coordinator import VivosunCoordinator

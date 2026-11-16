@@ -11,12 +11,12 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
+from .devices import MODEL_A10, MODEL_A22
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
 from .ports import PORTS_BY_MODEL, PortReport, build_manual_port_payload, reported_port
 from .vseed import STAGES, command, reported_seed
-from .devices import MODEL_A10, MODEL_A22
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry

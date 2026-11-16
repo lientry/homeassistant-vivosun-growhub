@@ -30,8 +30,9 @@ from .const import (
     TEMP_SCALE_FACTOR,
     WATER_LEVEL_SCALE_FACTOR,
 )
-from .devices import(
+from .devices import (
     SENSOR_KEYS_BY_DEVICE_GROUP_ID,
+    DEVICE_PORTS_BY_MODEL,
     SENSOR_KEY_INSIDE_TEMP,
     SENSOR_KEY_INSIDE_HUMI,
     SENSOR_KEY_INSIDE_VPD,
@@ -62,7 +63,6 @@ from .models import client_model_token
 from .shadow import cfan_shadow_to_percentage, dfan_shadow_to_percentage
 from .vseed import reported_seed
 from .ports import PORT_DEVICE_NAMES, PORT_DEVICE_TYPES, PORT_OPTION, PORT_OPTION_TYPES, SHADOW_KEY_PORT_MOD
-from .devices import DEVICE_PORTS_BY_MODEL
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -231,6 +231,7 @@ _ALL_SENSOR_DESCRIPTIONS: tuple[VivosunSensorDescription, ...] = (
         key="bt_signal",
         name="Bluetooth Signal",
         channel_key=SENSOR_KEY_BRSSI,
+        channel_key_aliases=(SENSOR_KEY_RSSI,),
         quantity="signal_strength",
         icon="mdi:bluetooth",
         device_class=SensorDeviceClass.SIGNAL_STRENGTH,

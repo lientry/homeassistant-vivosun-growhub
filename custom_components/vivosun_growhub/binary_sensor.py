@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
+from collections.abc import Mapping
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -10,9 +11,9 @@ from homeassistant.helpers.entity import EntityCategory
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
+from .devices import DEVICE_TYPE_CONTROLLER, VSTHB1
 from .discovery import watch_devices
-from .entity_helpers import build_device_info, shadow_slice
-from .devices import VSTHB1
+from .entity_helpers import build_device_info, shadow_slice, shadow_reported
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -75,8 +76,31 @@ class VivosunConnectionBinarySensorEntity(CoordinatorEntity[VivosunCoordinator],
             device = self.coordinator.device
 
         if not connection:
-            if device.device_group_id == VSTHB1: 
-                return True
+            if device.device_group_id == VSTHB1:
+                if not device.hw_id:
+                    return None
+
+                for controller in self.coordinator.devices:
+                    if controller.device_type != DEVICE_TYPE_CONTROLLER:
+                        continue
+
+                    reported = shadow_reported(
+                        self.coordinator,
+                        controller.device_id,
+                    )
+
+                    bt_dev = reported.get("btDev")
+                    if not isinstance(bt_dev, Mapping):
+                        continue
+
+                    sns_th = bt_dev.get("snsTH")
+                    if not isinstance(sns_th, list):
+                        continue
+
+                    if device.hw_id in sns_th:
+                        return True
+
+                return False
             return None
         connected = connection.get("connected")
         if isinstance(connected, bool):

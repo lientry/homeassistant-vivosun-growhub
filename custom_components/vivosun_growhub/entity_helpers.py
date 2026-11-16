@@ -77,11 +77,10 @@ def shadow_slice(coordinator: VivosunCoordinator, device_id: str, key: str) -> M
 
     return cast("Mapping[str, object]", value)
 
-def shadow_reported(
-    coordinator: VivosunCoordinator,
-    device_id: str,
-) -> dict[str, object]:
+
+def shadow_reported(coordinator: VivosunCoordinator, device_id: str) -> Mapping[str, object]:
     return shadow_slice(coordinator, device_id, "reported_supported")
+
 
 def sensor_slice(coordinator: VivosunCoordinator, device_id: str) -> Mapping[str, object]:
     """Extract sensor state for a specific device."""

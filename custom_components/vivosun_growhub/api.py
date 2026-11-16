@@ -32,6 +32,7 @@ from .devices import(
     DEVICE_TYPE_CAMERA,
     DEVICE_TYPE_CONTROLLER,
     SENSOR_KEYS_BY_DEVICE_GROUP_ID,
+    LEGACY_SENSOR_KEYS_BY_DEVICE_TYPE,
     POINTLOG_KEY_MAPPING_BY_DEVICE_GROUP_ID,
     NO_SCENE_DEVICE_TYPES,
     NO_POINT_LOG_DEVICE_TYPES,
@@ -176,6 +177,7 @@ class VivosunApiClient:
             return None
 
         device_id = self._optional_str(device, "deviceId")
+        hw_id = self._optional_str(device, "hwId")
         client_id = self._optional_str(device, "clientId")
         topic_prefix = self._optional_str(device, "topicPrefix")
         device_group_id = self._optional_int(device, "deviceGroupId", default=0)
@@ -243,17 +245,18 @@ class VivosunApiClient:
 
         return DeviceInfo(
             device_id=device_id or "",
-            parent_device_id=parent_device_id or "",
             client_id=client_id or "",
             topic_prefix=topic_prefix or "",
             name=name,
             online=self._optional_int(device, "onlineStatus", default=0) == 1,
             scene_id=scene_id or 0,
             device_type=device_type,
-            device_group_id=device_group_id,
             camera_username=camera_username,
             camera_password=camera_password,
             supports_point_log=supports_point_log,
+            device_group_id=device_group_id,
+            parent_device_id=parent_device_id or "",
+            hw_id=hw_id or "",
         )
 
     def _extract_camera_credentials(self, device: Mapping[str, object]) -> tuple[str | None, str | None]:
@@ -391,7 +394,17 @@ class VivosunApiClient:
             # the controller's inside/outside channels.
             return parse_point_log(list(entries), now=end_time)
         snapshot: dict[str, int | None] = {}
-        keys = SENSOR_KEYS_BY_DEVICE_GROUP_ID.get(device.device_group_id, frozenset())
+        keys = SENSOR_KEYS_BY_DEVICE_GROUP_ID.get(device.device_group_id)
+        if keys is None:
+            _LOGGER.warning(
+                "Unsupported deviceGroupId=%s for %s",
+                device.device_group_id,
+                device.device_id,
+            )
+            keys = LEGACY_SENSOR_KEYS_BY_DEVICE_TYPE.get(
+                device.device_type,
+                frozenset(),
+            )
         mapping = POINTLOG_KEY_MAPPING_BY_DEVICE_GROUP_ID.get(device.device_group_id, {})
         for key in keys:
             snapshot[key] = self._optional_sensor_int(latest, mapping.get(key, key))

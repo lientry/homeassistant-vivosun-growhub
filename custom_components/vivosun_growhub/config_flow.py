@@ -24,9 +24,9 @@ from .const import (
     OPTION_SPECTRUM_CONTROLLERS,
     OPTION_SUPPORT_CAPTURE_ENABLED,
 )
+from .devices import DEVICE_TYPE_CAMERA, DEVICE_TYPE_CONTROLLER
 from .exceptions import VivosunAuthError, VivosunConnectionError, VivosunResponseError
 from .models import DeviceInfo
-from .devices import DEVICE_TYPE_CONTROLLER, DEVICE_TYPE_CAMERA
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

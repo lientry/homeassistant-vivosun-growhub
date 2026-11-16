@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 from homeassistant.core import callback
 from homeassistant.helpers.event import async_call_later
 
-from .models import client_model_token
 from .devices import MODEL_E25
+from .models import client_model_token
 
 if TYPE_CHECKING:
     import asyncio
