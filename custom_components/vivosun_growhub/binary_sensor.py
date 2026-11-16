@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
 from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -79,27 +79,28 @@ class VivosunConnectionBinarySensorEntity(CoordinatorEntity[VivosunCoordinator],
             if device.device_group_id == VSTHB1:
                 if not device.hw_id:
                     return None
-
                 for controller in self.coordinator.devices:
                     if controller.device_type != DEVICE_TYPE_CONTROLLER:
                         continue
-
                     reported = shadow_reported(
                         self.coordinator,
                         controller.device_id,
                     )
-
                     bt_dev = reported.get("btDev")
                     if not isinstance(bt_dev, Mapping):
                         continue
-
                     sns_th = bt_dev.get("snsTH")
                     if not isinstance(sns_th, list):
                         continue
-
+                    connection = shadow_slice(
+                        self.coordinator,
+                        controller.device_id,
+                        "connection",
+                    )
+                    if connection.get("connected") is not True:
+                        continue
                     if device.hw_id in sns_th:
                         return True
-
                 return False
             return None
         connected = connection.get("connected")
