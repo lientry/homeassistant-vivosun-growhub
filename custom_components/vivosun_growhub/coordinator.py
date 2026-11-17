@@ -1544,12 +1544,12 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         self._camera_devices = [device for device in all_devices if device.device_type == DEVICE_TYPE_CAMERA]
         self._devices = self._select_devices(all_devices)
         self._build_topic_maps()
-        mqtt_devices = [d for d in self._devices if d.device_type not in NO_MQTT_DEVICE_TYPES]
+        if not self._devices:
+            self._logger.info("No supported devices discovered; retaining discovery diagnostics without MQTT setup")
+            return
+        mqtt_devices = [d for d in self._devices if d.supports_mqtt]
         if not mqtt_devices:
             self._logger.info("Only non-MQTT devices discovered; skipping MQTT bootstrap")
-            return
-        if not self._devices:
-            self._logger.info("No entity-capable MQTT devices; retaining discovery diagnostics without MQTT setup")
             return
         self._aws_identity = await self._api.get_aws_identity(self._tokens)
         self._aws_credentials = await self._aws_auth.get_credentials_for_identity(self._aws_identity)
@@ -1750,12 +1750,10 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
         for device in devices:
             if device.device_type == DEVICE_TYPE_CAMERA:
                 cameras[device.device_id] = device
-            elif (
-                device.client_id
-                and device.device_type not in NO_MQTT_DEVICE_TYPES
-            ):
+            elif device.client_id and device.supports_mqtt:
                 mqtt_devices[device.device_id] = device
 
+        has_mqtt_devices = bool(mqtt_devices)
         # A disappeared device is retained, so validate the resulting routes, not
         # only the latest cloud list. Never let a new ID steal a live thing/topic.
         self._validate_runtime_routes(mqtt_devices, cameras)
@@ -1819,7 +1817,7 @@ class VivosunCoordinator(DataUpdateCoordinator[dict[str, object]]):  # type: ign
                         await self._async_request_shadow_refresh(device.device_id)
                     except (MQTTError, TimeoutError):
                         self._logger.warning("Initial shadow read unavailable for newly discovered device")
-        elif self._devices and self._started:
+        elif has_mqtt_devices and self._started:
             # Camera-only bootstraps must be able to discover a controller later.
             if self._reconnect_task is None:
                 self._refresh_task = asyncio.create_task(self._credentials_refresh_loop())

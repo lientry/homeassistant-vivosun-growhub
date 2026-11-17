@@ -71,6 +71,7 @@ class DeviceInfo:
     device_group_id: int = 0
     parent_device_id: str = ""
     hw_id: str = ""
+    supports_mqtt: bool = True
 
 def synthetic_client_id(
     model: str,

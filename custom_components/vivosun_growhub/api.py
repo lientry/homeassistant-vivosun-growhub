@@ -181,6 +181,15 @@ class VivosunApiClient:
         client_id = self._optional_str(device, "clientId")
         topic_prefix = self._optional_str(device, "topicPrefix")
         device_group_id = self._optional_int(device, "deviceGroupId", default=0)
+        if device_group_id == 0:
+            self._track_skipped_device(
+                device,
+                category_key=category_key,
+                index=index,
+                missing_fields=("device_group_id",),
+            )
+            return None
+
         device_type = infer_device_type(name, client_id or "", device_group_id)
         if parent_device_id != "":
             if device_type == DEVICE_TYPE_AEROLAB:
@@ -191,6 +200,7 @@ class VivosunApiClient:
         supports_point_log = device_type not in NO_POINT_LOG_DEVICE_TYPES and (
             scene_id is not None or device_type in NO_SCENE_DEVICE_TYPES
         )
+        supports_mqtt = device_type not in NO_MQTT_DEVICE_TYPES
         camera_username, camera_password = self._extract_camera_credentials(device)
 
         if device_type == "vseed":
@@ -257,6 +267,7 @@ class VivosunApiClient:
             device_group_id=device_group_id,
             parent_device_id=parent_device_id or "",
             hw_id=hw_id or "",
+            supports_mqtt=supports_mqtt,
         )
 
     def _extract_camera_credentials(self, device: Mapping[str, object]) -> tuple[str | None, str | None]:
