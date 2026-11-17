@@ -11,6 +11,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import VivosunCoordinator
+from .devices import MODEL_A22
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available
 from .models import client_model_token
@@ -46,7 +47,7 @@ async def async_setup_entry(
         if device.device_type == "vseed":
             return [VivosunSeedSettingNumber(coordinator, device.device_id, phase, key)
                     for phase in (1, 2, 3) for key in _SETTINGS]
-        if client_model_token(device.client_id) == "VSPLUGA22":
+        if client_model_token(device.client_id) == MODEL_A22:
             return [VivosunA22Number(coordinator, device.device_id, port, field)
                     for port in A22_PORTS
                     for field in ("onDur", "offDur", "tMin", "tMax", "hMin", "hMax")]

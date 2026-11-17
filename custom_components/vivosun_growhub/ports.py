@@ -4,12 +4,43 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from .devices import MODEL_A10, MODEL_A22
 
 A10_PORTS = ("plug1",)
 A22_PORTS = ("usb1", "usb2", "plug1", "plug2")
 VGROW_PORTS = ("usb1", "usb2")
-PORTS_BY_MODEL = {"VSPLUGA10": A10_PORTS, "VSPLUGA22": A22_PORTS, "VSCTLY18": VGROW_PORTS}
+PORTS_BY_MODEL = {MODEL_A10: A10_PORTS, MODEL_A22: A22_PORTS, "VSCTLY18": VGROW_PORTS}
 
+PORT_DEVICE_NAMES: dict[str, str] = {
+    "sgsaDev": "USB A",
+    "sgsbDev": "USB B",
+    "sgscDev": "USB C",
+    "sgsdDev": "USB D",
+    "sgseDev": "USB E",
+    "sgslDev": "USB Light",
+    "ctrlTyp": "USB Port",
+    "usb1" : "USB 1",
+    "usb2" : "USB 2",
+    "plug1" : "Plug 1",
+    "plug2" : "Plug 2",
+}
+
+PORT_OPTION = 1
+SHADOW_KEY_PORT_MOD = 'portMod'
+PORT_OPTION_TYPES: dict[int, str] = {
+    0: "AeroZesh",
+    1: "AeroWave",
+}
+
+PORT_DEVICE_TYPES: dict[int, str] = {
+    0: "Not Connected",
+    PORT_OPTION: "AeroZesh / AeroWave",
+    2: "AeroLight",
+    4: "4",
+    5: "AeroZesh",
+    11: "AeroWave",
+    12: "12",
+}
 
 @dataclass(frozen=True)
 class PortReport:

@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, OPTION_SPECTRUM_CONTROLLERS
 from .coordinator import VivosunCoordinator
+from .devices import MODEL_A22
 from .discovery import watch_devices
 from .entity_helpers import build_device_info, is_entity_available, shadow_slice
 from .models import client_model_token
@@ -63,7 +64,7 @@ async def async_setup_entry(
     if coordinator is None:
         return
     def factory(device: VivosunDeviceInfo) -> list[SelectEntity]:
-        if client_model_token(device.client_id) == "VSPLUGA22":
+        if client_model_token(device.client_id) == MODEL_A22:
             return [VivosunA22ModeSelect(coordinator, device.device_id, port) for port in A22_PORTS]
         if device.device_type == "curing_box":
             return [VivosunCureModeSelect(coordinator, device.device_id)]

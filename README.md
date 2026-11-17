@@ -28,8 +28,10 @@ Each garden in the Vivosun app appears as a native Home Assistant service device
 
 | Device | Controls | Sensors |
 | --- | --- | --- |
-| GrowHub E42, E42A, E42A+, E25 | Grow light brightness, circulation and duct fans, fan presets, spectrum, oscillation | Temperature, humidity, VPD and connection |
+| GrowHub E42, E42A, E25 | Grow light brightness, circulation and duct fans, fan presets, spectrum, oscillation | Temperature, humidity, VPD and connection |
+| GrowHub E42A+ | Grow light brightness, circulation and duct fans, fan presets, spectrum, oscillation | Temperature, humidity, VPD, CO₂, Light and connection |
 | GrowHub A10 | One AC outlet | Connection |
+| AeroLab THB1 | None | Temperature, humidity, VPD, battery and Bluetooth signal strength |
 | GrowHub A22 | Two USB and two AC outputs with Manual, Cycle and temperature/humidity Auto settings | Probe temperature, humidity and VPD |
 | VGrow | Grow light, fans, spectrum and two USB outputs | Temperature, humidity, VPD, DWC water level and temperature |
 | VSeed S40 | Growth stage, Quick Irrigation, stage temperature, humidity, light and irrigation settings | Root and dome temperature, dome humidity, VPD and current light intensity |

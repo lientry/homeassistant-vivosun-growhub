@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 from homeassistant.exceptions import ServiceValidationError
 
+from .devices import DEVICE_TYPE_CONTROLLER
 from .models import client_model_token
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ E25_TERMINALS: dict[int, frozenset[Control]] = {
 
 def selected_controls(device: DeviceInfo, selection: int | None) -> frozenset[Control]:
     """Keep other controller models' existing controls; E25 needs reported proof."""
-    if device.device_type != "controller":
+    if device.device_type != DEVICE_TYPE_CONTROLLER:
         return frozenset()
     if client_model_token(device.client_id) == "VSCTL002":
         return E25_TERMINALS.get(selection, frozenset()) if type(selection) is int else frozenset()
@@ -34,7 +35,7 @@ def selected_controls(device: DeviceInfo, selection: int | None) -> frozenset[Co
 def control_is_selected(coordinator: VivosunCoordinator, device_id: str, control: Control) -> bool:
     """Retain other controllers' behavior while gating exact E25 terminals."""
     device = coordinator.get_device(device_id)
-    if device is None or device.device_type != "controller":
+    if device is None or device.device_type != DEVICE_TYPE_CONTROLLER:
         return False
     if client_model_token(device.client_id) != "VSCTL002":
         return True

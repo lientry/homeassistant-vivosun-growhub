@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from homeassistant.core import callback
 from homeassistant.helpers.event import async_call_later
 
+from .devices import MODEL_E25
 from .models import client_model_token
 
 if TYPE_CHECKING:
@@ -129,7 +130,7 @@ def watch_devices(
         if unloaded:
             return
         for device in devices:
-            if control_platform is not None and client_model_token(device.client_id) == "VSCTL002":
+            if control_platform is not None and client_model_token(device.client_id) == MODEL_E25:
                 retry_e25.pop(device.device_id, None)
                 retry_counts.pop(device.device_id, None)
                 pending_e25[device.device_id] = device
